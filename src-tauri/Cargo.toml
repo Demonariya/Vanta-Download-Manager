@@ -1,0 +1,33 @@
+[package]
+name = "vanta-download-manager"
+version = "1.0.0"
+description = "VANTA Download Manager - High-concurrency video and music workstation"
+authors = ["VANTA Core Engineering"]
+edition = "2021"
+
+[lib]
+name = "vanta_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "vanta"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = []
+desktop = ["dep:tauri", "dep:tauri-plugin-shell"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+tauri = { version = "2.0.0", optional = true }
+tauri-plugin-shell = { version = "2.0.0", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
