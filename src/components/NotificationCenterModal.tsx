@@ -39,8 +39,8 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-md bg-[#12151a] border border-[#30363d] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs select-none">
+      <div className="relative w-[calc(100vw-1.5rem)] max-w-md bg-[#12151a] border border-[#30363d] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#21262d] bg-[#0d1117]">
           <div className="flex items-center gap-2">

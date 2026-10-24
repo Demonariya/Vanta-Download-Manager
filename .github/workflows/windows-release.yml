@@ -47,13 +47,15 @@ jobs:
       - name: Install Node Dependencies
         shell: pwsh
         run: |
+          Write-Host "Installing dependencies natively for Windows (resolving platform-specific native bindings)..."
+          # Fix for npm issue #4828: cross-platform lockfile causes missing optional native binaries on Windows
           if (Test-Path "package-lock.json") {
-            Write-Host "Installing dependencies with npm ci..."
-            npm ci
-          } else {
-            Write-Host "package-lock.json not found, installing with npm install..."
-            npm install --legacy-peer-deps
+            Remove-Item -Force "package-lock.json"
           }
+          npm install --include=optional
+
+          Write-Host "Explicitly ensuring Windows Rolldown native binding is present..."
+          npm install --no-save @rolldown/binding-win32-x64-msvc
 
       - name: Build Web Application
         run: npm run build

@@ -37,7 +37,7 @@ export const FloatingProgressDock: React.FC<FloatingProgressDockProps> = ({
   if (activeTasks.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-80 md:w-96 z-40 select-none shadow-2xl transition-all">
+    <div className="fixed bottom-3 right-3 left-3 sm:left-auto sm:right-4 sm:bottom-4 sm:w-80 md:w-96 z-40 select-none shadow-2xl transition-all">
       <div className="rounded-xl border border-[#30363d] bg-[#12151a]/95 backdrop-blur-md overflow-hidden">
         {/* Dock Header */}
         <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#0d1117] border-b border-[#21262d]">
@@ -62,7 +62,7 @@ export const FloatingProgressDock: React.FC<FloatingProgressDockProps> = ({
 
         {/* Collapsible Body */}
         {isExpanded && (
-          <div className="p-3 space-y-2.5 max-h-72 overflow-y-auto">
+          <div className="p-3 space-y-2.5 max-h-56 sm:max-h-72 overflow-y-auto">
             {activeTasks.slice(0, 4).map((task) => (
               <div
                 key={task.id}

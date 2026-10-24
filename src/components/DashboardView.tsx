@@ -83,14 +83,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* KPI Real Data Metric Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* Metric 1: Aggregate Speed */}
-        <div className="p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
           <div className="flex items-center justify-between text-xs text-[#8b949e]">
             <span>Current Speed</span>
             <Activity className="w-4 h-4 text-[#58a6ff]" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
             {formattedSpeed}
           </div>
           <div className="mt-1 text-[11px] text-[#7d8590]">
@@ -99,12 +99,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Metric 2: Total Downloaded */}
-        <div className="p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
           <div className="flex items-center justify-between text-xs text-[#8b949e]">
             <span>Total Downloaded</span>
             <ArrowDownCircle className="w-4 h-4 text-[#3fb950]" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
             {formatBytes(totalBytesDownloaded)}
           </div>
           <div className="mt-1 text-[11px] text-[#7d8590]">
@@ -113,12 +113,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Metric 3: Queued & Pending */}
-        <div className="p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
           <div className="flex items-center justify-between text-xs text-[#8b949e]">
             <span>In Queue</span>
             <RefreshCw className="w-4 h-4 text-[#d29922]" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
             {queuedTasks.length}
           </div>
           <div className="mt-1 text-[11px] text-[#7d8590]">
@@ -127,12 +127,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Metric 4: Failed / Errors */}
-        <div className="p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
           <div className="flex items-center justify-between text-xs text-[#8b949e]">
             <span>Failed Tasks</span>
             <AlertCircle className="w-4 h-4 text-[#f85149]" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
             {failedTasks.length}
           </div>
           <div className="mt-1 text-[11px] text-[#7d8590]">

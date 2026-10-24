@@ -33,6 +33,7 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
     () => typeof window !== 'undefined' && window.innerWidth < 1024
   );
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Modals
   const [isNewDownloadOpen, setIsNewDownloadOpen] = useState(false);
@@ -151,6 +152,8 @@ export default function App() {
         activeCount={activeCount}
         isCollapsed={isSidebarCollapsed}
         setIsCollapsed={setIsSidebarCollapsed}
+        isMobileOpen={isMobileMenuOpen}
+        setIsMobileOpen={setIsMobileMenuOpen}
       />
 
       {/* Main Content Viewport */}
@@ -170,10 +173,11 @@ export default function App() {
           onResumeAll={handleResumeAll}
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
+          onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
         />
 
         {/* View Content Area */}
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-5 md:p-6">
           {activeTab === 'dashboard' && (
             <DashboardView
               tasks={tasks}

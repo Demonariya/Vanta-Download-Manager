@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  X,
 } from 'lucide-react';
 import { EngineStatusMap } from '../types';
 
@@ -35,6 +36,8 @@ interface SidebarProps {
   activeCount: number;
   isCollapsed: boolean;
   setIsCollapsed: (collapsed: boolean) => void;
+  isMobileOpen: boolean;
+  setIsMobileOpen: (open: boolean) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -45,6 +48,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeCount,
   isCollapsed,
   setIsCollapsed,
+  isMobileOpen,
+  setIsMobileOpen,
 }) => {
   const navItems = [
     { id: 'dashboard' as ActiveTab, label: 'Dashboard', icon: LayoutDashboard },
@@ -68,12 +73,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
     engineStatus.spotdl.available &&
     engineStatus.ffmpeg.available;
 
-  return (
-    <aside
-      className={`relative flex flex-col justify-between border-r border-[#21262d] bg-[#0d1117] transition-all duration-200 select-none ${
-        isCollapsed ? 'w-16' : 'w-64 md:w-64'
-      } shrink-0 h-screen overflow-y-auto`}
-    >
+  const handleNavClick = (id: ActiveTab) => {
+    setActiveTab(id);
+    setIsMobileOpen(false);
+  };
+
+  const renderNavContent = (isDrawer = false) => (
+    <div className="flex flex-col justify-between h-full">
       <div>
         {/* Brand header */}
         <div className="flex items-center justify-between px-4 py-4 border-b border-[#21262d]">
@@ -81,31 +87,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#1f6feb] text-white shrink-0 shadow-sm">
               <Download className="w-4 h-4" />
             </div>
-            {!isCollapsed && (
+            {(!isCollapsed || isDrawer) && (
               <div className="truncate">
                 <span className="font-semibold text-sm tracking-tight text-white block">VANTA</span>
                 <span className="text-[11px] text-[#8b949e] block font-mono">Download Manager</span>
               </div>
             )}
           </div>
-          <button
-            onClick={() => setIsCollapsed(!isCollapsed)}
-            aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            className="p-1 text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22] rounded transition-colors"
-          >
-            {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-          </button>
+          {isDrawer ? (
+            <button
+              onClick={() => setIsMobileOpen(false)}
+              aria-label="Close navigation drawer"
+              className="p-1.5 text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22] rounded-lg transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsCollapsed(!isCollapsed)}
+              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="p-1 text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22] rounded transition-colors hidden md:block"
+            >
+              {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+            </button>
+          )}
         </div>
 
         {/* Primary New Download CTA */}
         <div className="p-3">
           <button
-            onClick={onOpenNewDownload}
+            onClick={() => {
+              onOpenNewDownload();
+              if (isDrawer) setIsMobileOpen(false);
+            }}
             aria-label="New Download"
             className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-[#238636] hover:bg-[#2ea043] text-white rounded-lg text-xs font-medium transition-all shadow-sm active:scale-[0.98]"
           >
             <PlusCircle className="w-4 h-4 shrink-0" />
-            {!isCollapsed && <span className="whitespace-nowrap">New Download</span>}
+            {(!isCollapsed || isDrawer) && <span className="whitespace-nowrap">New Download</span>}
           </button>
         </div>
 
@@ -117,7 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             return (
               <button
                 key={item.id}
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => handleNavClick(item.id)}
                 aria-label={item.label}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
                   isActive
@@ -126,10 +145,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }`}
               >
                 <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#58a6ff]' : ''}`} />
-                {!isCollapsed && (
+                {(!isCollapsed || isDrawer) && (
                   <span className="truncate flex-1 text-left whitespace-nowrap">{item.label}</span>
                 )}
-                {!isCollapsed && item.badge !== undefined && (
+                {(!isCollapsed || isDrawer) && item.badge !== undefined && (
                   <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-[#1f6feb] text-white">
                     {item.badge}
                   </span>
@@ -142,7 +161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Engine health summary footer */}
       <div className="p-3 border-t border-[#21262d] bg-[#0b0e14]">
-        {!isCollapsed ? (
+        {!isCollapsed || isDrawer ? (
           <div className="space-y-2">
             <div className="flex items-center justify-between text-[11px] text-[#8b949e]">
               <span className="font-medium text-[#c9d1d9]">Engine Status</span>
@@ -191,6 +210,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
       </div>
-    </aside>
+    </div>
+  );
+
+  return (
+    <>
+      {/* Desktop Persistent Sidebar */}
+      <aside
+        className={`relative hidden md:flex flex-col justify-between border-r border-[#21262d] bg-[#0d1117] transition-all duration-200 select-none ${
+          isCollapsed ? 'w-16' : 'w-64'
+        } shrink-0 h-screen overflow-y-auto`}
+      >
+        {renderNavContent(false)}
+      </aside>
+
+      {/* Mobile Backdrop & Drawer */}
+      {isMobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs md:hidden"
+          onClick={() => setIsMobileOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-72 bg-[#0d1117] border-r border-[#21262d] shadow-2xl transition-transform duration-200 md:hidden select-none overflow-y-auto ${
+          isMobileOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        {renderNavContent(true)}
+      </aside>
+    </>
   );
 };

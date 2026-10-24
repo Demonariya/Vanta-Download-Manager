@@ -85,7 +85,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
   return (
     <div className="space-y-4">
       {/* Header Controls */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
         <div>
           <h1 className="text-base font-semibold text-white">Download Queue</h1>
           <p className="text-xs text-[#8b949e] mt-0.5">
@@ -93,24 +93,24 @@ export const QueueView: React.FC<QueueViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap w-full sm:w-auto">
           <button
             onClick={onResumeAll}
-            className="px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors flex items-center gap-1.5"
+            className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors flex items-center justify-center gap-1.5"
           >
             <Play className="w-3.5 h-3.5 text-[#3fb950]" />
             <span>Resume All</span>
           </button>
           <button
             onClick={onPauseAll}
-            className="px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors flex items-center gap-1.5"
+            className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors flex items-center justify-center gap-1.5"
           >
             <Pause className="w-3.5 h-3.5 text-[#d29922]" />
             <span>Pause All</span>
           </button>
           <button
             onClick={onClearCompleted}
-            className="px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors"
+            className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors"
           >
             Clear Completed
           </button>
@@ -118,7 +118,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
       </div>
 
       {/* Filter Tabs */}
-      <div className="flex items-center gap-1 p-1 bg-[#12151a] border border-[#21262d] rounded-lg overflow-x-auto">
+      <div className="flex items-center gap-1 p-1 bg-[#12151a] border border-[#21262d] rounded-lg overflow-x-auto scrollbar-none">
         {(
           [
             { id: 'all', label: 'All Tasks', count: tasks.length },
@@ -132,7 +132,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
           <button
             key={tab.id}
             onClick={() => setStatusFilter(tab.id as any)}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-2 whitespace-nowrap ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
               statusFilter === tab.id
                 ? 'bg-[#21262d] text-white shadow-xs'
                 : 'text-[#8b949e] hover:text-[#e6edf3]'
@@ -146,7 +146,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
 
       {/* Tasks List */}
       {filteredTasks.length === 0 ? (
-        <div className="py-16 text-center border border-dashed border-[#21262d] rounded-xl bg-[#12151a]">
+        <div className="py-16 text-center border border-dashed border-[#21262d] rounded-xl bg-[#12151a] p-4">
           <Activity className="w-10 h-10 text-[#484f58] mx-auto mb-2.5" />
           <p className="text-sm font-medium text-[#c9d1d9]">No downloads found</p>
           <p className="text-xs text-[#8b949e] mt-1">
@@ -166,40 +166,40 @@ export const QueueView: React.FC<QueueViewProps> = ({
           {filteredTasks.map((task) => (
             <div
               key={task.id}
-              className="p-4 rounded-xl border border-[#21262d] bg-[#12151a] hover:border-[#30363d] transition-all space-y-3"
+              className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a] hover:border-[#30363d] transition-all space-y-3"
             >
               {/* Row 1: Title, status, actions */}
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
                   {task.thumbnail ? (
                     <img
                       src={task.thumbnail}
                       alt={task.title}
                       referrerPolicy="no-referrer"
-                      className="w-16 h-11 object-cover rounded-md bg-[#0d1117] shrink-0 border border-[#21262d]"
+                      className="w-14 sm:w-16 h-10 sm:h-11 object-cover rounded-md bg-[#0d1117] shrink-0 border border-[#21262d]"
                     />
                   ) : (
-                    <div className="w-16 h-11 rounded-md bg-[#161b22] border border-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]">
+                    <div className="w-14 sm:w-16 h-10 sm:h-11 rounded-md bg-[#161b22] border border-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]">
                       {task.ext.toUpperCase()}
                     </div>
                   )}
 
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-xs font-semibold text-white truncate max-w-md">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                      <h3 className="text-xs font-semibold text-white break-words sm:truncate max-w-full sm:max-w-md">
                         {task.title}
                       </h3>
                       {getStatusBadge(task.status)}
                     </div>
 
-                    <div className="flex items-center gap-3 text-[11px] text-[#8b949e] mt-1 font-mono">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#8b949e] mt-1 font-mono">
                       <span>{task.engine}</span>
                       <span aria-hidden="true">·</span>
                       <span>{task.is_audio_only ? `${task.audio_format?.toUpperCase()} (${task.audio_bitrate})` : task.ext.toUpperCase()}</span>
                       {task.uploader && (
                         <>
                           <span aria-hidden="true">·</span>
-                          <span className="truncate">{task.uploader}</span>
+                          <span className="truncate max-w-[120px] sm:max-w-[180px]">{task.uploader}</span>
                         </>
                       )}
                       <span aria-hidden="true">·</span>
@@ -211,13 +211,13 @@ export const QueueView: React.FC<QueueViewProps> = ({
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center justify-end gap-1.5 shrink-0 pt-2 sm:pt-0 border-t sm:border-0 border-[#21262d]">
                   {task.status === 'downloading' || task.status === 'extracting' || task.status === 'processing' ? (
                     <button
                       onClick={() => onPauseTask(task.id)}
                       title="Pause"
                       aria-label="Pause task"
-                      className="p-2 text-[#8b949e] hover:text-[#d29922] hover:bg-[#161b22] rounded-lg transition-colors"
+                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#d29922] hover:bg-[#161b22] rounded-lg transition-colors"
                     >
                       <Pause className="w-4 h-4" />
                     </button>
@@ -226,7 +226,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       onClick={() => onResumeTask(task.id)}
                       title="Resume"
                       aria-label="Resume task"
-                      className="p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
+                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
                     >
                       <Play className="w-4 h-4" />
                     </button>
@@ -237,7 +237,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       onClick={() => onRetryTask(task.id)}
                       title="Retry"
                       aria-label="Retry task"
-                      className="p-2 text-[#8b949e] hover:text-[#58a6ff] hover:bg-[#161b22] rounded-lg transition-colors"
+                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#58a6ff] hover:bg-[#161b22] rounded-lg transition-colors"
                     >
                       <RotateCcw className="w-4 h-4" />
                     </button>
@@ -250,7 +250,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       }}
                       title="Copy file path to clipboard"
                       aria-label="Copy file path"
-                      className="p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
+                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
                     >
                       <FolderOpen className="w-4 h-4" />
                     </button>
@@ -262,7 +262,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                     }}
                     title="Copy source URL"
                     aria-label="Copy source URL"
-                    className="p-2 text-[#8b949e] hover:text-[#c9d1d9] hover:bg-[#161b22] rounded-lg transition-colors"
+                    className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#c9d1d9] hover:bg-[#161b22] rounded-lg transition-colors"
                   >
                     <ExternalLink className="w-4 h-4" />
                   </button>
@@ -272,7 +272,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       onClick={() => onCancelTask(task.id)}
                       title="Cancel"
                       aria-label="Cancel task"
-                      className="p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
+                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -282,7 +282,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                     onClick={() => onDeleteTask(task.id)}
                     title="Delete"
                     aria-label="Delete task from queue"
-                    className="p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
+                    className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>

@@ -164,10 +164,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-2xl bg-[#12151a] border border-[#30363d] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/75 backdrop-blur-xs select-none">
+      <div className="relative w-full max-w-2xl bg-[#12151a] border border-[#30363d] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[#21262d] bg-[#0d1117]">
+        <div className="flex items-center justify-between px-4 sm:px-5 py-3 sm:py-4 border-b border-[#21262d] bg-[#0d1117]">
           <div className="flex items-center gap-2">
             <Download className="w-5 h-5 text-[#58a6ff]" />
             <h2 className="text-sm font-semibold text-white">Universal Download Workstation</h2>
@@ -182,7 +182,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 overflow-y-auto space-y-4">
+        <div className="p-3.5 sm:p-5 overflow-y-auto space-y-4">
           {/* Mode Switcher */}
           <div className="flex items-center gap-1 p-1 bg-[#161b22] border border-[#21262d] rounded-lg">
             <button
@@ -363,7 +363,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
 
             {selectedTab === 'video' ? (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {/* Resolution */}
                 <div className="space-y-1">
                   <label className="text-[11px] font-medium text-[#8b949e]">Quality & Resolution</label>
@@ -396,7 +396,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {/* Audio Format */}
                 <div className="space-y-1">
                   <label className="text-[11px] font-medium text-[#8b949e]">Audio Codec</label>
@@ -431,7 +431,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             )}
 
             {/* Task Priority */}
-            <div className="flex items-center justify-between pt-1">
+            <div className="flex flex-wrap items-center justify-between pt-1 gap-2">
               <span className="text-[11px] font-medium text-[#8b949e]">Queue Priority</span>
               <div className="flex items-center gap-1">
                 {(['low', 'normal', 'high', 'highest'] as TaskPriority[]).map((p) => (
@@ -454,22 +454,22 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         </div>
 
         {/* Footer Actions */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-t border-[#21262d] bg-[#0d1117]">
+        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 px-4 sm:px-5 py-3 border-t border-[#21262d] bg-[#0d1117]">
           <button
             type="button"
             onClick={onClose}
-            className="px-3.5 py-1.5 text-xs text-[#8b949e] hover:text-[#e6edf3] transition-colors"
+            className="w-full sm:w-auto px-3.5 py-1.5 text-xs text-[#8b949e] hover:text-[#e6edf3] transition-colors text-center"
           >
             Cancel
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 w-full sm:w-auto">
             {mode === 'single' && (
               <button
                 type="button"
                 onClick={() => handleSubmit(true)}
                 disabled={isSubmitting || !url.trim()}
-                className="px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors whitespace-nowrap"
+                className="flex-1 sm:flex-none px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors whitespace-nowrap text-center"
               >
                 Quick Add
               </button>
@@ -478,7 +478,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               type="button"
               onClick={() => handleSubmit(false)}
               disabled={isSubmitting || (mode === 'single' ? !url.trim() : !batchUrls.trim())}
-              className="px-4 py-1.5 text-xs font-medium text-white bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 rounded-lg flex items-center gap-1.5 transition-colors shadow-sm whitespace-nowrap"
+              className="flex-1 sm:flex-none px-4 py-1.5 text-xs font-medium text-white bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 rounded-lg flex items-center justify-center gap-1.5 transition-colors shadow-sm whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{isSubmitting ? 'Starting...' : 'Start Download'}</span>
