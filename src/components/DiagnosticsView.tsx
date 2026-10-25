@@ -37,27 +37,32 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   const [updatesInfo, setUpdatesInfo] = useState<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }> | null>(null);
   const [updatingEngine, setUpdatingEngine] = useState<string | null>(null);
   const [updateResults, setUpdateResults] = useState<EngineUpdateResult[] | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
 
   const handleRunDiagnostics = async () => {
+    setOperationError(null);
     setIsRunning(true);
     try {
       const res = await api.runDiagnostics();
       setResults(res.results);
       onRefresh();
-    } catch {
-      // ignore
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsRunning(false);
     }
   };
 
   const handleCheckUpdates = async () => {
+    setOperationError(null);
     setIsCheckingUpdates(true);
     setUpdateResults(null);
     try {
       const data = await api.checkEngineUpdates();
       setUpdatesInfo(data);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setOperationError(`Failed to check engine updates: ${message}`);
       console.error('Failed to check engine updates:', err);
     } finally {
       setIsCheckingUpdates(false);
@@ -89,13 +94,16 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   };
 
   const handleUpdateAll = async () => {
+    setOperationError(null);
     setUpdatingEngine('all');
     try {
       const res = await api.updateAllEngines();
       setUpdateResults(res.results);
       onRefresh();
       handleCheckUpdates();
-    } catch (err: any) {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setOperationError(`Update all failed: ${message}`);
       console.error('Update all failed:', err);
     } finally {
       setUpdatingEngine(null);
@@ -147,6 +155,12 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {operationError && (
+        <div role="alert" className="p-3 rounded-lg border border-[#da3633]/40 bg-[#da3633]/10 text-xs text-[#f85149] break-words">
+          {operationError}
+        </div>
+      )}
 
       {/* Update Results Banner if any action occurred */}
       {updateResults && updateResults.length > 0 && (
@@ -285,19 +299,19 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           <div className="p-2.5 rounded-lg border border-[#21262d] bg-[#161b22] space-y-1">
             <span className="text-[11px] font-semibold text-[#58a6ff]">HTTP 410 & Expired URLs</span>
             <p className="text-[11px] text-[#8b949e] leading-relaxed">
-              Detects expired player stream tokens; flushes stale extraction cache; retrieves fresh tokens without terminating queued downloads.
+              On a retry, yt-dlp is launched again from the original source URL so supported extractors can resolve a fresh media URL. Permanently unavailable sources still fail.
             </p>
           </div>
           <div className="p-2.5 rounded-lg border border-[#21262d] bg-[#161b22] space-y-1">
             <span className="text-[11px] font-semibold text-[#d29922]">HTTP 429 & Rate Limits</span>
             <p className="text-[11px] text-[#8b949e] leading-relaxed">
-              Applies exponential backoff with randomized jitter (5s–60s) to prevent temporary IP throttles and bot challenges.
+              yt-dlp uses bounded network and fragment retries. Task-level retries wait for the configured delay; source-side rate limits can still prevent a download.
             </p>
           </div>
           <div className="p-2.5 rounded-lg border border-[#21262d] bg-[#161b22] space-y-1">
             <span className="text-[11px] font-semibold text-[#3fb950]">Log Redaction & Privacy</span>
             <p className="text-[11px] text-[#8b949e] leading-relaxed">
-              All process outputs, query parameters, auth tokens, and session cookies are cryptographically sanitized before storage.
+              Diagnostics are kept local by default. Error output is limited before display, but avoid sharing logs that may contain private source details or credentials.
             </p>
           </div>
         </div>

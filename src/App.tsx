@@ -163,7 +163,7 @@ export default function App() {
   };
 
   const activeCount = tasks.filter(
-    (t) => t.status === 'downloading' || t.status === 'extracting' || t.status === 'processing'
+    (t) => t.status === 'downloading' || t.status === 'extracting' || t.status === 'processing' || t.status === 'retrying'
   ).length;
 
   return (

@@ -7,7 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -215,7 +215,7 @@ pub async fn inspect_url(app: &AppHandle, state: &AppState, url: &str, proxy: &s
     let output = run_output(&executable, &args).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("yt-dlp metadata extraction failed ({}): {}", output.status, stderr.chars().take(900).collect::<String>()));
+        return Err(format!("yt-dlp metadata extraction failed ({}): {}", output.status, sanitize_diagnostic_text(&stderr.chars().take(900).collect::<String>())));
     }
     let raw: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("yt-dlp returned invalid metadata JSON: {e}"))?;
@@ -251,7 +251,7 @@ async fn inspect_spotdl_url(app: &AppHandle, state: &AppState, url: &str) -> Res
         String::from_utf8_lossy(&output.stdout).to_string()
     };
     if !output.status.success() {
-        return Err(format!("spotDL metadata lookup failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(900).collect::<String>()));
+        return Err(format!("spotDL metadata lookup failed: {}", sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr).chars().take(900).collect::<String>())));
     }
     let parsed: Value = serde_json::from_str(&raw_text).map_err(|e| format!("spotDL did not return parseable metadata: {e}"))?;
     let item = parsed.as_array().and_then(|items| items.first()).unwrap_or(&parsed);
@@ -277,6 +277,45 @@ async fn inspect_spotdl_url(app: &AppHandle, state: &AppState, url: &str) -> Res
 pub fn emit_task(app: &AppHandle, state: &AppState, task: DownloadTask) {
     let _ = state.save_task(task.clone());
     let _ = app.emit("task_updated", &task);
+}
+
+fn sanitize_diagnostic_text(input: &str) -> String {
+    static HEADER_SECRET: OnceLock<regex::Regex> = OnceLock::new();
+    static QUERY_SECRET: OnceLock<regex::Regex> = OnceLock::new();
+    static KEY_VALUE_SECRET: OnceLock<regex::Regex> = OnceLock::new();
+
+    let headers = HEADER_SECRET.get_or_init(|| {
+        regex::Regex::new(r"(?i)(authorization\s*:|cookie\s*:|set-cookie\s*:|x-api-key\s*:)\s*[^\r\n]*")
+            .expect("static header-redaction regex is valid")
+    });
+    let query = QUERY_SECRET.get_or_init(|| {
+        regex::Regex::new(r#"(?i)([?&](?:token|access_token|refresh_token|auth_token|sig|signature|lsig|key|api_key|apikey|expire|expires|policy|jwt|session|cookie)=)[^&\s#"'<>]+"#)
+            .expect("static query-redaction regex is valid")
+    });
+    let key_value = KEY_VALUE_SECRET.get_or_init(|| {
+        regex::Regex::new(r"(?i)((?:access_token|refresh_token|auth_token|token|signature|sig|api_key|apikey)=)[^&\s;]+")
+            .expect("static credential-redaction regex is valid")
+    });
+
+    let text = headers.replace_all(input, "$1 [REDACTED]");
+    let text = query.replace_all(&text, "$1[REDACTED]");
+    key_value.replace_all(&text, "$1[REDACTED]").into_owned()
+}
+
+fn emit_notification(
+    app: &AppHandle,
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    message: &str,
+    task_id: Option<String>,
+) {
+    state.add_notification(kind, title, &sanitize_diagnostic_text(message), task_id);
+    if let Ok(items) = state.notifications_snapshot() {
+        if let Some(item) = items.first() {
+            let _ = app.emit("notification", item);
+        }
+    }
 }
 
 fn parse_human_bytes(input: &str) -> Option<u64> {
@@ -364,7 +403,7 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
         Ok(result) => result,
         Err(error) => {
             let _ = update_state(&app, &state, &task.id, |t| { t.status = TaskStatus::Failed; t.error_message = Some(error.clone()); t.current_phase = "Failed".into(); });
-            state.add_notification("error", "Download failed", &error, Some(task.id.clone()));
+            emit_notification(&app, &state, "error", "Download failed", &error, Some(task.id.clone()));
             return;
         }
     };
@@ -373,7 +412,7 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
         let Some(path) = find_executable(&app, &state, "spotdl") else {
             let msg = "spotDL executable was not found. Configure it in Engine Manager.".to_string();
             let _ = update_state(&app, &state, &task.id, |t| { t.status = TaskStatus::Failed; t.error_message = Some(msg.clone()); t.current_phase = "Failed".into(); });
-            state.add_notification("error", "spotDL unavailable", &msg, Some(task.id.clone()));
+            emit_notification(&app, &state, "error", "spotDL unavailable", &msg, Some(task.id.clone()));
             return;
         };
         let spot_template = out_dir.join("{artists} - {title}.{output-ext}").to_string_lossy().into_owned();
@@ -382,7 +421,7 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
         let Some(path) = find_executable(&app, &state, "yt-dlp") else {
             let msg = "yt-dlp executable was not found. Configure it in Engine Manager.".to_string();
             let _ = update_state(&app, &state, &task.id, |t| { t.status = TaskStatus::Failed; t.error_message = Some(msg.clone()); t.current_phase = "Failed".into(); });
-            state.add_notification("error", "yt-dlp unavailable", &msg, Some(task.id.clone()));
+            emit_notification(&app, &state, "error", "yt-dlp unavailable", &msg, Some(task.id.clone()));
             return;
         };
         let mut args = vec![
@@ -449,7 +488,7 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
         Err(error) => {
             let message = format!("Failed to start download engine {}: {error}", path.display());
             let _ = update_state(&app, &state, &begin_task.id, |t| { t.status = TaskStatus::Failed; t.error_message = Some(message.clone()); t.current_phase = "Failed".into(); });
-            state.add_notification("error", "Could not start download", &message, Some(begin_task.id));
+            emit_notification(&app, &state, "error", "Could not start download", &message, Some(begin_task.id));
             return;
         }
     };
@@ -558,13 +597,10 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
                 t.error_message = None;
                 if let Some(info) = verified.clone() { t.verified_audio_info = Some(info); }
             });
-            state.add_notification("success", "Download completed", &format!("Saved: {}", path.display()), Some(task.id.clone()));
-            if let Ok(items) = state.notifications_snapshot() {
-                if let Some(item) = items.first() { let _ = app.emit("notification", item); }
-            }
+            emit_notification(&app, &state, "success", "Download completed", &format!("Saved: {}", path.display()), Some(task.id.clone()));
         } else {
             let message = "The engine exited successfully, but no valid, non-empty output file could be located. The task was not marked complete.".to_string();
-            handle_failure(&app, &state, &task, message, &settings).await;
+            handle_failure(&app, &state, &task, message, &settings, &mut control_rx).await;
         }
     } else {
         let code = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
@@ -572,9 +608,9 @@ pub async fn run_download_task(app: AppHandle, state: AppState, mut task: Downlo
         let message = if trimmed.is_empty() {
             format!("Download engine exited unsuccessfully ({code}).")
         } else {
-            trimmed.chars().rev().take(1600).collect::<String>().chars().rev().collect::<String>()
+            sanitize_diagnostic_text(&trimmed.chars().rev().take(1600).collect::<String>().chars().rev().collect::<String>())
         };
-        handle_failure(&app, &state, &task, message, &settings).await;
+        handle_failure(&app, &state, &task, message, &settings, &mut control_rx).await;
     }
 }
 
@@ -609,7 +645,8 @@ async fn verify_output(app: &AppHandle, state: &AppState, path: &Path) -> Option
     Some(format!("codec={codec}; sample_rate={rate} Hz; channels={channels}; {bits}; container={}", string_field(&format, "format_name").unwrap_or_else(|| "unknown".into())))
 }
 
-async fn handle_failure(app: &AppHandle, state: &AppState, task: &DownloadTask, message: String, settings: &crate::models::AppSettings) {
+async fn handle_failure(app: &AppHandle, state: &AppState, task: &DownloadTask, message: String, settings: &crate::models::AppSettings, control_rx: &mut watch::Receiver<ControlAction>) {
+    let message = sanitize_diagnostic_text(&message);
     let should_retry = settings.auto_retry_failed && task.retries < task.max_retries && !message.to_ascii_lowercase().contains("unsupported url");
     if should_retry {
         let _ = update_state(app, state, &task.id, |t| {
@@ -620,12 +657,32 @@ async fn handle_failure(app: &AppHandle, state: &AppState, task: &DownloadTask, 
             t.speed_bytes_per_sec = 0.0;
             t.speed_str = "0 B/s".into();
         });
-        state.add_notification("warning", "Download retry scheduled", &format!("Attempt {} of {} failed; retrying after a delay.", task.retries + 1, task.max_retries + 1), Some(task.id.clone()));
-        sleep(Duration::from_secs(settings.retry_delay_seconds.min(300) as u64)).await;
-        let _ = update_state(app, state, &task.id, |t| {
-            t.status = TaskStatus::Queued;
-            t.current_phase = "Queued for retry".into();
-        });
+        emit_notification(app, state, "warning", "Download retry scheduled", &format!("Attempt {} of {} failed; retrying after a delay.", task.retries + 1, task.max_retries + 1), Some(task.id.clone()));
+        let delay = Duration::from_secs(settings.retry_delay_seconds.min(300) as u64);
+        tokio::select! {
+            _ = sleep(delay) => {
+                let _ = update_state(app, state, &task.id, |t| {
+                    t.status = TaskStatus::Queued;
+                    t.current_phase = "Queued for retry".into();
+                });
+            }
+            changed = control_rx.changed() => {
+                if changed.is_ok() {
+                    let action = *control_rx.borrow();
+                    if action != ControlAction::None {
+                        let next_status = if action == ControlAction::Pause { TaskStatus::Paused } else { TaskStatus::Cancelled };
+                        let phase = if action == ControlAction::Pause { "Paused before retry" } else { "Cancelled" };
+                        let _ = update_state(app, state, &task.id, |t| {
+                            t.status = next_status;
+                            t.current_phase = phase.into();
+                            t.speed_bytes_per_sec = 0.0;
+                            t.speed_str = "0 B/s".into();
+                            t.eta_str = "--:--".into();
+                        });
+                    }
+                }
+            }
+        }
     } else {
         let _ = update_state(app, state, &task.id, |t| {
             t.status = TaskStatus::Failed;
@@ -635,7 +692,7 @@ async fn handle_failure(app: &AppHandle, state: &AppState, task: &DownloadTask, 
             t.speed_str = "0 B/s".into();
             t.eta_str = "--:--".into();
         });
-        state.add_notification("error", "Download failed", &message.chars().take(800).collect::<String>(), Some(task.id.clone()));
+        emit_notification(app, state, "error", "Download failed", &message.chars().take(800).collect::<String>(), Some(task.id.clone()));
     }
 }
 
@@ -707,7 +764,7 @@ pub async fn update_engine(app: &AppHandle, state: &AppState, engine_name: &str)
     if key == "yt-dlp" {
         let output = run_output(&path, &["-U".into()]).await?;
         if !output.status.success() {
-            return Err(format!("yt-dlp self-update failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(800).collect::<String>()));
+            return Err(format!("yt-dlp self-update failed: {}", sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr).chars().take(800).collect::<String>())));
         }
     } else if key == "spotdl" {
         let managed = state.data_dir.join("engines").join("spotdl").join(".venv");
@@ -716,7 +773,7 @@ pub async fn update_engine(app: &AppHandle, state: &AppState, engine_name: &str)
         }
         let python = managed.join(if cfg!(target_os = "windows") { "Scripts/python.exe" } else { "bin/python" });
         let output = run_output(&python, &["-m".into(), "pip".into(), "install".into(), "--upgrade".into(), "spotdl".into()]).await?;
-        if !output.status.success() { return Err(format!("spotDL update failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(800).collect::<String>())); }
+        if !output.status.success() { return Err(format!("spotDL update failed: {}", sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr).chars().take(800).collect::<String>()))); }
     } else {
         return Err(format!("{key} updates must be installed through a verified managed distribution; automatic replacement is not enabled for this system installation."));
     }
@@ -768,5 +825,23 @@ mod tests {
         assert!(formats[1].is_video_only);
         assert!(!formats[2].is_audio_only);
         assert!(!formats[2].is_video_only);
+    }
+}
+
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::sanitize_diagnostic_text;
+
+    #[test]
+    fn redacts_auth_headers_and_signed_url_values() {
+        let input = "Authorization: Bearer abc123\nCookie: session=secret\nhttps://media.example/video?sig=secret456&token=token789&format=mp4";
+        let output = sanitize_diagnostic_text(input);
+        assert!(!output.contains("abc123"));
+        assert!(!output.contains("session=secret"));
+        assert!(!output.contains("secret456"));
+        assert!(!output.contains("token789"));
+        assert!(output.contains("sig=[REDACTED]"));
+        assert!(output.contains("token=[REDACTED]"));
     }
 }

@@ -33,7 +33,7 @@ export class ApiService {
   }
 
   public checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
-    return invoke('check_engine_updates');
+    return invoke<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>>('check_engine_updates');
   }
 
   public updateEngine(name: string): Promise<EngineUpdateResult> {
@@ -41,7 +41,7 @@ export class ApiService {
   }
 
   public updateAllEngines(): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
-    return invoke('update_all_engines');
+    return invoke<{ success: boolean; results: EngineUpdateResult[] }>('update_all_engines');
   }
 
   public inspectUrl(url: string): Promise<MediaMetadata> {
@@ -57,35 +57,35 @@ export class ApiService {
   }
 
   public pauseTask(id: string): Promise<void> {
-    return invoke('pause_task', { id });
+    return invoke<void>('pause_task', { id });
   }
 
   public resumeTask(id: string): Promise<void> {
-    return invoke('resume_task', { id });
+    return invoke<void>('resume_task', { id });
   }
 
   public cancelTask(id: string): Promise<void> {
-    return invoke('cancel_task', { id });
+    return invoke<void>('cancel_task', { id });
   }
 
   public retryTask(id: string): Promise<void> {
-    return invoke('retry_task', { id });
+    return invoke<void>('retry_task', { id });
   }
 
   public deleteTask(id: string): Promise<void> {
-    return invoke('delete_task', { id });
+    return invoke<void>('delete_task', { id });
   }
 
   public pauseAll(): Promise<void> {
-    return invoke('pause_all_downloads');
+    return invoke<void>('pause_all_downloads');
   }
 
   public resumeAll(): Promise<void> {
-    return invoke('resume_all_downloads');
+    return invoke<void>('resume_all_downloads');
   }
 
   public clearCompleted(): Promise<void> {
-    return invoke('clear_completed_tasks');
+    return invoke<void>('clear_completed_tasks');
   }
 
   public getSettings(): Promise<AppSettings> {
@@ -101,7 +101,7 @@ export class ApiService {
   }
 
   public clearNotifications(): Promise<void> {
-    return invoke('clear_notifications');
+    return invoke<void>('clear_notifications');
   }
 
   public getDownloadHistory(): Promise<DownloadTask[]> {
@@ -109,11 +109,11 @@ export class ApiService {
   }
 
   public openDownloadedFile(path: string): Promise<void> {
-    return invoke('open_downloaded_file', { path });
+    return invoke<void>('open_downloaded_file', { path });
   }
 
   public revealDownloadInFolder(path: string): Promise<void> {
-    return invoke('reveal_download_in_folder', { path });
+    return invoke<void>('reveal_download_in_folder', { path });
   }
 
   public chooseDownloadDirectory(): Promise<string> {
