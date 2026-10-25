@@ -1,4 +1,6 @@
+#[cfg(feature = "desktop")]
 pub mod commands;
+#[cfg(feature = "desktop")]
 pub mod engines;
 pub mod models;
 pub mod state;

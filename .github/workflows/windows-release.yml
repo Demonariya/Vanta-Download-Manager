@@ -90,6 +90,10 @@ jobs:
           Write-Host "Bundled Windows engines successfully:"
           Get-ChildItem -Path "src-tauri/bin"
 
+      - name: Run Rust backend tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features desktop
+
       - name: Build Tauri Desktop App (NSIS Installer & MSI)
         shell: pwsh
         run: |

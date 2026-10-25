@@ -280,7 +280,8 @@ pub fn emit_task(app: &AppHandle, state: &AppState, task: DownloadTask) {
 }
 
 fn parse_human_bytes(input: &str) -> Option<u64> {
-    let token = input.trim().replace(',', "").trim_end_matches("/s").trim();
+    let cleaned = input.trim().replace(',', "");
+    let token = cleaned.trim_end_matches("/s").trim();
     let split_at = token.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '+'))?;
     let amount: f64 = token[..split_at].parse().ok()?;
     let unit = token[split_at..].trim().to_ascii_uppercase();
@@ -735,4 +736,37 @@ pub async fn update_engine(app: &AppHandle, state: &AppState, engine_name: &str)
     };
     if !result.success { return Err(result.message); }
     Ok(result)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_compact_and_spaced_byte_units() {
+        assert_eq!(parse_human_bytes("1.5MiB"), Some(1_572_864));
+        assert_eq!(parse_human_bytes("1.5MiB/s"), Some(1_572_864));
+        assert_eq!(parse_human_bytes("1.5 MiB"), Some(1_572_864));
+        assert_eq!(parse_human_bytes("120 KB"), Some(120_000));
+        assert_eq!(parse_human_bytes("unavailable"), None);
+    }
+
+    #[test]
+    fn identifies_audio_and_video_only_formats() {
+        let raw = serde_json::json!({
+            "formats": [
+                {"format_id":"140","ext":"m4a","vcodec":"none","acodec":"mp4a.40.2","abr":128.0},
+                {"format_id":"137","ext":"mp4","vcodec":"avc1","acodec":"none","height":1080},
+                {"format_id":"18","ext":"mp4","vcodec":"avc1","acodec":"mp4a.40.2","height":360}
+            ]
+        });
+        let formats = parse_formats(&raw);
+        assert_eq!(formats.len(), 3);
+        assert!(formats[0].is_audio_only);
+        assert!(!formats[0].is_video_only);
+        assert!(formats[1].is_video_only);
+        assert!(!formats[2].is_audio_only);
+        assert!(!formats[2].is_video_only);
+    }
 }
