@@ -22,6 +22,8 @@ import { SettingsView } from './components/SettingsView';
 import { NewDownloadModal } from './components/NewDownloadModal';
 import { FloatingProgressDock } from './components/FloatingProgressDock';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
+import { TitleBar } from './components/TitleBar';
+import { SafeCloseDialog } from './components/SafeCloseDialog';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
@@ -39,6 +41,32 @@ export default function App() {
   const [isNewDownloadOpen, setIsNewDownloadOpen] = useState(false);
   const [initialInspectUrl, setInitialInspectUrl] = useState('');
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isSafeCloseOpen, setIsSafeCloseOpen] = useState(false);
+
+  const executeNativeClose = async () => {
+    try {
+      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().close();
+      }
+    } catch (err) {
+      console.warn('Native close called in non-Tauri context', err);
+    }
+  };
+
+  const handleInitiateClose = () => {
+    if (activeCount > 0) {
+      setIsSafeCloseOpen(true);
+    } else {
+      executeNativeClose();
+    }
+  };
+
+  const handleConfirmExit = async () => {
+    setIsSafeCloseOpen(false);
+    await handlePauseAll();
+    executeNativeClose();
+  };
 
   // Load initial data & subscribe to real-time events
   useEffect(() => {
@@ -139,25 +167,32 @@ export default function App() {
   ).length;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0b0d10] text-[#e6edf3]">
-      {/* Sidebar Navigation */}
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        onOpenNewDownload={() => {
-          setInitialInspectUrl('');
-          setIsNewDownloadOpen(true);
-        }}
-        engineStatus={engineStatus}
-        activeCount={activeCount}
-        isCollapsed={isSidebarCollapsed}
-        setIsCollapsed={setIsSidebarCollapsed}
-        isMobileOpen={isMobileMenuOpen}
-        setIsMobileOpen={setIsMobileMenuOpen}
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0b0d10] text-[#e6edf3]">
+      {/* Native In-App TitleBar Window Header */}
+      <TitleBar
+        activeDownloadsCount={activeCount}
+        onRequestClose={handleInitiateClose}
       />
 
-      {/* Main Content Viewport */}
-      <div className="flex flex-col flex-1 min-w-0 h-screen overflow-hidden">
+      <div className="flex flex-1 min-h-0 w-full overflow-hidden">
+        {/* Sidebar Navigation */}
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          onOpenNewDownload={() => {
+            setInitialInspectUrl('');
+            setIsNewDownloadOpen(true);
+          }}
+          engineStatus={engineStatus}
+          activeCount={activeCount}
+          isCollapsed={isSidebarCollapsed}
+          setIsCollapsed={setIsSidebarCollapsed}
+          isMobileOpen={isMobileMenuOpen}
+          setIsMobileOpen={setIsMobileMenuOpen}
+        />
+
+        {/* Main Content Viewport */}
+        <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
         {/* Top Bar Header */}
         <TopBar
           onQuickInspect={handleQuickInspect}
@@ -290,6 +325,7 @@ export default function App() {
           )}
         </main>
       </div>
+      </div>
 
       {/* Floating Progress Surface */}
       {settings?.floating_notifications_enabled && (
@@ -321,6 +357,14 @@ export default function App() {
           await api.clearNotifications();
           setNotifications([]);
         }}
+      />
+
+      {/* Safe Close Dialog */}
+      <SafeCloseDialog
+        isOpen={isSafeCloseOpen}
+        activeCount={activeCount}
+        onCancel={() => setIsSafeCloseOpen(false)}
+        onConfirmExit={handleConfirmExit}
       />
     </div>
   );

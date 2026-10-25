@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "VANTA Download Manager",
         "width": 1366,
         "height": 850,
@@ -19,7 +20,7 @@
         "minHeight": 680,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
         "theme": "Dark"
       }

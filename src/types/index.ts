@@ -68,6 +68,11 @@ export interface DownloadTask {
   is_audio_only: boolean;
   audio_format?: string;
   audio_bitrate?: string;
+  audio_sample_rate?: number;
+  audio_bit_depth?: number;
+  audio_channels?: number;
+  is_lossy_source?: boolean;
+  verified_audio_info?: string;
   output_path: string;
   error_message?: string;
   priority: TaskPriority;
@@ -84,6 +89,18 @@ export interface EngineInfo {
   status: 'ready' | 'missing' | 'error';
   lastChecked: string;
   error?: string;
+  latestVersion?: string;
+  updateAvailable?: boolean;
+  isUpdating?: boolean;
+}
+
+export interface EngineUpdateResult {
+  engine: string;
+  success: boolean;
+  previousVersion: string;
+  currentVersion: string;
+  message: string;
+  rolledBack?: boolean;
 }
 
 export interface EngineStatusMap {
@@ -105,6 +122,8 @@ export interface AppSettings {
   default_video_format: string;
   default_audio_format: string;
   default_audio_bitrate: string;
+  default_audio_bit_depth?: number;
+  default_audio_sample_rate?: number;
   embed_thumbnail: boolean;
   embed_metadata: boolean;
   filename_template: string;

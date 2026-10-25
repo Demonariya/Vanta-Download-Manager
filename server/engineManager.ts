@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   EngineInfo,
   EngineStatusMap,
+  EngineUpdateResult,
   MediaMetadata,
   FormatOption,
   DownloadTask,
@@ -16,16 +17,17 @@ import {
   sanitizeFilename,
   determineEngineForUrl,
 } from '../src/utils/engine-parser';
+import { sanitizeLog, classifyDownloadError } from '../src/utils/error-classifier';
 
 export class EngineManager {
   private activeProcesses: Map<string, ChildProcess> = new Map();
 
   public findExecutable(name: string): string | null {
     const candidates = [
-      `/usr/local/bin/${name}`,
-      `/usr/bin/${name}`,
       path.resolve(process.cwd(), 'bin', name),
       `/root/.local/bin/${name}`,
+      `/usr/local/bin/${name}`,
+      `/usr/bin/${name}`,
     ];
 
     for (const p of candidates) {
@@ -340,7 +342,19 @@ export class EngineManager {
       '%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s',
       '-o',
       outTemplate,
+      '--retries', '10',
+      '--fragment-retries', '10',
+      '--file-access-retries', '5',
+      '--retry-sleep', 'fragment:exp=1:30',
+      '--socket-timeout', '30',
+      '--extractor-retries', '3',
     ];
+
+    // On retries (especially after HTTP 410 or expired signatures), bypass cache and use robust player clients
+    if (task.retries > 0) {
+      args.push('--no-cache-dir');
+      args.push('--extractor-args', 'youtube:player_client=default,web,android');
+    }
 
     // Bandwidth limit
     if (settings.global_bandwidth_limit_kbps > 0) {
@@ -361,6 +375,12 @@ export class EngineManager {
       args.push('--audio-format', audioFormat);
       if (task.audio_bitrate) {
         args.push('--audio-quality', task.audio_bitrate);
+      }
+      if (task.audio_sample_rate || task.audio_bit_depth) {
+        let pp = 'ExtractAudio:';
+        if (task.audio_sample_rate) pp += ` -ar ${task.audio_sample_rate}`;
+        if (task.audio_bit_depth === 24) pp += ' -sample_fmt s24';
+        args.push('--postprocessor-args', pp.trim());
       }
     } else {
       if (task.format_id && task.format_id !== 'best') {
@@ -445,13 +465,13 @@ export class EngineManager {
         } else if (code === null) {
           // Process was killed (paused or cancelled)
         } else {
-          onError(`yt-dlp failed (code ${code}): ${lastOutput || 'Unknown error'}`);
+          onError(`yt-dlp failed (code ${code}): ${sanitizeLog(lastOutput || 'Unknown error')}`);
         }
       });
 
       proc.on('error', (err) => {
         this.activeProcesses.delete(task.id);
-        onError(`Execution error: ${err.message}`);
+        onError(`Execution error: ${sanitizeLog(err.message)}`);
       });
     } catch (err: any) {
       this.activeProcesses.delete(task.id);
@@ -568,6 +588,196 @@ export class EngineManager {
       return true;
     }
     return false;
+  }
+
+  public verifyAudioFile(filePath: string): string | null {
+    const ffprobePath = this.findExecutable('ffprobe');
+    if (!ffprobePath) return null;
+    if (!fs.existsSync(filePath)) return null;
+
+    try {
+      const stats = fs.statSync(filePath);
+      let targetFile = filePath;
+      if (stats.isDirectory()) {
+        const files = fs.readdirSync(filePath);
+        const audioFiles = files.filter((f) => /\.(flac|wav|mp3|m4a|aac|opus|ogg)$/i.test(f));
+        if (audioFiles.length === 0) return null;
+        targetFile = path.join(filePath, audioFiles[audioFiles.length - 1]);
+      }
+
+      const jsonStr = execSync(`"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${targetFile}"`, {
+        encoding: 'utf-8',
+        timeout: 8000,
+      });
+      const data = JSON.parse(jsonStr);
+      const audioStream = data?.streams?.find((s: any) => s.codec_type === 'audio') || data?.streams?.[0];
+      if (!audioStream) return null;
+
+      const codec = (audioStream.codec_name || 'unknown').toUpperCase();
+      const sampleRate = parseInt(audioStream.sample_rate || '44100', 10);
+      const channels = parseInt(audioStream.channels || '2', 10);
+      let bitDepth = parseInt(audioStream.bits_per_sample || audioStream.bits_per_raw_sample || '0', 10);
+      if (!bitDepth || bitDepth === 0) {
+        const fmt = (audioStream.sample_fmt || '').toLowerCase();
+        if (fmt.includes('s32') || fmt.includes('flt')) bitDepth = 24;
+        else if (fmt.includes('s24')) bitDepth = 24;
+        else bitDepth = 16;
+      }
+      const channelLabel = channels === 1 ? 'Mono' : channels === 2 ? 'Stereo' : `${channels}ch`;
+      return `${codec} · ${bitDepth}-bit · ${sampleRate} Hz · ${channelLabel}`;
+    } catch {
+      return null;
+    }
+  }
+
+  public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
+    const status = this.getEngineStatus();
+    const result: Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }> = {};
+
+    // 1. yt-dlp check
+    try {
+      const res = await fetch('https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest', {
+        headers: { 'User-Agent': 'VANTA-Download-Manager' },
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        const latest = data.tag_name || '';
+        const current = status.ytdlp.version;
+        result.ytdlp = {
+          currentVersion: current,
+          latestVersion: latest,
+          updateAvailable: Boolean(latest && current && latest !== current),
+        };
+      }
+    } catch {
+      result.ytdlp = { currentVersion: status.ytdlp.version, latestVersion: status.ytdlp.version, updateAvailable: false };
+    }
+
+    // 2. spotdl check
+    try {
+      const res = await fetch('https://api.github.com/repos/spotDL/spotify-downloader/releases/latest', {
+        headers: { 'User-Agent': 'VANTA-Download-Manager' },
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        const latest = (data.tag_name || '').replace(/^v/, '');
+        const current = status.spotdl.version.replace(/^v/, '');
+        result.spotdl = {
+          currentVersion: current,
+          latestVersion: latest,
+          updateAvailable: Boolean(latest && current && latest !== current),
+        };
+      }
+    } catch {
+      result.spotdl = { currentVersion: status.spotdl.version, latestVersion: status.spotdl.version, updateAvailable: false };
+    }
+
+    // 3. ffmpeg & ffprobe
+    result.ffmpeg = { currentVersion: status.ffmpeg.version, latestVersion: status.ffmpeg.version, updateAvailable: false };
+    result.ffprobe = { currentVersion: status.ffprobe.version, latestVersion: status.ffprobe.version, updateAvailable: false };
+
+    return result;
+  }
+
+  public async updateEngine(engineName: string): Promise<EngineUpdateResult> {
+    const status = this.getEngineStatus();
+    const binDir = path.resolve(process.cwd(), 'bin');
+    if (!fs.existsSync(binDir)) {
+      fs.mkdirSync(binDir, { recursive: true });
+    }
+
+    if (engineName === 'ytdlp' || engineName === 'yt-dlp') {
+      const prevVersion = status.ytdlp.version;
+      const targetBin = path.join(binDir, 'yt-dlp');
+      const tempBin = path.join(binDir, 'yt-dlp.tmp');
+      const backupBin = path.join(binDir, 'yt-dlp.bak');
+
+      try {
+        execSync(`curl -L -o "${tempBin}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x "${tempBin}"`, {
+          timeout: 60000,
+        });
+
+        const verOutput = execSync(`"${tempBin}" --version`, { encoding: 'utf-8', timeout: 5000 }).trim();
+        if (!verOutput) throw new Error('Verification failed: newly downloaded binary returned empty version');
+
+        if (fs.existsSync(targetBin)) {
+          fs.copyFileSync(targetBin, backupBin);
+        }
+
+        fs.renameSync(tempBin, targetBin);
+        fs.chmodSync(targetBin, 0o755);
+
+        return {
+          engine: 'yt-dlp',
+          success: true,
+          previousVersion: prevVersion,
+          currentVersion: verOutput,
+          message: `Successfully upgraded yt-dlp to version ${verOutput}`,
+        };
+      } catch (err: any) {
+        if (fs.existsSync(backupBin) && !fs.existsSync(targetBin)) {
+          fs.copyFileSync(backupBin, targetBin);
+        }
+        if (fs.existsSync(tempBin)) {
+          try { fs.unlinkSync(tempBin); } catch {}
+        }
+        return {
+          engine: 'yt-dlp',
+          success: false,
+          previousVersion: prevVersion,
+          currentVersion: prevVersion,
+          message: `Failed to update yt-dlp: ${err.message}`,
+          rolledBack: true,
+        };
+      }
+    }
+
+    if (engineName === 'spotdl') {
+      const prevVersion = status.spotdl.version;
+      try {
+        execSync(`python3 -m pip install --upgrade --user spotdl`, {
+          encoding: 'utf-8',
+          timeout: 120000,
+        });
+
+        const spotdlBin = this.findExecutable('spotdl');
+        const verOutput = spotdlBin
+          ? execSync(`"${spotdlBin}" --version`, { encoding: 'utf-8', timeout: 5000 }).trim()
+          : '';
+
+        return {
+          engine: 'spotdl',
+          success: true,
+          previousVersion: prevVersion,
+          currentVersion: verOutput || prevVersion,
+          message: `Successfully upgraded spotDL to ${verOutput || 'latest'}`,
+        };
+      } catch (err: any) {
+        return {
+          engine: 'spotdl',
+          success: false,
+          previousVersion: prevVersion,
+          currentVersion: prevVersion,
+          message: `Failed to update spotDL: ${err.message}`,
+          rolledBack: false,
+        };
+      }
+    }
+
+    return {
+      engine: engineName,
+      success: false,
+      previousVersion: '',
+      currentVersion: '',
+      message: `Engine ${engineName} does not support in-app automated updates.`,
+    };
+  }
+
+  public async updateAllEngines(): Promise<EngineUpdateResult[]> {
+    const results: EngineUpdateResult[] = [];
+    results.push(await this.updateEngine('ytdlp'));
+    results.push(await this.updateEngine('spotdl'));
+    return results;
   }
 }
 

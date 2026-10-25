@@ -102,10 +102,10 @@ jobs:
           $mainExe = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "vanta.exe" -ErrorAction SilentlyContinue
 
           if ($nsisInstallers) {
-            Copy-Item -Path $nsisInstallers.FullName -Destination "release_artifacts/"
+            Copy-Item -Path $nsisInstallers[0].FullName -Destination "release_artifacts/VANTA-Download-Manager-Setup-x64.exe" -Force
           }
           if ($msiInstallers) {
-            Copy-Item -Path $msiInstallers.FullName -Destination "release_artifacts/"
+            Copy-Item -Path $msiInstallers[0].FullName -Destination "release_artifacts/VANTA-Download-Manager-x64.msi" -Force
           }
 
           # Create a standalone zip including portable executable and bundled engines
@@ -119,8 +119,10 @@ jobs:
           Write-Host "Generated release artifacts:"
           Get-ChildItem -Path "release_artifacts"
 
-          # Generate SHA256 checksums
-          Get-FileHash -Algorithm SHA256 "release_artifacts/*" | Out-File -FilePath "release_artifacts/SHA256SUMS.txt"
+          # Generate SHA256 checksums for all binary artifacts
+          Get-FileHash -Algorithm SHA256 (Get-ChildItem "release_artifacts" -Exclude "SHA256SUMS.txt") |
+            ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } |
+            Out-File -FilePath "release_artifacts/SHA256SUMS.txt" -Encoding ascii
           Get-Content "release_artifacts/SHA256SUMS.txt"
 
       - name: Upload Artifacts to GitHub Actions Run
@@ -145,13 +147,16 @@ jobs:
             Premium high-concurrency desktop video & music workstation powered by **yt-dlp**, **spotDL**, **FFmpeg**, and **Rust / Tauri 2**.
 
             ### 📦 Included Files:
-            - **`VANTA Download Manager_x64-setup.exe`**: Standard NSIS Windows Installer (Recommended for Windows 10 & 11).
-            - **`VANTA Download Manager_x64_en-US.msi`**: Windows Enterprise MSI Installer.
-            - **`VANTA-Download-Manager-Portable-x64.zip`**: Portable standalone release (run without installation).
+            - **`VANTA-Download-Manager-Setup-x64.exe`**: Standard NSIS Windows Installer (Recommended for Windows 10 & 11).
+            - **`VANTA-Download-Manager-x64.msi`**: Windows Enterprise MSI Installer.
+            - **`VANTA-Download-Manager-Portable-x64.zip`**: Portable standalone release with bundled engines.
             - **`SHA256SUMS.txt`**: Cryptographic integrity checksums.
 
             ### ✨ Key Features:
             - Native 64-bit performance with MSVC and multi-threaded Tokio queue.
+            - Custom Title Bar with native Tauri 2 minimize, maximize, and safe close confirmation.
+            - True Audio Quality system: FLAC 16/24-bit, WAV PCM up to 192 kHz, transparent transcode disclosure.
+            - Post-download FFprobe audio stream verification.
             - Built-in `yt-dlp` and `FFmpeg` engines bundled.
             - Spotify music downloading & tagging with metadata preservation.
             - Dynamic stream format inspector & video/audio muxing.

@@ -5,6 +5,7 @@ import {
   EngineStatusMap,
   DiagnosticResult,
   NotificationItem,
+  EngineUpdateResult,
 } from '../types';
 
 export class ApiService {
@@ -19,6 +20,24 @@ export class ApiService {
   public async runDiagnostics(): Promise<{ success: boolean; results: DiagnosticResult[] }> {
     const res = await fetch('/api/engines/diagnostics', { method: 'POST' });
     if (!res.ok) throw new Error('Failed to run diagnostics');
+    return res.json();
+  }
+
+  public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
+    const res = await fetch('/api/engines/updates');
+    if (!res.ok) throw new Error('Failed to check engine updates');
+    return res.json();
+  }
+
+  public async updateEngine(name: string): Promise<EngineUpdateResult> {
+    const res = await fetch(`/api/engines/update/${name}`, { method: 'POST' });
+    if (!res.ok) throw new Error(`Failed to update ${name}`);
+    return res.json();
+  }
+
+  public async updateAllEngines(): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
+    const res = await fetch('/api/engines/update-all', { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to update engines');
     return res.json();
   }
 

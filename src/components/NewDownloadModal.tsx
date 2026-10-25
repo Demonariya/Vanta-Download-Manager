@@ -15,10 +15,12 @@ import {
   Sparkles,
   ClipboardPaste,
   FileText,
+  Info,
 } from 'lucide-react';
 import { MediaMetadata, FormatOption, TaskPriority } from '../types';
 import { api } from '../services/api';
 import { formatBytes } from '../utils/engine-parser';
+import { isLikelyLossySource } from '../utils/audio-quality';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
@@ -65,6 +67,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [selectedContainer, setSelectedContainer] = useState<string>('mp4');
   const [selectedAudioFormat, setSelectedAudioFormat] = useState<string>('mp3');
   const [selectedAudioBitrate, setSelectedAudioBitrate] = useState<string>('320k');
+  const [selectedBitDepth, setSelectedBitDepth] = useState<number>(24);
+  const [selectedSampleRate, setSelectedSampleRate] = useState<number>(48000);
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -109,6 +113,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   };
 
   const handleSubmit = async (quickDownload = false) => {
+    const isLossless = selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav';
+
     if (mode === 'batch') {
       const lines = batchUrls
         .split('\n')
@@ -119,14 +125,18 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       setIsSubmitting(true);
 
       for (const line of lines) {
+        const isAudioOnly = selectedTab === 'audio';
         await api.createTask({
           url: line,
           title: `Batch Item: ${line.substring(0, 40)}`,
-          format_id: selectedTab === 'audio' ? 'bestaudio' : 'best',
-          ext: selectedTab === 'audio' ? selectedAudioFormat : 'mp4',
-          is_audio_only: selectedTab === 'audio',
+          format_id: isAudioOnly ? 'bestaudio' : 'best',
+          ext: isAudioOnly ? selectedAudioFormat : 'mp4',
+          is_audio_only: isAudioOnly,
           audio_format: selectedAudioFormat,
           audio_bitrate: selectedAudioBitrate,
+          audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+          audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+          is_lossy_source: isLikelyLossySource(line),
           priority,
         });
       }
@@ -142,6 +152,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
     const isAudioOnly = selectedTab === 'audio' || (metadata?.extractor === 'spotdl');
     const chosenFormatId = quickDownload ? 'best' : selectedFormatId;
+    const isSourceLossy = isLikelyLossySource(url.trim(), metadata?.extractor);
 
     await api.createTask({
       url: url.trim(),
@@ -155,6 +166,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       is_audio_only: isAudioOnly,
       audio_format: selectedAudioFormat,
       audio_bitrate: selectedAudioBitrate,
+      audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+      audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+      is_lossy_source: isSourceLossy,
       priority,
     });
 
@@ -396,37 +410,82 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Audio Format */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-medium text-[#8b949e]">Audio Codec</label>
-                  <select
-                    value={selectedAudioFormat}
-                    onChange={(e) => setSelectedAudioFormat(e.target.value)}
-                    className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
-                  >
-                    <option value="mp3">MP3 (MPEG Audio Layer 3)</option>
-                    <option value="flac">FLAC (Lossless Studio Quality)</option>
-                    <option value="m4a">M4A / AAC (Apple / High Efficiency)</option>
-                    <option value="opus">OPUS (Modern Low-Latency)</option>
-                    <option value="wav">WAV (Uncompressed PCM)</option>
-                  </select>
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Audio Format */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-[#8b949e]">Audio Codec</label>
+                    <select
+                      value={selectedAudioFormat}
+                      onChange={(e) => setSelectedAudioFormat(e.target.value)}
+                      className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+                    >
+                      <option value="mp3">MP3 (MPEG Audio Layer 3)</option>
+                      <option value="flac">FLAC (Lossless Audio Codec)</option>
+                      <option value="wav">WAV (Linear Uncompressed PCM)</option>
+                      <option value="m4a">M4A / AAC (Apple / High Efficiency)</option>
+                      <option value="opus">OPUS (Modern Low-Latency)</option>
+                    </select>
+                  </div>
+
+                  {selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav' ? (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[#8b949e]">PCM Bit Depth</label>
+                      <select
+                        value={selectedBitDepth}
+                        onChange={(e) => setSelectedBitDepth(parseInt(e.target.value, 10))}
+                        className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+                      >
+                        <option value={16}>16-bit (Red Book CD Quality)</option>
+                        <option value={24}>24-bit (Studio Master High Dynamic Range)</option>
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[#8b949e]">Bitrate Quality</label>
+                      <select
+                        value={selectedAudioBitrate}
+                        onChange={(e) => setSelectedAudioBitrate(e.target.value)}
+                        className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+                      >
+                        <option value="320k">320 kbps (High Fidelity CBR)</option>
+                        <option value="256k">256 kbps (Standard High)</option>
+                        <option value="192k">192 kbps (Medium)</option>
+                        <option value="128k">128 kbps (Compact)</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
 
-                {/* Bitrate */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-medium text-[#8b949e]">Bitrate Quality</label>
-                  <select
-                    value={selectedAudioBitrate}
-                    onChange={(e) => setSelectedAudioBitrate(e.target.value)}
-                    className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
-                  >
-                    <option value="320k">320 kbps (High Fidelity)</option>
-                    <option value="256k">256 kbps (Standard High)</option>
-                    <option value="192k">192 kbps (Medium)</option>
-                    <option value="128k">128 kbps (Compact)</option>
-                  </select>
-                </div>
+                {/* Additional Lossless Sample Rate Selector */}
+                {(selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav') && (
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-[#8b949e]">Sampling Rate (Frequency)</label>
+                    <select
+                      value={selectedSampleRate}
+                      onChange={(e) => setSelectedSampleRate(parseInt(e.target.value, 10))}
+                      className="w-full bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+                    >
+                      <option value={44100}>44.1 kHz (CD Standard)</option>
+                      <option value={48000}>48.0 kHz (Studio / Video Standard)</option>
+                      <option value={96000}>96.0 kHz (Hi-Res Audio)</option>
+                      <option value={192000}>192.0 kHz (Ultra High-Res Master)</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* Truthful Lossy-Source Disclosure Banner */}
+                {(selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav') &&
+                  isLikelyLossySource(url, metadata?.extractor) && (
+                    <div className="p-2.5 rounded-lg border border-[#d29922]/30 bg-[#d29922]/10 text-xs text-[#e3b341] flex items-start gap-2">
+                      <Info className="w-4 h-4 shrink-0 mt-0.5 text-[#d29922]" />
+                      <div className="text-[11px] leading-relaxed">
+                        <span className="font-semibold text-white">Lossy Source Stream Detected: </span>
+                        This source (YouTube/Spotify) delivers lossy compressed audio (~128–160 kbps). Converting to{' '}
+                        {selectedAudioFormat.toUpperCase()} ({selectedBitDepth}-bit / {selectedSampleRate / 1000} kHz) produces a lossless container with zero generational re-compression, but cannot recover high-frequency data omitted during original encoding.
+                      </div>
+                    </div>
+                  )}
               </div>
             )}
 

@@ -60,6 +60,13 @@ db.exec(`
   );
 `);
 
+// Safe column migrations
+try { db.exec('ALTER TABLE tasks ADD COLUMN audio_sample_rate INTEGER'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN audio_bit_depth INTEGER'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN audio_channels INTEGER'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT'); } catch {}
+
 const DEFAULT_SETTINGS: AppSettings = {
   download_dir: path.resolve(process.cwd(), 'downloads'),
   max_concurrent_downloads: 3,
@@ -122,6 +129,7 @@ export function getAllTasks(): DownloadTask[] {
   return rows.map((r) => ({
     ...r,
     is_audio_only: Boolean(r.is_audio_only),
+    is_lossy_source: Boolean(r.is_lossy_source),
     progress_percentage: Number(r.progress_percentage || 0),
     speed_bytes_per_sec: Number(r.speed_bytes_per_sec || 0),
     downloaded_bytes: Number(r.downloaded_bytes || 0),
@@ -139,6 +147,7 @@ export function getTaskById(id: string): DownloadTask | null {
   return {
     ...r,
     is_audio_only: Boolean(r.is_audio_only),
+    is_lossy_source: Boolean(r.is_lossy_source),
     progress_percentage: Number(r.progress_percentage || 0),
     speed_bytes_per_sec: Number(r.speed_bytes_per_sec || 0),
     downloaded_bytes: Number(r.downloaded_bytes || 0),
@@ -154,12 +163,14 @@ export function upsertTask(task: DownloadTask): void {
       id, url, title, uploader, duration, duration_string, thumbnail, engine, status,
       progress_percentage, speed_str, speed_bytes_per_sec, downloaded_bytes, total_bytes,
       eta_str, current_phase, format_id, format_note, ext, is_audio_only, audio_format,
-      audio_bitrate, output_path, error_message, priority, created_at, completed_at,
+      audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
+      verified_audio_info, output_path, error_message, priority, created_at, completed_at,
       retries, max_retries
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?,
       ?, ?
     )
@@ -169,32 +180,37 @@ export function upsertTask(task: DownloadTask): void {
     task.id,
     task.url,
     task.title,
-    task.uploader || null,
-    task.duration || null,
-    task.duration_string || null,
-    task.thumbnail || null,
+    task.uploader ?? null,
+    task.duration ?? null,
+    task.duration_string ?? null,
+    task.thumbnail ?? null,
     task.engine,
     task.status,
-    task.progress_percentage,
-    task.speed_str,
-    task.speed_bytes_per_sec,
-    task.downloaded_bytes,
-    task.total_bytes,
-    task.eta_str,
-    task.current_phase,
-    task.format_id,
-    task.format_note || null,
-    task.ext,
+    task.progress_percentage ?? 0,
+    task.speed_str ?? '0 B/s',
+    task.speed_bytes_per_sec ?? 0,
+    task.downloaded_bytes ?? 0,
+    task.total_bytes ?? 0,
+    task.eta_str ?? '--:--',
+    task.current_phase ?? 'Queued',
+    task.format_id ?? 'best',
+    task.format_note ?? null,
+    task.ext ?? 'mp4',
     task.is_audio_only ? 1 : 0,
-    task.audio_format || null,
-    task.audio_bitrate || null,
-    task.output_path,
-    task.error_message || null,
-    task.priority,
-    task.created_at,
-    task.completed_at || null,
-    task.retries,
-    task.max_retries
+    task.audio_format ?? null,
+    task.audio_bitrate ?? null,
+    task.audio_sample_rate ?? null,
+    task.audio_bit_depth ?? null,
+    task.audio_channels ?? null,
+    task.is_lossy_source ? 1 : 0,
+    task.verified_audio_info ?? null,
+    task.output_path ?? '',
+    task.error_message ?? null,
+    task.priority ?? 'normal',
+    task.created_at ?? new Date().toISOString(),
+    task.completed_at ?? null,
+    task.retries ?? 0,
+    task.max_retries ?? 3
   );
 }
 

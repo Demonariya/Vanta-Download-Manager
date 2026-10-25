@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { DownloadTask, TaskStatus, TaskPriority } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
+import { formatAudioQualityBadge } from '../utils/audio-quality';
 
 interface QueueViewProps {
   tasks: DownloadTask[];
@@ -195,7 +196,24 @@ export const QueueView: React.FC<QueueViewProps> = ({
                     <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#8b949e] mt-1 font-mono">
                       <span>{task.engine}</span>
                       <span aria-hidden="true">·</span>
-                      <span>{task.is_audio_only ? `${task.audio_format?.toUpperCase()} (${task.audio_bitrate})` : task.ext.toUpperCase()}</span>
+                      {task.verified_audio_info ? (
+                        <span className="text-[#3fb950] font-mono text-[10px] bg-[#238636]/15 border border-[#238636]/30 px-1.5 py-0.5 rounded">
+                          {task.verified_audio_info} {task.is_lossy_source ? '(Transcoded)' : ''}
+                        </span>
+                      ) : task.is_audio_only ? (
+                        <span className="text-[#58a6ff] font-mono text-[10px] bg-[#1f6feb]/15 border border-[#1f6feb]/30 px-1.5 py-0.5 rounded">
+                          {formatAudioQualityBadge(
+                            task.audio_format || task.ext,
+                            task.audio_bit_depth,
+                            task.audio_sample_rate,
+                            task.audio_bitrate,
+                            task.is_lossy_source,
+                            false
+                          )}
+                        </span>
+                      ) : (
+                        <span>{task.ext.toUpperCase()}</span>
+                      )}
                       {task.uploader && (
                         <>
                           <span aria-hidden="true">·</span>

@@ -16,6 +16,8 @@ fn main() {
         default_video_format: "best".to_string(),
         default_audio_format: "mp3".to_string(),
         default_audio_bitrate: "320k".to_string(),
+        default_audio_bit_depth: Some(24),
+        default_audio_sample_rate: Some(48000),
         embed_thumbnail: true,
         embed_metadata: true,
         filename_template: "%(title)s [%(id)s].%(ext)s".to_string(),

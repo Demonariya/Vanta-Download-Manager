@@ -26,7 +26,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
 
   app.use(express.json());
 
@@ -53,6 +53,34 @@ async function startServer() {
       res.json({ success: true, results });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Engine updates
+  app.get('/api/engines/updates', async (req: Request, res: Response) => {
+    try {
+      const updates = await engineManager.checkEngineUpdates();
+      res.json(updates);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to check engine updates' });
+    }
+  });
+
+  app.post('/api/engines/update/:name', async (req: Request, res: Response) => {
+    try {
+      const result = await engineManager.updateEngine(req.params.name);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to update engine' });
+    }
+  });
+
+  app.post('/api/engines/update-all', async (req: Request, res: Response) => {
+    try {
+      const results = await engineManager.updateAllEngines();
+      res.json({ success: true, results });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to update engines' });
     }
   });
 
@@ -94,6 +122,10 @@ async function startServer() {
       audio_bitrate,
       priority,
       output_path,
+      audio_sample_rate,
+      audio_bit_depth,
+      audio_channels,
+      is_lossy_source,
     } = req.body;
 
     if (!url) {
@@ -126,6 +158,10 @@ async function startServer() {
       is_audio_only: Boolean(is_audio_only),
       audio_format: audio_format || settings.default_audio_format,
       audio_bitrate: audio_bitrate || settings.default_audio_bitrate,
+      audio_sample_rate: audio_sample_rate ? parseInt(audio_sample_rate, 10) : settings.default_audio_sample_rate,
+      audio_bit_depth: audio_bit_depth ? parseInt(audio_bit_depth, 10) : settings.default_audio_bit_depth,
+      audio_channels: audio_channels ? parseInt(audio_channels, 10) : undefined,
+      is_lossy_source: is_lossy_source !== undefined ? Boolean(is_lossy_source) : false,
       output_path: output_path || settings.download_dir,
       priority: priority || 'normal',
       created_at: new Date().toISOString(),

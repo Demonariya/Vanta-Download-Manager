@@ -1,2 +1,6 @@
-#!/bin/sh
-exec python3 -m spotdl "$@"
+#!/usr/bin/python3
+import sys
+from spotdl import console_entry_point
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(console_entry_point())

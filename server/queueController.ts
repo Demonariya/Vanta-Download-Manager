@@ -9,6 +9,7 @@ import {
 } from './db';
 import { engineManager } from './engineManager';
 import { sortQueue, getActiveDownloadCount, shouldAutoRetry } from '../src/utils/queue-logic';
+import { classifyDownloadError, sanitizeLog } from '../src/utils/error-classifier';
 
 export class QueueController {
   private sseClients: Set<Response> = new Set();
@@ -146,6 +147,14 @@ export class QueueController {
         current.speed_str = '0 B/s';
         current.speed_bytes_per_sec = 0;
         current.eta_str = 'Finished';
+
+        if (current.is_audio_only || current.audio_format) {
+          const verified = engineManager.verifyAudioFile(outputPath);
+          if (verified) {
+            current.verified_audio_info = verified;
+          }
+        }
+
         upsertTask(current);
         this.broadcast('task_updated', current);
 
@@ -165,12 +174,53 @@ export class QueueController {
         const current = getTaskById(taskId);
         if (!current) return;
 
-        // Auto retry check
-        if (settings.auto_retry_failed && shouldAutoRetry(current, current.max_retries)) {
+        const classified = classifyDownloadError(errorMessage, current.retries);
+        const canRetry = current.retries < current.max_retries;
+
+        // 1. Recoverable via Re-Extraction (HTTP 410 Gone / Expired Media URL)
+        if (classified.suggestedAction === 're_extract' && canRetry) {
           current.retries += 1;
           current.status = 'queued';
-          current.current_phase = `Retry ${current.retries}/${current.max_retries} scheduled`;
-          current.error_message = errorMessage;
+          current.current_phase = `Expired URL detected (HTTP 410). Purging cache & re-extracting tokens... (${current.retries}/${current.max_retries})`;
+          current.error_message = classified.userMessage;
+          upsertTask(current);
+          this.broadcast('task_updated', current);
+
+          const notif: NotificationItem = {
+            id: String(Date.now()),
+            type: 'warning',
+            title: 'HTTP 410 Recovery',
+            message: `Stream expired for "${current.title}". Re-extracting fresh tokens and retrying...`,
+            timestamp: new Date().toISOString(),
+            taskId: current.id,
+          };
+          addNotification(notif);
+          this.broadcast('notification', notif);
+
+          setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 1500);
+          return;
+        }
+
+        // 2. Recoverable via Format Fallback
+        if (classified.suggestedAction === 'fallback_format' && canRetry) {
+          current.retries += 1;
+          current.format_id = 'best';
+          current.status = 'queued';
+          current.current_phase = `Format unavailable. Falling back to universal stream... (${current.retries}/${current.max_retries})`;
+          current.error_message = classified.userMessage;
+          upsertTask(current);
+          this.broadcast('task_updated', current);
+
+          setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 1000);
+          return;
+        }
+
+        // 3. Recoverable via Exponential Backoff (Rate limits, Network timeouts)
+        if (classified.suggestedAction === 'backoff' && canRetry && settings.auto_retry_failed) {
+          current.retries += 1;
+          current.status = 'queued';
+          current.current_phase = `Retry ${current.retries}/${current.max_retries} scheduled: ${classified.userMessage}`;
+          current.error_message = classified.userMessage;
           upsertTask(current);
           this.broadcast('task_updated', current);
 
@@ -178,34 +228,37 @@ export class QueueController {
             id: String(Date.now()),
             type: 'warning',
             title: 'Retrying Download',
-            message: `"${current.title}" failed. Retrying (attempt ${current.retries}/${current.max_retries})...`,
+            message: `"${current.title}": ${classified.userMessage}`,
             timestamp: new Date().toISOString(),
             taskId: current.id,
           };
           addNotification(notif);
           this.broadcast('notification', notif);
-          this.scheduleNext();
-        } else {
-          current.status = 'failed';
-          current.current_phase = 'Failed';
-          current.error_message = errorMessage;
-          current.speed_str = '0 B/s';
-          current.speed_bytes_per_sec = 0;
-          upsertTask(current);
-          this.broadcast('task_updated', current);
 
-          const notif: NotificationItem = {
-            id: String(Date.now()),
-            type: 'error',
-            title: 'Download Failed',
-            message: `"${current.title}": ${errorMessage}`,
-            timestamp: new Date().toISOString(),
-            taskId: current.id,
-          };
-          addNotification(notif);
-          this.broadcast('notification', notif);
-          this.scheduleNext();
+          setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 3000);
+          return;
         }
+
+        // 4. Non-recoverable (DRM, Private, Removed, or retries exhausted)
+        current.status = 'failed';
+        current.current_phase = 'Failed';
+        current.error_message = classified.userMessage;
+        current.speed_str = '0 B/s';
+        current.speed_bytes_per_sec = 0;
+        upsertTask(current);
+        this.broadcast('task_updated', current);
+
+        const notif: NotificationItem = {
+          id: String(Date.now()),
+          type: 'error',
+          title: 'Download Failed',
+          message: `"${current.title}": ${classified.userMessage}`,
+          timestamp: new Date().toISOString(),
+          taskId: current.id,
+        };
+        addNotification(notif);
+        this.broadcast('notification', notif);
+        this.scheduleNext();
       }
     );
   }

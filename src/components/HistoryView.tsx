@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes } from '../utils/engine-parser';
+import { formatAudioQualityBadge } from '../utils/audio-quality';
 
 interface HistoryViewProps {
   tasks: DownloadTask[];
@@ -140,9 +141,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                       <span>{item.engine}</span>
                       <span>·</span>
                       <span className="text-[#c9d1d9]">
-                        {item.is_audio_only
-                          ? `${item.audio_format?.toUpperCase()} (${item.audio_bitrate || '320k'})`
-                          : item.ext.toUpperCase()}
+                        {item.verified_audio_info ? (
+                          <span className="text-[#3fb950] font-mono text-[10px] bg-[#238636]/15 border border-[#238636]/30 px-1.5 py-0.5 rounded">
+                            {item.verified_audio_info} {item.is_lossy_source ? '(Transcoded)' : ''}
+                          </span>
+                        ) : item.is_audio_only ? (
+                          formatAudioQualityBadge(
+                            item.audio_format || item.ext,
+                            item.audio_bit_depth,
+                            item.audio_sample_rate,
+                            item.audio_bitrate,
+                            item.is_lossy_source,
+                            false
+                          )
+                        ) : (
+                          item.ext.toUpperCase()
+                        )}
                       </span>
                       <span>·</span>
                       <span>
@@ -205,9 +219,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                         {item.engine}
                       </td>
                       <td className="py-3 px-4 font-mono text-[#c9d1d9] whitespace-nowrap">
-                        {item.is_audio_only
-                          ? `${item.audio_format?.toUpperCase()} (${item.audio_bitrate || '320k'})`
-                          : item.ext.toUpperCase()}
+                        {item.verified_audio_info ? (
+                          <span className="text-[#3fb950] font-mono text-[10px] bg-[#238636]/15 border border-[#238636]/30 px-1.5 py-0.5 rounded">
+                            {item.verified_audio_info} {item.is_lossy_source ? '(Transcoded)' : ''}
+                          </span>
+                        ) : item.is_audio_only ? (
+                          formatAudioQualityBadge(
+                            item.audio_format || item.ext,
+                            item.audio_bit_depth,
+                            item.audio_sample_rate,
+                            item.audio_bitrate,
+                            item.is_lossy_source,
+                            false
+                          )
+                        ) : (
+                          item.ext.toUpperCase()
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right font-mono tabular-nums text-[#c9d1d9] whitespace-nowrap">
                         {item.total_bytes > 0
