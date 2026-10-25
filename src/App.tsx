@@ -28,6 +28,8 @@ import { SafeCloseDialog } from './components/SafeCloseDialog';
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [historyTasks, setHistoryTasks] = useState<DownloadTask[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -71,10 +73,11 @@ export default function App() {
   // Load initial data & subscribe to real-time events
   useEffect(() => {
     // 1. Initial fetches
-    api.getEngineStatus().then(setEngineStatus).catch(console.error);
-    api.getSettings().then(setSettings).catch(console.error);
-    api.getTasks().then(setTasks).catch(console.error);
-    api.getNotifications().then(setNotifications).catch(console.error);
+    api.getEngineStatus().then(setEngineStatus).catch((error) => setActionError(error instanceof Error ? error.message : String(error)));
+    api.getSettings().then(setSettings).catch((error) => setActionError(error instanceof Error ? error.message : String(error)));
+    api.getTasks().then(setTasks).catch((error) => setActionError(error instanceof Error ? error.message : String(error)));
+    api.getNotifications().then(setNotifications).catch((error) => setActionError(error instanceof Error ? error.message : String(error)));
+    api.getDownloadHistory().then(setHistoryTasks).catch((error) => setActionError(error instanceof Error ? error.message : String(error)));
 
     // 2. Real-time SSE subscription
     const unsubscribe = api.subscribeEvents({
@@ -92,6 +95,9 @@ export default function App() {
           }
           return [updatedTask, ...prev];
         });
+        if (updatedTask.status === 'completed' || updatedTask.status === 'failed' || updatedTask.status === 'cancelled') {
+          setHistoryTasks((prev) => [updatedTask, ...prev.filter((task) => task.id !== updatedTask.id)]);
+        }
       },
       onTaskAdded: (newTask) => {
         setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
@@ -120,46 +126,67 @@ export default function App() {
     setIsNewDownloadOpen(true);
   };
 
-  const handlePauseTask = async (id: string) => {
-    await api.pauseTask(id);
+  const reportActionError = (error: unknown) => {
+    setActionError(error instanceof Error ? error.message : String(error));
   };
 
-  const handleResumeTask = async (id: string) => {
-    await api.resumeTask(id);
+  const runAction = async (operation: () => Promise<unknown>) => {
+    setActionError(null);
+    try {
+      await operation();
+    } catch (error) {
+      reportActionError(error);
+    }
   };
 
-  const handleCancelTask = async (id: string) => {
-    await api.cancelTask(id);
+  const handlePauseTask = async (id: string) => runAction(() => api.pauseTask(id));
+  const handleResumeTask = async (id: string) => runAction(() => api.resumeTask(id));
+  const handleCancelTask = async (id: string) => runAction(() => api.cancelTask(id));
+  const handleRetryTask = async (id: string) => runAction(() => api.retryTask(id));
+  const handleDeleteTask = async (id: string) => runAction(() => api.deleteTask(id));
+  const handlePauseAll = async () => runAction(() => api.pauseAll());
+  const handleResumeAll = async () => runAction(() => api.resumeAll());
+  const handleClearCompleted = async () => runAction(() => api.clearCompleted());
+
+  const handleClearHistory = async () => {
+    setActionError(null);
+    try {
+      await api.clearDownloadHistory();
+      setHistoryTasks([]);
+    } catch (error) {
+      reportActionError(error);
+    }
   };
 
-  const handleRetryTask = async (id: string) => {
-    await api.retryTask(id);
-  };
-
-  const handleDeleteTask = async (id: string) => {
-    await api.deleteTask(id);
-  };
-
-  const handlePauseAll = async () => {
-    await api.pauseAll();
-  };
-
-  const handleResumeAll = async () => {
-    await api.resumeAll();
-  };
-
-  const handleClearCompleted = async () => {
-    await api.clearCompleted();
+  const handleDeleteHistoryTask = async (id: string) => {
+    setActionError(null);
+    try {
+      await api.deleteHistoryEntry(id);
+      setHistoryTasks((prev) => prev.filter((task) => task.id !== id));
+    } catch (error) {
+      reportActionError(error);
+    }
   };
 
   const handleRefreshEngines = async () => {
-    const updated = await api.getEngineStatus();
-    setEngineStatus(updated);
+    setActionError(null);
+    try {
+      const updated = await api.getEngineStatus();
+      setEngineStatus(updated);
+    } catch (error) {
+      reportActionError(error);
+    }
   };
 
   const handleSaveSettings = async (newSettings: Partial<AppSettings>) => {
-    const saved = await api.updateSettings(newSettings);
-    setSettings(saved);
+    setActionError(null);
+    try {
+      const saved = await api.updateSettings(newSettings);
+      setSettings(saved);
+    } catch (error) {
+      reportActionError(error);
+      throw error;
+    }
   };
 
   const activeCount = tasks.filter(
@@ -173,6 +200,13 @@ export default function App() {
         activeDownloadsCount={activeCount}
         onRequestClose={handleInitiateClose}
       />
+
+      {actionError && (
+        <div role="alert" className="flex items-start justify-between gap-3 border-b border-[#da3633]/40 bg-[#da3633]/10 px-4 py-2 text-xs text-[#f85149]">
+          <span className="min-w-0 break-words">Operation failed: {actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="shrink-0 text-[#c9d1d9] hover:text-white">Dismiss</button>
+        </div>
+      )}
 
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
         {/* Sidebar Navigation */}
@@ -304,9 +338,9 @@ export default function App() {
 
           {activeTab === 'history' && (
             <HistoryView
-              tasks={tasks}
-              onClearHistory={handleClearCompleted}
-              onDeleteTask={handleDeleteTask}
+              tasks={historyTasks}
+              onClearHistory={handleClearHistory}
+              onDeleteTask={handleDeleteHistoryTask}
             />
           )}
 

@@ -108,6 +108,14 @@ export class ApiService {
     return invoke<DownloadTask[]>('get_download_history');
   }
 
+  public deleteHistoryEntry(id: string): Promise<void> {
+    return invoke<void>('delete_download_history_entry', { id });
+  }
+
+  public clearDownloadHistory(): Promise<void> {
+    return invoke<void>('clear_download_history');
+  }
+
   public openDownloadedFile(path: string): Promise<void> {
     return invoke<void>('open_downloaded_file', { path });
   }

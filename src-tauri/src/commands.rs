@@ -368,7 +368,19 @@ pub fn clear_notifications(app: AppHandle, state: State<'_, AppState>) -> Result
 
 #[tauri::command]
 pub fn get_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
-    Ok(state.tasks_snapshot()?.into_iter().filter(|t| t.status == TaskStatus::Completed).collect())
+    state.history_snapshot()
+}
+
+#[tauri::command]
+pub fn delete_download_history_entry(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.delete_history_entry(&id)
+}
+
+#[tauri::command]
+pub fn clear_download_history(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.clear_download_history()?;
+    let _ = app.emit("download_history_cleared", true);
+    Ok(())
 }
 
 #[tauri::command]

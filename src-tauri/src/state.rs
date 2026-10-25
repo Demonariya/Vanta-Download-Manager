@@ -54,9 +54,34 @@ impl AppState {
                 id TEXT PRIMARY KEY NOT NULL,
                 payload TEXT NOT NULL,
                 timestamp TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS native_history (
+                id TEXT PRIMARY KEY NOT NULL,
+                payload TEXT NOT NULL,
+                terminal_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS native_migrations (
+                key TEXT PRIMARY KEY NOT NULL
              );",
         )
         .map_err(|e| format!("Cannot initialize application database: {e}"))?;
+
+        let history_migrated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM native_migrations WHERE key='history-v1'",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| format!("Cannot inspect history migration state: {e}"))?;
+        if history_migrated == 0 {
+            conn.execute(
+                "INSERT OR IGNORE INTO native_history(id,payload,terminal_at)
+                 SELECT id, payload, COALESCE(json_extract(payload, '$.completed_at'), updated_at)
+                 FROM native_tasks
+                 WHERE json_extract(payload, '$.status') IN ('completed', 'failed', 'cancelled')",
+                [],
+            ).map_err(|e| format!("Cannot migrate existing download history: {e}"))?;
+            conn.execute("INSERT INTO native_migrations(key) VALUES('history-v1')", [])
+                .map_err(|e| format!("Cannot record history migration: {e}"))?;
+        }
 
         let mut stored_tasks: Vec<DownloadTask> = {
             let mut stmt = conn
@@ -164,21 +189,57 @@ impl AppState {
 
     pub fn save_task(&self, task: DownloadTask) -> Result<(), String> {
         let json = serde_json::to_string(&task).map_err(|e| format!("Cannot encode task: {e}"))?;
-        self.db
-            .lock()
-            .map_err(|_| "Database lock is poisoned".to_string())?
-            .execute(
-                "INSERT INTO native_tasks(id,payload,updated_at) VALUES(?1,?2,?3)
-                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
-                params![task.id, json, chrono::Utc::now().to_rfc3339()],
-            )
-            .map_err(|e| format!("Cannot save task: {e}"))?;
+        let mut db = self.db.lock().map_err(|_| "Database lock is poisoned".to_string())?;
+        db.execute(
+            "INSERT INTO native_tasks(id,payload,updated_at) VALUES(?1,?2,?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id, json, chrono::Utc::now().to_rfc3339()],
+        ).map_err(|e| format!("Cannot save task: {e}"))?;
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
+            let terminal_at = task.completed_at.clone().unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            db.execute(
+                "INSERT INTO native_history(id,payload,terminal_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, terminal_at=excluded.terminal_at",
+                params![task.id, json, terminal_at],
+            ).map_err(|e| format!("Cannot save download history: {e}"))?;
+        }
+        drop(db);
         let mut tasks = self.tasks.lock().map_err(|_| "Task state lock is poisoned".to_string())?;
         if let Some(existing) = tasks.iter_mut().find(|entry| entry.id == task.id) {
             *existing = task;
         } else {
             tasks.push(task);
         }
+        Ok(())
+    }
+
+    pub fn history_snapshot(&self) -> Result<Vec<DownloadTask>, String> {
+        let db = self.db.lock().map_err(|_| "Database lock is poisoned".to_string())?;
+        let mut stmt = db.prepare("SELECT payload FROM native_history ORDER BY terminal_at DESC")
+            .map_err(|e| format!("Cannot read download history: {e}"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Cannot query download history: {e}"))?;
+        let mut history = Vec::new();
+        for row in rows {
+            let json = row.map_err(|e| format!("Cannot read history record: {e}"))?;
+            let task = serde_json::from_str::<DownloadTask>(&json)
+                .map_err(|e| format!("Cannot decode history record: {e}"))?;
+            history.push(task);
+        }
+        Ok(history)
+    }
+
+    pub fn delete_history_entry(&self, id: &str) -> Result<(), String> {
+        self.db.lock().map_err(|_| "Database lock is poisoned".to_string())?
+            .execute("DELETE FROM native_history WHERE id=?1", params![id])
+            .map_err(|e| format!("Cannot delete history entry: {e}"))?;
+        Ok(())
+    }
+
+    pub fn clear_download_history(&self) -> Result<(), String> {
+        self.db.lock().map_err(|_| "Database lock is poisoned".to_string())?
+            .execute("DELETE FROM native_history", [])
+            .map_err(|e| format!("Cannot clear download history: {e}"))?;
         Ok(())
     }
 
@@ -289,5 +350,65 @@ impl AppState {
             .lock()
             .map(|items| items.clone())
             .map_err(|_| "Notification lock is poisoned".to_string())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::models::{EngineType, TaskPriority};
+
+    fn terminal_task() -> DownloadTask {
+        DownloadTask {
+            id: "history-test-task".into(),
+            url: "https://example.com/video".into(),
+            title: "Test Video".into(),
+            uploader: None,
+            duration: Some(60),
+            duration_string: Some("00:01:00".into()),
+            thumbnail: None,
+            engine: EngineType::YtDlp,
+            status: TaskStatus::Completed,
+            progress_percentage: 100.0,
+            speed_str: "0 B/s".into(),
+            speed_bytes_per_sec: 0.0,
+            downloaded_bytes: 100,
+            total_bytes: 100,
+            eta_str: "00:00".into(),
+            current_phase: "Completed".into(),
+            format_id: "best".into(),
+            format_note: None,
+            ext: "mp4".into(),
+            is_audio_only: false,
+            audio_format: None,
+            audio_bitrate: None,
+            audio_sample_rate: None,
+            audio_bit_depth: None,
+            audio_channels: None,
+            is_lossy_source: None,
+            verified_audio_info: None,
+            output_path: "C:/downloads/test.mp4".into(),
+            error_message: None,
+            priority: TaskPriority::Normal,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: Some(chrono::Utc::now().to_rfc3339()),
+            retries: 0,
+            max_retries: 3,
+        }
+    }
+
+    #[test]
+    fn clearing_queue_items_does_not_delete_history() {
+        let dir = std::env::temp_dir().join(format!("vanta-history-test-{}", Uuid::new_v4()));
+        let state = AppState::new(dir.clone()).expect("temporary state should initialize");
+        state.save_task(terminal_task()).expect("task should persist");
+        assert_eq!(state.history_snapshot().expect("history should load").len(), 1);
+        state.clear_completed().expect("queue records should clear");
+        assert!(state.tasks_snapshot().expect("tasks should load").is_empty());
+        assert_eq!(state.history_snapshot().expect("history should persist").len(), 1);
+        state.clear_download_history().expect("history should clear");
+        assert!(state.history_snapshot().expect("history should load").is_empty());
+        drop(state);
+        let _ = fs::remove_dir_all(dir);
     }
 }

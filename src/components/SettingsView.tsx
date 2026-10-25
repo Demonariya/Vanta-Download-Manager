@@ -16,7 +16,7 @@ import { AppSettings } from '../types';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
-  onSaveSettings: (settings: Partial<AppSettings>) => void;
+  onSaveSettings: (settings: Partial<AppSettings>) => void | Promise<void>;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -25,6 +25,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const [form, setForm] = useState<AppSettings | null>(settings);
   const [isSaved, setIsSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings) {
@@ -34,11 +36,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   if (!form) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveSettings(form);
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2500);
+    setSaveError(null);
+    setIsSaved(false);
+    setIsSaving(true);
+    try {
+      await onSaveSettings(form);
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 2500);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -57,9 +68,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           className="px-4 py-2 bg-[#238636] hover:bg-[#2ea043] text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors shadow-sm"
         >
           {isSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-          <span>{isSaved ? 'Settings Saved' : 'Save Changes'}</span>
+          <span>{isSaving ? 'Saving…' : isSaved ? 'Settings Saved' : 'Save Changes'}</span>
         </button>
       </div>
+
+      {saveError && (
+        <div role="alert" className="p-3 rounded-lg border border-[#da3633]/40 bg-[#da3633]/10 text-xs text-[#f85149] break-words">
+          Settings were not saved: {saveError}
+        </div>
+      )}
 
       {/* Section 1: Performance & Concurrency */}
       <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">

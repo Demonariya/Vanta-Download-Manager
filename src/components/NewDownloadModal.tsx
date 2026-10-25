@@ -71,6 +71,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [selectedSampleRate, setSelectedSampleRate] = useState<number>(48000);
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialUrl && initialUrl !== url) {
@@ -114,67 +115,96 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   const handleSubmit = async (quickDownload = false) => {
     const isLossless = selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav';
+    setSubmitError(null);
 
     if (mode === 'batch') {
       const lines = batchUrls
         .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => Boolean(l));
+        .map((line) => line.trim())
+        .filter(Boolean);
 
       if (lines.length === 0) return;
       setIsSubmitting(true);
 
-      for (const line of lines) {
-        const isAudioOnly = selectedTab === 'audio';
-        await api.createTask({
-          url: line,
-          title: `Batch Item: ${line.substring(0, 40)}`,
-          format_id: isAudioOnly ? 'bestaudio' : 'best',
-          ext: isAudioOnly ? selectedAudioFormat : 'mp4',
-          is_audio_only: isAudioOnly,
-          audio_format: selectedAudioFormat,
-          audio_bitrate: selectedAudioBitrate,
-          audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
-          audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
-          is_lossy_source: isLikelyLossySource(line),
-          priority,
-        });
-      }
+      const failed: Array<{ url: string; message: string }> = [];
+      let added = 0;
+      const isAudioOnly = selectedTab === 'audio';
 
-      setIsSubmitting(false);
-      onTaskCreated();
-      onClose();
+      try {
+        for (const line of lines) {
+          try {
+            await api.createTask({
+              url: line,
+              title: `Batch Item: ${line.substring(0, 40)}`,
+              format_id: isAudioOnly ? 'bestaudio' : 'best',
+              ext: isAudioOnly ? selectedAudioFormat : 'mp4',
+              is_audio_only: isAudioOnly,
+              audio_format: selectedAudioFormat,
+              audio_bitrate: selectedAudioBitrate,
+              audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+              audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+              is_lossy_source: isLikelyLossySource(line),
+              priority,
+            });
+            added += 1;
+          } catch (error) {
+            failed.push({
+              url: line,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        if (added > 0) onTaskCreated();
+        if (failed.length > 0) {
+          // Keep only failed URLs in the input so another attempt cannot duplicate
+          // items that were already accepted by the native queue.
+          setBatchUrls(failed.map((item) => item.url).join('\n'));
+          const details = failed.slice(0, 3).map((item) => item.message).join(' · ');
+          setSubmitError(
+            `${added} URL(s) added; ${failed.length} failed. Only failed URLs remain in the batch field. ${details}`,
+          );
+        } else {
+          onClose();
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
     if (!url.trim()) return;
     setIsSubmitting(true);
 
-    const isAudioOnly = selectedTab === 'audio' || (metadata?.extractor === 'spotdl');
+    const isAudioOnly = selectedTab === 'audio' || metadata?.extractor === 'spotdl';
     const chosenFormatId = quickDownload ? 'best' : selectedFormatId;
     const isSourceLossy = isLikelyLossySource(url.trim(), metadata?.extractor);
 
-    await api.createTask({
-      url: url.trim(),
-      title: metadata?.title || 'Download Task',
-      uploader: metadata?.uploader,
-      duration: metadata?.duration,
-      duration_string: metadata?.duration_string,
-      thumbnail: metadata?.thumbnail,
-      format_id: chosenFormatId,
-      ext: isAudioOnly ? selectedAudioFormat : selectedContainer,
-      is_audio_only: isAudioOnly,
-      audio_format: selectedAudioFormat,
-      audio_bitrate: selectedAudioBitrate,
-      audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
-      audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
-      is_lossy_source: isSourceLossy,
-      priority,
-    });
-
-    setIsSubmitting(false);
-    onTaskCreated();
-    onClose();
+    try {
+      await api.createTask({
+        url: url.trim(),
+        title: metadata?.title || 'Download Task',
+        uploader: metadata?.uploader,
+        duration: metadata?.duration,
+        duration_string: metadata?.duration_string,
+        thumbnail: metadata?.thumbnail,
+        format_id: chosenFormatId,
+        ext: isAudioOnly ? selectedAudioFormat : selectedContainer,
+        is_audio_only: isAudioOnly,
+        audio_format: selectedAudioFormat,
+        audio_bitrate: selectedAudioBitrate,
+        audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+        audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+        is_lossy_source: isSourceLossy,
+        priority,
+      });
+      onTaskCreated();
+      onClose();
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -197,6 +227,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
         {/* Content Body */}
         <div className="p-3.5 sm:p-5 overflow-y-auto space-y-4">
+          {submitError && (
+            <div role="alert" className="rounded-lg border border-[#da3633]/40 bg-[#da3633]/10 p-3 text-xs text-[#f85149] break-words">
+              {submitError}
+            </div>
+          )}
+
           {/* Mode Switcher */}
           <div className="flex items-center gap-1 p-1 bg-[#161b22] border border-[#21262d] rounded-lg">
             <button

@@ -39,6 +39,8 @@ fn main() {
             commands::get_notifications,
             commands::clear_notifications,
             commands::get_download_history,
+            commands::delete_download_history_entry,
+            commands::clear_download_history,
             commands::open_downloaded_file,
             commands::reveal_download_in_folder,
             commands::choose_download_directory
