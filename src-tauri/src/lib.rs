@@ -1,12 +1,9 @@
+pub mod commands;
+pub mod engines;
 pub mod models;
+pub mod state;
 
-use models::{AppSettings, DownloadTask};
-use std::sync::Mutex;
-
-pub struct AppState {
-    pub tasks: Mutex<Vec<DownloadTask>>,
-    pub settings: Mutex<AppSettings>,
-}
+pub use state::AppState;
 
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -17,22 +14,21 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-pub fn parse_bytes(s: &str) -> u64 {
-    let s = s.trim().to_uppercase();
-    if s.ends_with("GIB") || s.ends_with("GB") {
-        let num: f64 = s.trim_end_matches("GIB").trim_end_matches("GB").trim().parse().unwrap_or(0.0);
-        (num * 1024.0 * 1024.0 * 1024.0) as u64
-    } else if s.ends_with("MIB") || s.ends_with("MB") {
-        let num: f64 = s.trim_end_matches("MIB").trim_end_matches("MB").trim().parse().unwrap_or(0.0);
-        (num * 1024.0 * 1024.0) as u64
-    } else if s.ends_with("KIB") || s.ends_with("KB") {
-        let num: f64 = s.trim_end_matches("KIB").trim_end_matches("KB").trim().parse().unwrap_or(0.0);
-        (num * 1024.0) as u64
-    } else if s.ends_with('B') {
-        s.trim_end_matches('B').trim().parse().unwrap_or(0)
-    } else {
-        s.parse().unwrap_or(0)
+pub fn parse_bytes(input: &str) -> u64 {
+    let text = input.trim().to_ascii_uppercase();
+    for (suffix, multiplier) in [
+        ("GIB", 1_073_741_824.0),
+        ("GB", 1_073_741_824.0),
+        ("MIB", 1_048_576.0),
+        ("MB", 1_048_576.0),
+        ("KIB", 1024.0),
+        ("KB", 1024.0),
+    ] {
+        if let Some(number) = text.strip_suffix(suffix) {
+            return number.trim().parse::<f64>().map(|n| (n.max(0.0) * multiplier) as u64).unwrap_or(0);
+        }
     }
+    text.strip_suffix('B').unwrap_or(&text).trim().parse().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -40,21 +36,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sanitize_filename() {
-        let raw = "Video: Title / Episode * 1 <HD>?.mp4";
-        let cleaned = sanitize_filename(raw);
-        assert!(!cleaned.contains(':'));
-        assert!(!cleaned.contains('/'));
-        assert!(!cleaned.contains('*'));
-        assert!(!cleaned.contains('<'));
-        assert!(!cleaned.contains('>'));
-        assert!(!cleaned.contains('?'));
+    fn sanitize_filename_removes_windows_invalid_characters() {
+        let cleaned = sanitize_filename("Video: Title / Episode * 1 <HD>?.mp4");
+        for invalid in [':', '/', '*', '<', '>', '?'] {
+            assert!(!cleaned.contains(invalid));
+        }
     }
 
     #[test]
-    fn test_parse_bytes() {
+    fn parses_common_byte_units() {
         assert_eq!(parse_bytes("1024B"), 1024);
-        assert_eq!(parse_bytes("1MB"), 1048576);
-        assert_eq!(parse_bytes("1.5GiB"), 1610612736);
+        assert_eq!(parse_bytes("1MB"), 1_048_576);
+        assert_eq!(parse_bytes("1.5GiB"), 1_610_612_736);
     }
 }

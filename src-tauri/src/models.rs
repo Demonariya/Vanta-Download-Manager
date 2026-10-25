@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Queued,
@@ -9,11 +9,12 @@ pub enum TaskStatus {
     Processing,
     Completed,
     Paused,
+    Retrying,
     Failed,
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskPriority {
     Highest,
@@ -22,11 +23,17 @@ pub enum TaskPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+impl Default for TaskPriority {
+    fn default() -> Self { Self::Normal }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EngineType {
+    #[serde(rename = "yt-dlp")]
     YtDlp,
+    #[serde(rename = "spotdl")]
     Spotdl,
+    #[serde(rename = "ffmpeg")]
     Ffmpeg,
 }
 
@@ -80,6 +87,8 @@ pub struct FormatOption {
     pub acodec: Option<String>,
     pub filesize: Option<u64>,
     pub filesize_approx: Option<u64>,
+    pub tbr: Option<f64>,
+    pub abr: Option<f64>,
     pub format_note: Option<String>,
     pub is_audio_only: bool,
     pub is_video_only: bool,
@@ -102,6 +111,7 @@ pub struct MediaMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineInfo {
     pub available: bool,
     pub version: String,
@@ -109,9 +119,56 @@ pub struct EngineInfo {
     pub status: String,
     pub last_checked: String,
     pub error: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: Option<bool>,
+    pub is_updating: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatusMap {
+    pub ytdlp: EngineInfo,
+    pub spotdl: EngineInfo,
+    pub ffmpeg: EngineInfo,
+    pub ffprobe: EngineInfo,
+    pub python3: EngineInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineUpdateResult {
+    pub engine: String,
+    pub success: bool,
+    pub previous_version: String,
+    pub current_version: String,
+    pub message: String,
+    pub rolled_back: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticResult {
+    pub engine: String,
+    pub passed: bool,
+    pub version: Option<String>,
+    pub command: String,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub title: String,
+    pub message: String,
+    pub timestamp: String,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub download_dir: String,
     pub max_concurrent_downloads: u32,
@@ -134,4 +191,32 @@ pub struct AppSettings {
     pub theme: String,
     pub auto_retry_failed: bool,
     pub auto_resume_on_startup: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            download_dir: String::new(),
+            max_concurrent_downloads: 3,
+            fragment_concurrency: 4,
+            global_bandwidth_limit_kbps: 0,
+            per_task_bandwidth_limit_kbps: 0,
+            max_retries: 3,
+            retry_delay_seconds: 5,
+            default_video_format: "best".into(),
+            default_audio_format: "mp3".into(),
+            default_audio_bitrate: "320k".into(),
+            default_audio_bit_depth: Some(24),
+            default_audio_sample_rate: Some(48_000),
+            embed_thumbnail: true,
+            embed_metadata: true,
+            filename_template: "%(title)s [%(id)s].%(ext)s".into(),
+            proxy_url: String::new(),
+            floating_notifications_enabled: true,
+            auto_dismiss_seconds: 5,
+            theme: "dark".into(),
+            auto_retry_failed: true,
+            auto_resume_on_startup: true,
+        }
+    }
 }

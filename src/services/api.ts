@@ -1,4 +1,6 @@
-import {
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type {
   DownloadTask,
   AppSettings,
   MediaMetadata,
@@ -8,175 +10,149 @@ import {
   EngineUpdateResult,
 } from '../types';
 
+type EventCallbacks = {
+  onTaskUpdated?: (task: DownloadTask) => void;
+  onTaskAdded?: (task: DownloadTask) => void;
+  onTaskDeleted?: (data: { id: string }) => void;
+  onTasksCleared?: (tasks: DownloadTask[]) => void;
+  onNotification?: (notification: NotificationItem) => void;
+  onSettingsUpdated?: (settings: AppSettings) => void;
+  onInit?: (data: { tasks: DownloadTask[]; settings: AppSettings }) => void;
+};
+
 export class ApiService {
-  private eventSource: EventSource | null = null;
-
-  public async getEngineStatus(): Promise<EngineStatusMap> {
-    const res = await fetch('/api/engines/status');
-    if (!res.ok) throw new Error('Failed to fetch engine status');
-    return res.json();
+  public getEngineStatus(): Promise<EngineStatusMap> {
+    return invoke<EngineStatusMap>('get_engine_status');
   }
 
-  public async runDiagnostics(): Promise<{ success: boolean; results: DiagnosticResult[] }> {
-    const res = await fetch('/api/engines/diagnostics', { method: 'POST' });
-    if (!res.ok) throw new Error('Failed to run diagnostics');
-    return res.json();
+  public runDiagnostics(): Promise<{ success: boolean; results: DiagnosticResult[] }> {
+    return invoke<DiagnosticResult[]>('run_engine_diagnostics').then((results) => ({
+      success: results.every((item) => item.passed),
+      results,
+    }));
   }
 
-  public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
-    const res = await fetch('/api/engines/updates');
-    if (!res.ok) throw new Error('Failed to check engine updates');
-    return res.json();
+  public checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
+    return invoke('check_engine_updates');
   }
 
-  public async updateEngine(name: string): Promise<EngineUpdateResult> {
-    const res = await fetch(`/api/engines/update/${name}`, { method: 'POST' });
-    if (!res.ok) throw new Error(`Failed to update ${name}`);
-    return res.json();
+  public updateEngine(name: string): Promise<EngineUpdateResult> {
+    return invoke<EngineUpdateResult>('update_engine', { name });
   }
 
-  public async updateAllEngines(): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
-    const res = await fetch('/api/engines/update-all', { method: 'POST' });
-    if (!res.ok) throw new Error('Failed to update engines');
-    return res.json();
+  public updateAllEngines(): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
+    return invoke('update_all_engines');
   }
 
-  public async inspectUrl(url: string): Promise<MediaMetadata> {
-    const res = await fetch('/api/inspect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Extraction failed' }));
-      throw new Error(err.error || 'Failed to inspect URL');
-    }
-    return res.json();
+  public inspectUrl(url: string): Promise<MediaMetadata> {
+    return invoke<MediaMetadata>('inspect_url', { url });
   }
 
-  public async getTasks(): Promise<DownloadTask[]> {
-    const res = await fetch('/api/tasks');
-    if (!res.ok) throw new Error('Failed to fetch tasks');
-    return res.json();
+  public getTasks(): Promise<DownloadTask[]> {
+    return invoke<DownloadTask[]>('get_tasks');
   }
 
-  public async createTask(taskData: Partial<DownloadTask>): Promise<DownloadTask> {
-    const res = await fetch('/api/tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(taskData),
-    });
-    if (!res.ok) throw new Error('Failed to create download task');
-    return res.json();
+  public createTask(taskData: Partial<DownloadTask>): Promise<DownloadTask> {
+    return invoke<DownloadTask>('create_download_task', { taskData });
   }
 
-  public async pauseTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
+  public pauseTask(id: string): Promise<void> {
+    return invoke('pause_task', { id });
   }
 
-  public async resumeTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
+  public resumeTask(id: string): Promise<void> {
+    return invoke('resume_task', { id });
   }
 
-  public async cancelTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}/cancel`, { method: 'POST' });
+  public cancelTask(id: string): Promise<void> {
+    return invoke('cancel_task', { id });
   }
 
-  public async retryTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+  public retryTask(id: string): Promise<void> {
+    return invoke('retry_task', { id });
   }
 
-  public async deleteTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+  public deleteTask(id: string): Promise<void> {
+    return invoke('delete_task', { id });
   }
 
-  public async pauseAll(): Promise<void> {
-    await fetch('/api/tasks/pause-all', { method: 'POST' });
+  public pauseAll(): Promise<void> {
+    return invoke('pause_all_downloads');
   }
 
-  public async resumeAll(): Promise<void> {
-    await fetch('/api/tasks/resume-all', { method: 'POST' });
+  public resumeAll(): Promise<void> {
+    return invoke('resume_all_downloads');
   }
 
-  public async clearCompleted(): Promise<void> {
-    await fetch('/api/tasks/clear-completed', { method: 'POST' });
+  public clearCompleted(): Promise<void> {
+    return invoke('clear_completed_tasks');
   }
 
-  public async getSettings(): Promise<AppSettings> {
-    const res = await fetch('/api/settings');
-    if (!res.ok) throw new Error('Failed to fetch settings');
-    return res.json();
+  public getSettings(): Promise<AppSettings> {
+    return invoke<AppSettings>('get_settings');
   }
 
-  public async updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
-    const res = await fetch('/api/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
-    });
-    if (!res.ok) throw new Error('Failed to update settings');
-    return res.json();
+  public updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+    return invoke<AppSettings>('update_settings', { settings });
   }
 
-  public async getNotifications(): Promise<NotificationItem[]> {
-    const res = await fetch('/api/notifications');
-    if (!res.ok) throw new Error('Failed to fetch notifications');
-    return res.json();
+  public getNotifications(): Promise<NotificationItem[]> {
+    return invoke<NotificationItem[]>('get_notifications');
   }
 
-  public async clearNotifications(): Promise<void> {
-    await fetch('/api/notifications', { method: 'DELETE' });
+  public clearNotifications(): Promise<void> {
+    return invoke('clear_notifications');
   }
 
-  public subscribeEvents(callbacks: {
-    onTaskUpdated?: (task: DownloadTask) => void;
-    onTaskAdded?: (task: DownloadTask) => void;
-    onTaskDeleted?: (data: { id: string }) => void;
-    onTasksCleared?: (tasks: DownloadTask[]) => void;
-    onNotification?: (notif: NotificationItem) => void;
-    onSettingsUpdated?: (settings: AppSettings) => void;
-    onInit?: (data: { tasks: DownloadTask[]; settings: AppSettings }) => void;
-  }): () => void {
-    if (this.eventSource) {
-      this.eventSource.close();
-    }
+  public getDownloadHistory(): Promise<DownloadTask[]> {
+    return invoke<DownloadTask[]>('get_download_history');
+  }
 
-    const es = new EventSource('/api/events');
-    this.eventSource = es;
+  public openDownloadedFile(path: string): Promise<void> {
+    return invoke('open_downloaded_file', { path });
+  }
 
-    es.addEventListener('task_updated', (e) => {
-      callbacks.onTaskUpdated?.(JSON.parse(e.data));
+  public revealDownloadInFolder(path: string): Promise<void> {
+    return invoke('reveal_download_in_folder', { path });
+  }
+
+  public chooseDownloadDirectory(): Promise<string> {
+    return invoke<string>('choose_download_directory');
+  }
+
+  public subscribeEvents(callbacks: EventCallbacks): () => void {
+    let disposed = false;
+    let unlisteners: Array<() => void> = [];
+    const registrations: Array<[string, (payload: unknown) => void]> = [
+      ['task_updated', (payload) => callbacks.onTaskUpdated?.(payload as DownloadTask)],
+      ['task_added', (payload) => callbacks.onTaskAdded?.(payload as DownloadTask)],
+      ['task_deleted', (payload) => callbacks.onTaskDeleted?.(payload as { id: string })],
+      ['tasks_cleared', (payload) => callbacks.onTasksCleared?.(payload as DownloadTask[])],
+      ['notification', (payload) => callbacks.onNotification?.(payload as NotificationItem)],
+      ['settings_updated', (payload) => callbacks.onSettingsUpdated?.(payload as AppSettings)],
+    ];
+
+    void Promise.all(
+      registrations.map(([eventName, handler]) =>
+        listen<unknown>(eventName, (event) => handler(event.payload)),
+      ),
+    ).then((listeners) => {
+      if (disposed) listeners.forEach((unlisten) => unlisten());
+      else unlisteners = listeners;
+    }).catch((error) => {
+      console.error('Failed to subscribe to VANTA native events:', error);
     });
 
-    es.addEventListener('task_added', (e) => {
-      callbacks.onTaskAdded?.(JSON.parse(e.data));
-    });
-
-    es.addEventListener('task_deleted', (e) => {
-      callbacks.onTaskDeleted?.(JSON.parse(e.data));
-    });
-
-    es.addEventListener('tasks_cleared', (e) => {
-      callbacks.onTasksCleared?.(JSON.parse(e.data));
-    });
-
-    es.addEventListener('notification', (e) => {
-      callbacks.onNotification?.(JSON.parse(e.data));
-    });
-
-    es.addEventListener('settings_updated', (e) => {
-      callbacks.onSettingsUpdated?.(JSON.parse(e.data));
-    });
-
-    es.addEventListener('init', (e) => {
-      callbacks.onInit?.(JSON.parse(e.data));
+    void Promise.all([this.getTasks(), this.getSettings()]).then(([tasks, settings]) => {
+      if (!disposed) callbacks.onInit?.({ tasks, settings });
+    }).catch((error) => {
+      console.error('Failed to initialize VANTA state from native backend:', error);
     });
 
     return () => {
-      es.close();
-      if (this.eventSource === es) {
-        this.eventSource = null;
-      }
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+      unlisteners = [];
     };
   }
 }
