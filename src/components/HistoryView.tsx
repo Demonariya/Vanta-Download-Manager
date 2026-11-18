@@ -10,6 +10,7 @@ import {
   Check,
   FileCheck,
   Clock,
+  FileX,
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes } from '../utils/engine-parser';
@@ -17,14 +18,16 @@ import { formatAudioQualityBadge } from '../utils/audio-quality';
 
 interface HistoryViewProps {
   tasks: DownloadTask[];
-  onClearHistory: () => void;
-  onDeleteTask: (id: string) => void;
+  onClearHistory: (deleteFiles?: boolean) => void;
+  onDeleteTask: (id: string, deleteFile?: boolean) => void;
+  onDeleteFile?: (id: string) => void;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({
   tasks,
   onClearHistory,
   onDeleteTask,
+  onDeleteFile,
 }) => {
   const [search, setSearch] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -79,7 +82,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
             <span>Export JSON</span>
           </button>
           <button
-            onClick={onClearHistory}
+            onClick={() => onClearHistory(false)}
             className="px-3 py-1.5 text-xs font-medium text-[#f85149] bg-[#da3633]/15 hover:bg-[#da3633]/25 rounded-lg transition-colors flex items-center gap-1.5"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -261,9 +264,29 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                               <Copy className="w-3.5 h-3.5" />
                             )}
                           </button>
+                          {item.output_path && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm(`Delete downloaded file "${item.title}" from disk?`)) {
+                                  if (onDeleteFile) {
+                                    onDeleteFile(item.id);
+                                  } else {
+                                    onDeleteTask(item.id, true);
+                                  }
+                                }
+                              }}
+                              title="Delete file from disk"
+                              className="p-1.5 text-[#8b949e] hover:text-[#f85149] hover:bg-[#21262d] rounded transition-colors"
+                            >
+                              <FileX className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button
-                            onClick={() => onDeleteTask(item.id)}
-                            title="Remove from history"
+                            onClick={() => {
+                              const deleteFile = Boolean(item.output_path);
+                              onDeleteTask(item.id, deleteFile);
+                            }}
+                            title="Remove from history & clear file"
                             className="p-1.5 text-[#8b949e] hover:text-[#f85149] hover:bg-[#21262d] rounded transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" />

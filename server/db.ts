@@ -87,6 +87,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   auto_retry_failed: true,
   auto_resume_on_startup: true,
+  cookies_browser: 'auto',
+  cookies_file: path.resolve(dataDir, 'cookies.txt'),
+  enable_adult_sites: true,
+  bypass_age_gate: true,
+  user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 };
 
 // Ensure download directory exists
@@ -214,14 +219,96 @@ export function upsertTask(task: DownloadTask): void {
   );
 }
 
-export function deleteTask(id: string): void {
+export function removeTaskFiles(task: DownloadTask): boolean {
+  let removed = false;
+  try {
+    // 1. Direct output_path if pointing to a file
+    if (task.output_path && fs.existsSync(task.output_path)) {
+      const stat = fs.statSync(task.output_path);
+      if (stat.isFile()) {
+        fs.unlinkSync(task.output_path);
+        removed = true;
+      }
+    }
+
+    // 2. Scan downloads directory for files matching task ID or title
+    const downloadDir = path.resolve(process.cwd(), 'downloads');
+    if (fs.existsSync(downloadDir)) {
+      const entries = fs.readdirSync(downloadDir);
+      for (const entry of entries) {
+        if (entry.includes(task.id) || (task.title && entry.includes(task.title.slice(0, 30)))) {
+          const full = path.join(downloadDir, entry);
+          if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+            fs.unlinkSync(full);
+            removed = true;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Failed to remove file for task ${task.id}:`, err);
+  }
+  return removed;
+}
+
+export function deleteTask(id: string, deleteFileFromDisk = false): void {
+  if (deleteFileFromDisk) {
+    const task = getTaskById(id);
+    if (task) {
+      removeTaskFiles(task);
+    }
+  }
   const stmt = db.prepare('DELETE FROM tasks WHERE id = ?');
   stmt.run(id);
 }
 
-export function clearCompletedTasks(): void {
+export function deleteDownloadedFile(id: string): boolean {
+  const task = getTaskById(id);
+  if (!task) return false;
+  const removed = removeTaskFiles(task);
+  if (removed) {
+    // Update task output path
+    task.output_path = '';
+    task.current_phase = 'File removed from disk';
+    upsertTask(task);
+  }
+  return removed;
+}
+
+export function clearCompletedTasks(deleteFiles = false): void {
+  if (deleteFiles) {
+    const tasks = getAllTasks().filter(
+      (t) => t.status === 'completed' || t.status === 'cancelled'
+    );
+    for (const t of tasks) {
+      removeTaskFiles(t);
+    }
+  }
   const stmt = db.prepare("DELETE FROM tasks WHERE status IN ('completed', 'cancelled')");
   stmt.run();
+}
+
+export function clearFailedTasks(): void {
+  const stmt = db.prepare("DELETE FROM tasks WHERE status = 'failed'");
+  stmt.run();
+}
+
+export function clearAllTasks(deleteFiles = false): void {
+  if (deleteFiles) {
+    const tasks = getAllTasks();
+    for (const t of tasks) {
+      removeTaskFiles(t);
+    }
+  }
+  const stmt = db.prepare('DELETE FROM tasks');
+  stmt.run();
+}
+
+export function saveCookiesTxt(content: string): string {
+  const cookiePath = path.resolve(dataDir, 'cookies.txt');
+  fs.writeFileSync(cookiePath, content.trim(), { encoding: 'utf-8', mode: 0o600 });
+  saveSettings({ cookies_file: cookiePath, cookies_content: content });
+  return cookiePath;
 }
 
 export function addNotification(notification: NotificationItem): void {

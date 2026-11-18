@@ -9,6 +9,10 @@ import {
   upsertTask,
   deleteTask,
   clearCompletedTasks,
+  clearFailedTasks,
+  clearAllTasks,
+  deleteDownloadedFile,
+  saveCookiesTxt,
   getSettings,
   saveSettings,
   getNotifications,
@@ -44,6 +48,39 @@ async function startServer() {
   app.get('/api/engines/status', (req: Request, res: Response) => {
     const status = engineManager.getEngineStatus();
     res.json(status);
+  });
+
+  // Managed engine summary
+  app.get('/api/engines/managed', (req: Request, res: Response) => {
+    res.json(engineManager.getManagedEngineInfo());
+  });
+
+  // Install single managed engine
+  app.post('/api/engines/install/:name', async (req: Request, res: Response) => {
+    try {
+      const result = await engineManager.installEngine(
+        req.params.name,
+        Boolean(req.body?.force),
+        (progress) => queueController.broadcast('engine_install_progress', progress)
+      );
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to install engine' });
+    }
+  });
+
+  // Install all managed engines
+  app.post('/api/engines/install', async (req: Request, res: Response) => {
+    try {
+      const results = await engineManager.installAllEngines(
+        req.body?.includeSpotdl !== false,
+        Boolean(req.body?.force),
+        (progress) => queueController.broadcast('engine_install_progress', progress)
+      );
+      res.json({ success: results.every((r) => r.success), results });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to install managed engines' });
+    }
   });
 
   // Diagnostics test
@@ -203,10 +240,21 @@ async function startServer() {
 
   app.delete('/api/tasks/:id', (req: Request, res: Response) => {
     const id = req.params.id;
+    const deleteFile = req.query.deleteFile === 'true' || req.body?.deleteFile === true;
     queueController.cancelTask(id);
-    deleteTask(id);
+    deleteTask(id, deleteFile);
     queueController.broadcast('task_deleted', { id });
     res.json({ success: true });
+  });
+
+  app.post('/api/tasks/:id/delete-file', (req: Request, res: Response) => {
+    const id = req.params.id;
+    const removed = deleteDownloadedFile(id);
+    const updated = getTaskById(id);
+    if (updated) {
+      queueController.broadcast('task_updated', updated);
+    }
+    res.json({ success: true, removed });
   });
 
   app.post('/api/tasks/pause-all', (req: Request, res: Response) => {
@@ -220,10 +268,46 @@ async function startServer() {
   });
 
   app.post('/api/tasks/clear-completed', (req: Request, res: Response) => {
-    clearCompletedTasks();
+    const deleteFiles = req.query.deleteFiles === 'true' || req.body?.deleteFiles === true;
+    clearCompletedTasks(deleteFiles);
     const updated = getAllTasks();
     queueController.broadcast('tasks_cleared', updated);
     res.json({ success: true });
+  });
+
+  app.post('/api/tasks/clear-failed', (req: Request, res: Response) => {
+    clearFailedTasks();
+    const updated = getAllTasks();
+    queueController.broadcast('tasks_cleared', updated);
+    res.json({ success: true });
+  });
+
+  app.post('/api/tasks/clear-all', (req: Request, res: Response) => {
+    const deleteFiles = req.query.deleteFiles === 'true' || req.body?.deleteFiles === true;
+    clearAllTasks(deleteFiles);
+    const updated = getAllTasks();
+    queueController.broadcast('tasks_cleared', updated);
+    res.json({ success: true });
+  });
+
+  // Cookies Management
+  app.post('/api/cookies/test', async (req: Request, res: Response) => {
+    const { browser } = req.body;
+    try {
+      const result = await engineManager.testCookieExtraction(browser || 'auto');
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message || 'Cookie extraction failed' });
+    }
+  });
+
+  app.post('/api/cookies/save', (req: Request, res: Response) => {
+    const { content } = req.body;
+    if (typeof content !== 'string') {
+      return res.status(400).json({ error: 'Cookie content is required' });
+    }
+    const savedPath = saveCookiesTxt(content);
+    res.json({ success: true, path: savedPath });
   });
 
   // Settings

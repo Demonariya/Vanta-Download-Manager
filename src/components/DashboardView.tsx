@@ -13,8 +13,10 @@ import {
   Plus,
   ArrowUpRight,
   RefreshCw,
+  DownloadCloud,
+  ShieldCheck,
 } from 'lucide-react';
-import { DownloadTask, EngineStatusMap, AppSettings } from '../types';
+import { DownloadTask, EngineStatusMap, AppSettings, EngineInstallProgress } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { calculateAggregateSpeed } from '../utils/queue-logic';
 
@@ -28,6 +30,11 @@ interface DashboardViewProps {
   onCancelTask: (id: string) => void;
   onViewQueue: () => void;
   onRefreshEngines: () => void;
+  onClearFailed?: () => void;
+  installProgress?: Record<string, EngineInstallProgress>;
+  isInstallingEngines?: boolean;
+  engineInstallError?: string | null;
+  onInstallEngines?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -40,6 +47,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onCancelTask,
   onViewQueue,
   onRefreshEngines,
+  onClearFailed,
+  installProgress = {},
+  isInstallingEngines = false,
+  engineInstallError = null,
+  onInstallEngines,
 }) => {
   const activeTasks = tasks.filter(
     (t) => t.status === 'downloading' || t.status === 'extracting' || t.status === 'processing'
@@ -55,88 +67,186 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     0
   );
 
+  const missingRequired: string[] = [];
+  if (engineStatus) {
+    if (!engineStatus.ytdlp.available) missingRequired.push('yt-dlp');
+    if (!engineStatus.ffmpeg.available) missingRequired.push('FFmpeg');
+    if (!engineStatus.ffprobe.available) missingRequired.push('FFprobe');
+  }
+  const activeInstalls = Object.values(installProgress).filter(
+    (p) => p.status !== 'ready' && p.status !== 'error'
+  );
+  const showManagedSetup =
+    missingRequired.length > 0 || isInstallingEngines || Boolean(engineInstallError) || activeInstalls.length > 0;
+
   return (
     <div className="space-y-6">
+      {/* Managed Engine Runtime Setup Banner */}
+      {showManagedSetup && onInstallEngines && (
+        <div className="p-4 sm:p-5 rounded-xl border border-[#1f6feb]/40 bg-[#121923] space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-[#1f6feb]/15 text-[#58a6ff] shrink-0">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-white">
+                  Managed Engine Runtime {missingRequired.length > 0 ? 'Setup Required' : 'Installing'}
+                </h2>
+                <p className="text-xs text-[#8b949e] mt-0.5">
+                  {missingRequired.length > 0
+                    ? `Missing runtime tools (${missingRequired.join(', ')}). Download SHA-256 verified engines into your per-user app-data directory.`
+                    : 'Downloading and verifying external media engines...'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onInstallEngines}
+              disabled={isInstallingEngines}
+              className="px-4 py-2 text-xs font-medium text-white bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 rounded-lg flex items-center justify-center gap-1.5 transition-colors shrink-0"
+            >
+              <DownloadCloud className={`w-4 h-4 ${isInstallingEngines ? 'animate-pulse' : ''}`} />
+              <span>
+                {isInstallingEngines
+                  ? 'Installing Verified Engines...'
+                  : engineInstallError
+                  ? 'Retry Engine Setup'
+                  : 'Install Verified Engines'}
+              </span>
+            </button>
+          </div>
+
+          {Object.values(installProgress).length > 0 && (
+            <div className="space-y-2 pt-1">
+              {Object.values(installProgress).map((prog) => (
+                <div key={prog.engine} className="p-2.5 rounded-lg bg-[#0d1117] border border-[#21262d] space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="text-white font-semibold uppercase">{prog.engine}</span>
+                    <span className={prog.status === 'error' ? 'text-[#f85149]' : prog.status === 'ready' ? 'text-[#3fb950]' : 'text-[#58a6ff]'}>
+                      {prog.phase} ({prog.progressPercentage.toFixed(0)}%)
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 bg-[#21262d] rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-200 rounded-full ${
+                        prog.status === 'error' ? 'bg-[#f85149]' : prog.status === 'ready' ? 'bg-[#3fb950]' : 'bg-[#1f6feb]'
+                      }`}
+                      style={{ width: `${Math.min(100, Math.max(2, prog.progressPercentage))}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] font-mono text-[#8b949e]">
+                    <span className="truncate">{prog.message}</span>
+                    {prog.totalBytes > 0 && (
+                      <span className="shrink-0 ml-2">
+                        {formatBytes(prog.downloadedBytes)} / {formatBytes(prog.totalBytes)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {engineInstallError && (
+            <p className="text-xs text-[#f85149] bg-[#da3633]/10 border border-[#da3633]/30 rounded-lg p-2.5 font-mono">
+              {engineInstallError}
+            </p>
+          )}
+        </div>
+      )}
       {/* Top Banner / Welcome Action Strip */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[#21262d] bg-[#12151a]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4 p-4 sm:p-5 rounded-xl border border-[#21262d] bg-[#12151a]">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-white">VANTA Workstation</h1>
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">VANTA Workstation</h1>
           <p className="text-xs text-[#8b949e] mt-1">
             High-concurrency media ingestion and audio conversion pipeline
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="grid grid-cols-2 gap-2 w-full sm:w-auto sm:flex sm:items-center">
           <button
             onClick={onViewQueue}
-            className="px-3 py-2 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors whitespace-nowrap"
+            className="px-3 py-2 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors whitespace-nowrap text-center justify-center flex items-center"
           >
             View Queue ({tasks.length})
           </button>
           <button
             onClick={onOpenNewDownload}
-            className="px-4 py-2 text-xs font-medium text-white bg-[#238636] hover:bg-[#2ea043] rounded-lg flex items-center gap-2 transition-colors shadow-sm whitespace-nowrap"
+            className="px-4 py-2 text-xs font-medium text-white bg-[#238636] hover:bg-[#2ea043] rounded-lg flex items-center justify-center gap-1.5 transition-colors shadow-sm whitespace-nowrap text-center"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-4 h-4 shrink-0" />
             <span>New Download</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Real Data Metric Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      {/* KPI Real Data Metric Strip - 2x2 grid on mobile, 4 columns on large screens */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
         {/* Metric 1: Aggregate Speed */}
-        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
-          <div className="flex items-center justify-between text-xs text-[#8b949e]">
-            <span>Current Speed</span>
-            <Activity className="w-4 h-4 text-[#58a6ff]" />
+        <div className="p-3 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+          <div className="flex items-center justify-between text-[11px] sm:text-xs text-[#8b949e]">
+            <span className="truncate">Current Speed</span>
+            <Activity className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#58a6ff] shrink-0" />
           </div>
-          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-1.5 sm:mt-2 text-base sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums truncate">
             {formattedSpeed}
           </div>
-          <div className="mt-1 text-[11px] text-[#7d8590]">
+          <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] text-[#7d8590] truncate">
             {activeTasks.length} active transfer{activeTasks.length === 1 ? '' : 's'}
           </div>
         </div>
 
         {/* Metric 2: Total Downloaded */}
-        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
-          <div className="flex items-center justify-between text-xs text-[#8b949e]">
-            <span>Total Downloaded</span>
-            <ArrowDownCircle className="w-4 h-4 text-[#3fb950]" />
+        <div className="p-3 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+          <div className="flex items-center justify-between text-[11px] sm:text-xs text-[#8b949e]">
+            <span className="truncate">Downloaded</span>
+            <ArrowDownCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#3fb950] shrink-0" />
           </div>
-          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-1.5 sm:mt-2 text-base sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums truncate">
             {formatBytes(totalBytesDownloaded)}
           </div>
-          <div className="mt-1 text-[11px] text-[#7d8590]">
+          <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] text-[#7d8590] truncate">
             {completedTasks.length} completed items
           </div>
         </div>
 
         {/* Metric 3: Queued & Pending */}
-        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
-          <div className="flex items-center justify-between text-xs text-[#8b949e]">
-            <span>In Queue</span>
-            <RefreshCw className="w-4 h-4 text-[#d29922]" />
+        <div className="p-3 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+          <div className="flex items-center justify-between text-[11px] sm:text-xs text-[#8b949e]">
+            <span className="truncate">In Queue</span>
+            <RefreshCw className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#d29922] shrink-0" />
           </div>
-          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
+          <div className="mt-1.5 sm:mt-2 text-base sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums truncate">
             {queuedTasks.length}
           </div>
-          <div className="mt-1 text-[11px] text-[#7d8590]">
-            Concurrency limit: {settings?.max_concurrent_downloads || 3}
+          <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] text-[#7d8590] truncate">
+            Limit: {settings?.max_concurrent_downloads || 3}
           </div>
         </div>
 
         {/* Metric 4: Failed / Errors */}
-        <div className="p-3.5 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
-          <div className="flex items-center justify-between text-xs text-[#8b949e]">
-            <span>Failed Tasks</span>
-            <AlertCircle className="w-4 h-4 text-[#f85149]" />
+        <div className="p-3 sm:p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+          <div className="flex items-center justify-between text-[11px] sm:text-xs text-[#8b949e]">
+            <span className="truncate">Failed</span>
+            <AlertCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#f85149] shrink-0" />
           </div>
-          <div className="mt-2 text-xl sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums">
-            {failedTasks.length}
+          <div className="mt-1.5 sm:mt-2 flex items-baseline justify-between gap-2">
+            <span className="text-base sm:text-2xl font-bold font-mono tracking-tight text-white tabular-nums truncate">
+              {failedTasks.length}
+            </span>
+            {failedTasks.length > 0 && onClearFailed && (
+              <button
+                type="button"
+                onClick={onClearFailed}
+                title="Clear failed tasks"
+                className="text-[10px] text-[#f85149] hover:underline font-mono shrink-0 cursor-pointer"
+              >
+                Clear Failed
+              </button>
+            )}
           </div>
-          <div className="mt-1 text-[11px] text-[#7d8590]">
-            Auto-retry: {settings?.auto_retry_failed ? 'Enabled' : 'Disabled'}
+          <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] text-[#7d8590] truncate">
+            Retry: {settings?.auto_retry_failed ? 'Enabled' : 'Disabled'}
           </div>
         </div>
       </div>
@@ -175,28 +285,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {activeTasks.map((task) => (
               <div
                 key={task.id}
-                className="p-3.5 rounded-lg border border-[#30363d] bg-[#161b22] space-y-2.5"
+                className="p-3 sm:p-3.5 rounded-lg border border-[#30363d] bg-[#161b22] space-y-2.5"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3 overflow-hidden">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
+                  <div className="flex items-center gap-2.5 sm:gap-3 overflow-hidden min-w-0 flex-1">
                     {task.thumbnail ? (
                       <img
                         src={task.thumbnail}
                         alt={task.title}
                         referrerPolicy="no-referrer"
-                        className="w-14 h-9 object-cover rounded bg-[#0d1117] shrink-0 border border-[#21262d]"
+                        className="w-12 h-8 sm:w-14 sm:h-9 object-cover rounded bg-[#0d1117] shrink-0 border border-[#21262d]"
                       />
                     ) : (
-                      <div className="w-14 h-9 rounded bg-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]">
+                      <div className="w-12 h-8 sm:w-14 sm:h-9 rounded bg-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]">
                         {task.ext.toUpperCase()}
                       </div>
                     )}
-                    <div className="truncate">
+                    <div className="truncate min-w-0 flex-1">
                       <span className="text-xs font-medium text-white truncate block">
                         {task.title}
                       </span>
-                      <div className="flex items-center gap-2 text-[11px] text-[#8b949e] mt-0.5 font-mono">
-                        <span>{task.engine}</span>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] sm:text-[11px] text-[#8b949e] mt-0.5 font-mono">
+                        <span className="px-1 py-0.2 rounded bg-[#21262d] text-[#c9d1d9]">{task.engine}</span>
                         <span aria-hidden="true">·</span>
                         <span>{task.current_phase}</span>
                         {task.speed_str && (
@@ -215,7 +325,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex items-center justify-end gap-1.5 shrink-0 self-end sm:self-auto">
                     {task.status === 'downloading' || task.status === 'extracting' || task.status === 'processing' ? (
                       <button
                         onClick={() => onPauseTask(task.id)}
@@ -270,9 +380,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* Engine Status Grid & Local Storage Info */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
         {/* Card 1: Engines */}
-        <div className="md:col-span-2 p-5 rounded-xl border border-[#21262d] bg-[#12151a]">
+        <div className="md:col-span-2 p-4 sm:p-5 rounded-xl border border-[#21262d] bg-[#12151a]">
           <div className="flex items-center justify-between mb-3">
             <div>
               <h2 className="text-sm font-semibold text-white">Engine Health Matrix</h2>
@@ -289,7 +399,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-2.5">
             {/* yt-dlp */}
             <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
               <div className="flex items-center justify-between">
@@ -381,7 +491,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Card 2: Destination Storage */}
-        <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] flex flex-col justify-between">
+        <div className="p-4 sm:p-5 rounded-xl border border-[#21262d] bg-[#12151a] flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-white">Storage Path</h2>

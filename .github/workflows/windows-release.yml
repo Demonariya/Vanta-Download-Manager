@@ -7,6 +7,10 @@ on:
     branches:
       - main
       - master
+  pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
     inputs:
       release_tag:
@@ -15,6 +19,14 @@ on:
         default: 'v1.0.0'
       create_github_release:
         description: 'Publish as GitHub Release'
+        type: boolean
+        default: true
+      upload_msi_artifact:
+        description: 'Upload MSI installer as separate Actions artifact'
+        type: boolean
+        default: true
+      upload_portable_artifact:
+        description: 'Upload Portable ZIP as separate Actions artifact'
         type: boolean
         default: true
 
@@ -27,12 +39,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
+          cache: 'npm'
 
       - name: Setup Rust Stable (MSVC x64)
         uses: dtolnay/rust-toolchain@stable
@@ -44,122 +57,169 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Install Node Dependencies
+      - name: Install Node Dependencies (Reproducible + Native Rolldown)
         shell: pwsh
         run: |
-          Write-Host "Installing dependencies natively for Windows (resolving platform-specific native bindings)..."
-          # Fix for npm issue #4828: cross-platform lockfile causes missing optional native binaries on Windows
-          if (Test-Path "package-lock.json") {
-            Remove-Item -Force "package-lock.json"
-          }
-          npm install --include=optional
+          $ErrorActionPreference = "Stop"
+          Write-Host "Installing npm dependencies reproducibly from package-lock.json..."
+          npm ci --include=optional
 
-          Write-Host "Explicitly ensuring Windows Rolldown native binding is present..."
-          npm install --no-save @rolldown/binding-win32-x64-msvc
+          if (-not (Test-Path "node_modules/@rolldown/binding-win32-x64-msvc")) {
+            Write-Host "Installing Windows native Rolldown binding (--no-save)..."
+            npm install --no-save @rolldown/binding-win32-x64-msvc
+          }
+
+      - name: Typecheck & Lint Frontend
+        run: npm run lint
 
       - name: Build Web Application
         run: npm run build
 
-      - name: Bundle yt-dlp & FFmpeg for Windows
-        shell: pwsh
-        run: |
-          Write-Host "Creating bin directory for Windows engine bundling..."
-          New-Item -ItemType Directory -Force -Path src-tauri/bin
-
-          Write-Host "Downloading latest yt-dlp.exe..."
-          $ytDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-          Invoke-WebRequest -Uri $ytDlpUrl -OutFile "src-tauri/bin/yt-dlp.exe" -UseBasicParsing
-
-          Write-Host "Downloading verified FFmpeg Windows build..."
-          $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          Invoke-WebRequest -Uri $ffmpegUrl -OutFile "ffmpeg.zip" -UseBasicParsing
-
-          Write-Host "Extracting FFmpeg binaries..."
-          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_extracted" -Force
-          $ffmpegExe = Get-ChildItem -Path "ffmpeg_extracted" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-          $ffprobeExe = Get-ChildItem -Path "ffmpeg_extracted" -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
-
-          Copy-Item -Path $ffmpegExe.FullName -Destination "src-tauri/bin/ffmpeg.exe"
-          Copy-Item -Path $ffprobeExe.FullName -Destination "src-tauri/bin/ffprobe.exe"
-
-          Write-Host "Bundled Windows engines successfully:"
-          Get-ChildItem -Path "src-tauri/bin"
+      - name: Run Rust Backend Unit Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features desktop
 
       - name: Build Tauri Desktop App (NSIS Installer & MSI)
         shell: pwsh
         run: |
-          Write-Host "Building Tauri Windows App with MSVC..."
+          $ErrorActionPreference = "Stop"
+          Write-Host "Building Tauri Windows x64 App with MSVC..."
           npx tauri build --features desktop --target x86_64-pc-windows-msvc
 
-      - name: Collect & Checksum Installer Artifacts
+      - name: Collect, Package, Checksum & Report Release Sizes
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "release_artifacts"
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "release_artifacts/setup" | Out-Null
+          New-Item -ItemType Directory -Force -Path "release_artifacts/msi" | Out-Null
+          New-Item -ItemType Directory -Force -Path "release_artifacts/portable" | Out-Null
+          New-Item -ItemType Directory -Force -Path "release_artifacts/all" | Out-Null
 
-          # Search for generated setup .exe, .msi, and standalone .exe
-          $nsisInstallers = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue
-          $msiInstallers = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue
-          $mainExe = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "vanta.exe" -ErrorAction SilentlyContinue
+          $nsisInstaller = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msiInstaller = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $mainExe = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "vanta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 
-          if ($nsisInstallers) {
-            Copy-Item -Path $nsisInstallers[0].FullName -Destination "release_artifacts/VANTA-Download-Manager-Setup-x64.exe" -Force
+          if (-not $nsisInstaller) {
+            Write-Error "Missing expected NSIS setup installer under bundle/nsis."
+            exit 1
           }
-          if ($msiInstallers) {
-            Copy-Item -Path $msiInstallers[0].FullName -Destination "release_artifacts/VANTA-Download-Manager-x64.msi" -Force
+          if (-not $msiInstaller) {
+            Write-Error "Missing expected MSI installer under bundle/msi."
+            exit 1
+          }
+          if (-not $mainExe) {
+            Write-Error "Missing expected vanta.exe binary under target/x86_64-pc-windows-msvc/release."
+            exit 1
           }
 
-          # Create a standalone zip including portable executable and bundled engines
-          if ($mainExe) {
-            New-Item -ItemType Directory -Force -Path "portable_package"
-            Copy-Item -Path $mainExe.FullName -Destination "portable_package/VANTA.exe"
-            Copy-Item -Path "src-tauri/bin/*" -Destination "portable_package/" -Recurse
-            Compress-Archive -Path "portable_package/*" -DestinationPath "release_artifacts/VANTA-Download-Manager-Portable-x64.zip" -Force
+          $setupDest = "release_artifacts/all/VANTA-Download-Manager-Setup-x64.exe"
+          $msiDest = "release_artifacts/all/VANTA-Download-Manager-x64.msi"
+          $portableDest = "release_artifacts/all/VANTA-Download-Manager-Portable-x64.zip"
+
+          Copy-Item -Path $nsisInstaller.FullName -Destination $setupDest -Force
+          Copy-Item -Path $msiInstaller.FullName -Destination $msiDest -Force
+
+          # Package standalone portable executable (external engines are installed & SHA-256 verified into %LOCALAPPDATA% on first launch, or loaded from side-by-side bin/)
+          if (Test-Path "portable_package") { Remove-Item -Recurse -Force "portable_package" }
+          New-Item -ItemType Directory -Force -Path "portable_package/bin" | Out-Null
+          Copy-Item -Path $mainExe.FullName -Destination "portable_package/VANTA.exe" -Force
+          Compress-Archive -Path "portable_package/*" -DestinationPath $portableDest -CompressionLevel Optimal -Force
+
+          foreach ($artifact in @($setupDest, $msiDest, $portableDest)) {
+            if (-not (Test-Path $artifact) -or ((Get-Item $artifact).Length -eq 0)) {
+              Write-Error "Expected artifact '$artifact' is missing or empty."
+              exit 1
+            }
           }
 
-          Write-Host "Generated release artifacts:"
-          Get-ChildItem -Path "release_artifacts"
+          # Populate dedicated artifact staging folders + per-artifact SHA-256 checksums
+          Copy-Item -Path $setupDest -Destination "release_artifacts/setup/" -Force
+          Copy-Item -Path $msiDest -Destination "release_artifacts/msi/" -Force
+          Copy-Item -Path $portableDest -Destination "release_artifacts/portable/" -Force
 
-          # Generate SHA256 checksums for all binary artifacts
-          Get-FileHash -Algorithm SHA256 (Get-ChildItem "release_artifacts" -Exclude "SHA256SUMS.txt") |
-            ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } |
-            Out-File -FilePath "release_artifacts/SHA256SUMS.txt" -Encoding ascii
-          Get-Content "release_artifacts/SHA256SUMS.txt"
+          $setupHash = (Get-FileHash -Algorithm SHA256 $setupDest).Hash.ToLower()
+          $msiHash = (Get-FileHash -Algorithm SHA256 $msiDest).Hash.ToLower()
+          $portableHash = (Get-FileHash -Algorithm SHA256 $portableDest).Hash.ToLower()
 
-      - name: Upload Artifacts to GitHub Actions Run
-        uses: actions/upload-artifact@v4
+          "$setupHash  VANTA-Download-Manager-Setup-x64.exe" | Out-File -FilePath "release_artifacts/setup/VANTA-Download-Manager-Setup-x64.exe.sha256" -Encoding ascii
+          "$msiHash  VANTA-Download-Manager-x64.msi" | Out-File -FilePath "release_artifacts/msi/VANTA-Download-Manager-x64.msi.sha256" -Encoding ascii
+          "$portableHash  VANTA-Download-Manager-Portable-x64.zip" | Out-File -FilePath "release_artifacts/portable/VANTA-Download-Manager-Portable-x64.zip.sha256" -Encoding ascii
+
+          @(
+            "$setupHash  VANTA-Download-Manager-Setup-x64.exe"
+            "$msiHash  VANTA-Download-Manager-x64.msi"
+            "$portableHash  VANTA-Download-Manager-Portable-x64.zip"
+          ) | Out-File -FilePath "release_artifacts/all/SHA256SUMS.txt" -Encoding ascii
+
+          Write-Host ""
+          Write-Host "=== Windows x64 Binary & Artifact Size Report ==="
+          $reportItems = @(
+            @{ Name = "vanta.exe (unpacked)"; Path = $mainExe.FullName },
+            @{ Name = "VANTA-Download-Manager-Setup-x64.exe (NSIS)"; Path = $setupDest },
+            @{ Name = "VANTA-Download-Manager-x64.msi (MSI)"; Path = $msiDest },
+            @{ Name = "VANTA-Download-Manager-Portable-x64.zip"; Path = $portableDest }
+          )
+          foreach ($item in $reportItems) {
+            $bytes = (Get-Item $item.Path).Length
+            $mib = [Math]::Round($bytes / 1MB, 2)
+            Write-Host ("{0,-46} : {1,10:N0} bytes ({2,6:N2} MiB)" -f $item.Name, $bytes, $mib)
+          }
+          Write-Host ""
+          Write-Host "=== SHA256SUMS.txt ==="
+          Get-Content "release_artifacts/all/SHA256SUMS.txt"
+
+      - name: Upload Recommended NSIS Setup Artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: VANTA-Windows-Installer-x64
-          path: release_artifacts/*
+          name: VANTA-Windows-Setup-x64
+          path: release_artifacts/setup/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Enterprise MSI Artifact
+        if: github.event_name != 'workflow_dispatch' || inputs.upload_msi_artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: VANTA-Windows-MSI-x64
+          path: release_artifacts/msi/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Portable ZIP Artifact
+        if: github.event_name != 'workflow_dispatch' || inputs.upload_portable_artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: VANTA-Windows-Portable-x64
+          path: release_artifacts/portable/*
           if-no-files-found: error
           retention-days: 30
 
       - name: Create or Update GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_github_release == 'true')
-        uses: softprops/action-gh-release@v2
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release))
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
-          name: "VANTA Download Manager ${{ github.event.inputs.release_tag || github.ref_name }}"
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          name: "VANTA Download Manager ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}"
           body: |
             ## VANTA Download Manager — Production Windows Release
-            
-            Premium high-concurrency desktop video & music workstation powered by **yt-dlp**, **spotDL**, **FFmpeg**, and **Rust / Tauri 2**.
 
-            ### 📦 Included Files:
-            - **`VANTA-Download-Manager-Setup-x64.exe`**: Standard NSIS Windows Installer (Recommended for Windows 10 & 11).
+            High-concurrency desktop video & music workstation powered by **Rust / Tauri 2**, **yt-dlp**, **spotDL**, and **FFmpeg**.
+
+            ### Included Release Assets:
+            - **`VANTA-Download-Manager-Setup-x64.exe`**: Recommended Windows NSIS Installer (Windows 10 & 11 x64).
             - **`VANTA-Download-Manager-x64.msi`**: Windows Enterprise MSI Installer.
-            - **`VANTA-Download-Manager-Portable-x64.zip`**: Portable standalone release with bundled engines.
-            - **`SHA256SUMS.txt`**: Cryptographic integrity checksums.
+            - **`VANTA-Download-Manager-Portable-x64.zip`**: Lightweight portable standalone package.
+            - **`SHA256SUMS.txt`**: Cryptographic SHA-256 verification checksums.
 
-            ### ✨ Key Features:
-            - Native 64-bit performance with MSVC and multi-threaded Tokio queue.
-            - Custom Title Bar with native Tauri 2 minimize, maximize, and safe close confirmation.
-            - True Audio Quality system: FLAC 16/24-bit, WAV PCM up to 192 kHz, transparent transcode disclosure.
-            - Post-download FFprobe audio stream verification.
-            - Built-in `yt-dlp` and `FFmpeg` engines bundled.
-            - Spotify music downloading & tagging with metadata preservation.
-            - Dynamic stream format inspector & video/audio muxing.
-          files: release_artifacts/*
+            ### Managed Runtime Architecture:
+            - Installers exclude bulky 300+ MiB external CLI binaries to keep downloads small and fast.
+            - On first launch (or in **Diagnostics**), VANTA downloads and **SHA-256 verifies** `yt-dlp`, compact `FFmpeg` / `FFprobe`, and `spotDL` atomically into `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin` (or side-by-side `bin/` in portable mode).
+            - Rust release builds enable full LTO, single codegen unit, size optimization, and symbol stripping.
+          files: |
+            release_artifacts/all/VANTA-Download-Manager-Setup-x64.exe
+            release_artifacts/all/VANTA-Download-Manager-x64.msi
+            release_artifacts/all/VANTA-Download-Manager-Portable-x64.zip
+            release_artifacts/all/SHA256SUMS.txt
           draft: false
           prerelease: false

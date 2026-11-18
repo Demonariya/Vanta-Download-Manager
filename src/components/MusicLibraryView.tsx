@@ -86,19 +86,19 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
 
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono text-[#3fb950] bg-[#238636]/15 px-2.5 py-1 rounded-md">
-            Engine: spotDL 4.5.2 Ready
+            Engine: spotDL Active
           </span>
         </div>
       </div>
 
       {/* spotDL Ingestion Bar */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
+      <div className="p-4 sm:p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
         <h2 className="text-xs font-semibold text-[#c9d1d9] uppercase tracking-wider font-mono">
           Download Track, Album, or Playlist
         </h2>
 
-        <form onSubmit={handleDownloadMusic} className="flex flex-col sm:flex-row items-center gap-3">
-          <div className="relative flex-1 w-full">
+        <form onSubmit={handleDownloadMusic} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3">
+          <div className="relative flex-1 w-full min-w-0">
             <input
               type="text"
               placeholder="Paste Spotify track, album, or playlist URL..."
@@ -108,11 +108,11 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
             />
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="grid grid-cols-3 gap-2 w-full sm:w-auto sm:flex sm:items-center">
             <select
               value={audioFormat}
               onChange={(e) => setAudioFormat(e.target.value)}
-              className="bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+              className="bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3] w-full sm:w-auto"
             >
               <option value="mp3">MP3</option>
               <option value="flac">FLAC (Lossless)</option>
@@ -123,7 +123,7 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
             <select
               value={audioBitrate}
               onChange={(e) => setAudioBitrate(e.target.value)}
-              className="bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3]"
+              className="bg-[#161b22] border border-[#30363d] rounded-lg text-xs p-2 text-[#e6edf3] w-full sm:w-auto"
             >
               <option value="320k">320 kbps</option>
               <option value="256k">256 kbps</option>
@@ -133,7 +133,7 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
             <button
               type="submit"
               disabled={!spotifyUrl.trim()}
-              className="px-4 py-2 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors shrink-0"
+              className="px-3 sm:px-4 py-2 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors shrink-0 w-full sm:w-auto"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Download</span>

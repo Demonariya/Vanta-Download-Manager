@@ -6,7 +6,6 @@ import {
   Play,
   Bell,
   Settings,
-  Plus,
   ArrowRight,
   Menu,
 } from 'lucide-react';
@@ -31,7 +30,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenSettings,
   onOpenNotifications,
   unreadNotificationsCount,
-  activeCount,
+  activeCount: _activeCount,
   onPauseAll,
   onResumeAll,
   searchQuery,
@@ -62,7 +61,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="h-14 border-b border-[#21262d] bg-[#0d1117] px-3 sm:px-4 flex items-center justify-between gap-2 sm:gap-4 shrink-0 select-none">
+    <header className="h-14 border-b border-[#21262d] bg-[#0d1117] px-2.5 sm:px-4 flex items-center justify-between gap-1.5 sm:gap-4 shrink-0 select-none">
       {/* Mobile Menu Toggle Button */}
       {onToggleMobileMenu && (
         <button
@@ -107,7 +106,7 @@ export const TopBar: React.FC<TopBarProps> = ({
       </form>
 
       {/* Zone 2: Filter / Search (Desktop & Tablet) */}
-      <div className="relative w-44 lg:w-56 hidden md:block shrink-0">
+      <div className="relative w-40 lg:w-56 hidden md:block shrink-0">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#6e7681]" />
         <input
           type="text"

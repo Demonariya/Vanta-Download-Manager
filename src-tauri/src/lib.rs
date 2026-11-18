@@ -1,12 +1,9 @@
 pub mod models;
+pub mod state;
+pub mod engines;
+pub mod commands;
 
-use models::{AppSettings, DownloadTask};
-use std::sync::Mutex;
-
-pub struct AppState {
-    pub tasks: Mutex<Vec<DownloadTask>>,
-    pub settings: Mutex<AppSettings>,
-}
+pub use state::AppState;
 
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()

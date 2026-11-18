@@ -9,6 +9,7 @@ import {
   EngineStatusMap,
   AppSettings,
   NotificationItem,
+  EngineInstallProgress,
 } from './types';
 import { api } from './services/api';
 import { Sidebar, ActiveTab } from './components/Sidebar';
@@ -42,6 +43,9 @@ export default function App() {
   const [initialInspectUrl, setInitialInspectUrl] = useState('');
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isSafeCloseOpen, setIsSafeCloseOpen] = useState(false);
+  const [installProgress, setInstallProgress] = useState<Record<string, EngineInstallProgress>>({});
+  const [isInstallingEngines, setIsInstallingEngines] = useState(false);
+  const [engineInstallError, setEngineInstallError] = useState<string | null>(null);
 
   const executeNativeClose = async () => {
     try {
@@ -108,6 +112,12 @@ export default function App() {
       onSettingsUpdated: (newSettings) => {
         setSettings(newSettings);
       },
+      onEngineInstallProgress: (progress) => {
+        setInstallProgress((prev) => ({
+          ...prev,
+          [progress.engine]: progress,
+        }));
+      },
     });
 
     return () => {
@@ -136,8 +146,12 @@ export default function App() {
     await api.retryTask(id);
   };
 
-  const handleDeleteTask = async (id: string) => {
-    await api.deleteTask(id);
+  const handleDeleteTask = async (id: string, deleteFile = false) => {
+    await api.deleteTask(id, deleteFile);
+  };
+
+  const handleDeleteFile = async (id: string) => {
+    await api.deleteDownloadedFile(id);
   };
 
   const handlePauseAll = async () => {
@@ -148,13 +162,38 @@ export default function App() {
     await api.resumeAll();
   };
 
-  const handleClearCompleted = async () => {
-    await api.clearCompleted();
+  const handleClearCompleted = async (deleteFiles = false) => {
+    await api.clearCompleted(deleteFiles);
+  };
+
+  const handleClearFailed = async () => {
+    await api.clearFailed();
+  };
+
+  const handleClearAll = async (deleteFiles = false) => {
+    await api.clearAll(deleteFiles);
   };
 
   const handleRefreshEngines = async () => {
     const updated = await api.getEngineStatus();
     setEngineStatus(updated);
+  };
+
+  const handleInstallAllEngines = async (force = false) => {
+    setIsInstallingEngines(true);
+    setEngineInstallError(null);
+    try {
+      const res = await api.installAllEngines(true, force);
+      await handleRefreshEngines();
+      const failures = res.results.filter((r) => !r.success);
+      if (failures.length > 0) {
+        setEngineInstallError(failures.map((f) => `${f.engine}: ${f.message}`).join(' | '));
+      }
+    } catch (err: any) {
+      setEngineInstallError(err?.message || 'Failed to install managed engines');
+    } finally {
+      setIsInstallingEngines(false);
+    }
   };
 
   const handleSaveSettings = async (newSettings: Partial<AppSettings>) => {
@@ -212,7 +251,7 @@ export default function App() {
         />
 
         {/* View Content Area */}
-        <main className="flex-1 overflow-y-auto p-3 sm:p-5 md:p-6">
+        <main className="flex-1 min-w-0 overflow-y-auto p-2.5 sm:p-4 md:p-6 pb-24 sm:pb-8 select-text">
           {activeTab === 'dashboard' && (
             <DashboardView
               tasks={tasks}
@@ -227,6 +266,11 @@ export default function App() {
               onCancelTask={handleCancelTask}
               onViewQueue={() => setActiveTab('queue')}
               onRefreshEngines={handleRefreshEngines}
+              onClearFailed={handleClearFailed}
+              installProgress={installProgress}
+              isInstallingEngines={isInstallingEngines}
+              engineInstallError={engineInstallError}
+              onInstallEngines={() => handleInstallAllEngines(false)}
             />
           )}
 
@@ -241,6 +285,9 @@ export default function App() {
               onPauseAll={handlePauseAll}
               onResumeAll={handleResumeAll}
               onClearCompleted={handleClearCompleted}
+              onClearFailed={handleClearFailed}
+              onClearAll={handleClearAll}
+              onDeleteFile={handleDeleteFile}
               onOpenNewDownload={() => {
                 setInitialInspectUrl('');
                 setIsNewDownloadOpen(true);
@@ -265,6 +312,9 @@ export default function App() {
               onPauseAll={handlePauseAll}
               onResumeAll={handleResumeAll}
               onClearCompleted={handleClearCompleted}
+              onClearFailed={handleClearFailed}
+              onClearAll={handleClearAll}
+              onDeleteFile={handleDeleteFile}
               onOpenNewDownload={() => {
                 setInitialInspectUrl('');
                 setIsNewDownloadOpen(true);
@@ -284,6 +334,9 @@ export default function App() {
               onPauseAll={handlePauseAll}
               onResumeAll={handleResumeAll}
               onClearCompleted={handleClearCompleted}
+              onClearFailed={handleClearFailed}
+              onClearAll={handleClearAll}
+              onDeleteFile={handleDeleteFile}
               onOpenNewDownload={() => {
                 setInitialInspectUrl('');
                 setIsNewDownloadOpen(true);
@@ -307,6 +360,7 @@ export default function App() {
               tasks={tasks}
               onClearHistory={handleClearCompleted}
               onDeleteTask={handleDeleteTask}
+              onDeleteFile={handleDeleteFile}
             />
           )}
 
@@ -314,6 +368,7 @@ export default function App() {
             <DiagnosticsView
               engineStatus={engineStatus}
               onRefresh={handleRefreshEngines}
+              installProgress={installProgress}
             />
           )}
 

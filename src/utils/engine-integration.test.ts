@@ -35,7 +35,7 @@ test('Integration: spotDL executable runs and reports latest stable version', ()
   assert.ok(execPath, 'spotdl executable must exist in project or system path');
 
   const version = execSync(`"${execPath}" --version`, { encoding: 'utf-8' }).trim();
-  assert.ok(version.includes('4.5.'), `Reported version (${version}) should be 4.5.x`);
+  assert.ok(version.includes('4.5.') || version.includes('4.6.'), `Reported version (${version}) should be 4.5.x or 4.6.x`);
 });
 
 test('Integration: FFmpeg and FFprobe run and inspect media correctly', () => {

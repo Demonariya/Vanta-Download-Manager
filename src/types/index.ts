@@ -133,6 +133,12 @@ export interface AppSettings {
   theme: 'dark';
   auto_retry_failed: boolean;
   auto_resume_on_startup: boolean;
+  cookies_browser?: 'auto' | 'chrome' | 'firefox' | 'edge' | 'brave' | 'opera' | 'vivaldi' | 'safari' | 'none';
+  cookies_file?: string;
+  cookies_content?: string;
+  enable_adult_sites?: boolean;
+  bypass_age_gate?: boolean;
+  user_agent?: string;
 }
 
 export interface NotificationItem {
@@ -151,4 +157,23 @@ export interface DiagnosticResult {
   command: string;
   output: string;
   duration_ms: number;
+}
+
+export interface EngineInstallProgress {
+  engine: string;
+  status: 'downloading' | 'verifying' | 'extracting' | 'installing' | 'ready' | 'error';
+  phase: string;
+  progressPercentage: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  message: string;
+  error?: string;
+}
+
+export interface ManagedEngineInfo {
+  installDir: string;
+  manifestPath: string;
+  requiredReady: boolean;
+  missingRequired: string[];
+  engines: EngineStatusMap;
 }

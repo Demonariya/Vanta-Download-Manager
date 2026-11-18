@@ -6,42 +6,110 @@ import {
   DiagnosticResult,
   NotificationItem,
   EngineUpdateResult,
+  EngineInstallProgress,
+  ManagedEngineInfo,
 } from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
 export class ApiService {
   private eventSource: EventSource | null = null;
+  private tauriUnlisteners: UnlistenFn[] = [];
+
+  public isTauri(): boolean {
+    return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  }
 
   public async getEngineStatus(): Promise<EngineStatusMap> {
+    if (this.isTauri()) {
+      return invoke<EngineStatusMap>('get_engine_status');
+    }
     const res = await fetch('/api/engines/status');
     if (!res.ok) throw new Error('Failed to fetch engine status');
     return res.json();
   }
 
   public async runDiagnostics(): Promise<{ success: boolean; results: DiagnosticResult[] }> {
+    if (this.isTauri()) {
+      const results = await invoke<DiagnosticResult[]>('run_diagnostics');
+      return { success: true, results };
+    }
     const res = await fetch('/api/engines/diagnostics', { method: 'POST' });
     if (!res.ok) throw new Error('Failed to run diagnostics');
     return res.json();
   }
 
   public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
+    if (this.isTauri()) {
+      return invoke('check_engine_updates');
+    }
     const res = await fetch('/api/engines/updates');
     if (!res.ok) throw new Error('Failed to check engine updates');
     return res.json();
   }
 
+  public async getManagedEngineInfo(): Promise<ManagedEngineInfo> {
+    if (this.isTauri()) {
+      return invoke<ManagedEngineInfo>('get_managed_engine_info');
+    }
+    const res = await fetch('/api/engines/managed');
+    if (!res.ok) throw new Error('Failed to fetch managed engine info');
+    return res.json();
+  }
+
+  public async installEngine(name: string, force = false): Promise<EngineUpdateResult> {
+    if (this.isTauri()) {
+      return invoke<EngineUpdateResult>('install_engine', { name, force });
+    }
+    const res = await fetch(`/api/engines/install/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    });
+    if (!res.ok) throw new Error(`Failed to install ${name}`);
+    return res.json();
+  }
+
+  public async installAllEngines(includeSpotdl = true, force = false): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
+    if (this.isTauri()) {
+      const results = await invoke<EngineUpdateResult[]>('install_all_engines', {
+        includeSpotdl,
+        force,
+      });
+      return { success: results.every((r) => r.success), results };
+    }
+    const res = await fetch('/api/engines/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ includeSpotdl, force }),
+    });
+    if (!res.ok) throw new Error('Failed to install managed engines');
+    return res.json();
+  }
+
   public async updateEngine(name: string): Promise<EngineUpdateResult> {
-    const res = await fetch(`/api/engines/update/${name}`, { method: 'POST' });
+    if (this.isTauri()) {
+      return invoke<EngineUpdateResult>('update_engine', { name });
+    }
+    const res = await fetch(`/api/engines/update/${encodeURIComponent(name)}`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to update ${name}`);
     return res.json();
   }
 
   public async updateAllEngines(): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
+    if (this.isTauri()) {
+      const results = await invoke<EngineUpdateResult[]>('update_all_engines');
+      return { success: results.every((r) => r.success), results };
+    }
     const res = await fetch('/api/engines/update-all', { method: 'POST' });
     if (!res.ok) throw new Error('Failed to update engines');
     return res.json();
   }
 
   public async inspectUrl(url: string): Promise<MediaMetadata> {
+    if (this.isTauri()) {
+      return invoke<MediaMetadata>('inspect_url', { url });
+    }
     const res = await fetch('/api/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -55,12 +123,18 @@ export class ApiService {
   }
 
   public async getTasks(): Promise<DownloadTask[]> {
+    if (this.isTauri()) {
+      return invoke<DownloadTask[]>('get_tasks');
+    }
     const res = await fetch('/api/tasks');
     if (!res.ok) throw new Error('Failed to fetch tasks');
     return res.json();
   }
 
   public async createTask(taskData: Partial<DownloadTask>): Promise<DownloadTask> {
+    if (this.isTauri()) {
+      return invoke<DownloadTask>('create_task', { payload: taskData });
+    }
     const res = await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -71,44 +145,117 @@ export class ApiService {
   }
 
   public async pauseTask(id: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('pause_task', { id });
+    }
     await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
   }
 
   public async resumeTask(id: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('resume_task', { id });
+    }
     await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
   }
 
   public async cancelTask(id: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('cancel_task', { id });
+    }
     await fetch(`/api/tasks/${id}/cancel`, { method: 'POST' });
   }
 
   public async retryTask(id: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('retry_task', { id });
+    }
     await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
   }
 
-  public async deleteTask(id: string): Promise<void> {
-    await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+  public async deleteTask(id: string, deleteFileFromDisk = false): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('delete_task', { id });
+    }
+    await fetch(`/api/tasks/${id}?deleteFile=${deleteFileFromDisk ? 'true' : 'false'}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async deleteDownloadedFile(id: string): Promise<boolean> {
+    const res = await fetch(`/api/tasks/${id}/delete-file`, { method: 'POST' });
+    const data = await res.json();
+    return Boolean(data.removed);
   }
 
   public async pauseAll(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('pause_all');
+    }
     await fetch('/api/tasks/pause-all', { method: 'POST' });
   }
 
   public async resumeAll(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('resume_all');
+    }
     await fetch('/api/tasks/resume-all', { method: 'POST' });
   }
 
-  public async clearCompleted(): Promise<void> {
-    await fetch('/api/tasks/clear-completed', { method: 'POST' });
+  public async clearCompleted(deleteFilesFromDisk = false): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('clear_completed');
+    }
+    await fetch(`/api/tasks/clear-completed?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`, {
+      method: 'POST',
+    });
+  }
+
+  public async clearFailed(): Promise<void> {
+    await fetch('/api/tasks/clear-failed', { method: 'POST' });
+  }
+
+  public async clearAll(deleteFilesFromDisk = false): Promise<void> {
+    await fetch(`/api/tasks/clear-all?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`, {
+      method: 'POST',
+    });
+  }
+
+  public async testCookieExtraction(
+    browser: string
+  ): Promise<{ success: boolean; message: string; browser: string }> {
+    const res = await fetch('/api/cookies/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ browser }),
+    });
+    return res.json();
+  }
+
+  public async saveCookies(content: string): Promise<{ success: boolean; path: string }> {
+    if (this.isTauri()) {
+      return invoke<{ success: boolean; path: string }>('save_cookies', { content });
+    }
+    const res = await fetch('/api/cookies/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    return res.json();
   }
 
   public async getSettings(): Promise<AppSettings> {
+    if (this.isTauri()) {
+      return invoke<AppSettings>('get_settings');
+    }
     const res = await fetch('/api/settings');
     if (!res.ok) throw new Error('Failed to fetch settings');
     return res.json();
   }
 
   public async updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+    if (this.isTauri()) {
+      return invoke<AppSettings>('save_settings', { settings });
+    }
     const res = await fetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -119,13 +266,33 @@ export class ApiService {
   }
 
   public async getNotifications(): Promise<NotificationItem[]> {
+    if (this.isTauri()) {
+      return invoke<NotificationItem[]>('get_notifications');
+    }
     const res = await fetch('/api/notifications');
     if (!res.ok) throw new Error('Failed to fetch notifications');
     return res.json();
   }
 
   public async clearNotifications(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('clear_notifications');
+    }
     await fetch('/api/notifications', { method: 'DELETE' });
+  }
+
+  public async openFileOrFolder(path: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('open_file_or_folder', { path });
+    }
+    console.info('Opening path (web simulation):', path);
+  }
+
+  public async selectDirectory(): Promise<string | null> {
+    if (this.isTauri()) {
+      return invoke<string | null>('select_directory');
+    }
+    return null;
   }
 
   public subscribeEvents(callbacks: {
@@ -135,8 +302,68 @@ export class ApiService {
     onTasksCleared?: (tasks: DownloadTask[]) => void;
     onNotification?: (notif: NotificationItem) => void;
     onSettingsUpdated?: (settings: AppSettings) => void;
+    onEngineInstallProgress?: (progress: EngineInstallProgress) => void;
     onInit?: (data: { tasks: DownloadTask[]; settings: AppSettings }) => void;
   }): () => void {
+    if (this.isTauri()) {
+      let isSubscribed = true;
+      const unlisteners: UnlistenFn[] = [];
+
+      // Initial state fetch
+      Promise.all([
+        invoke<DownloadTask[]>('get_tasks'),
+        invoke<AppSettings>('get_settings'),
+      ])
+        .then(([tasks, settings]) => {
+          if (isSubscribed) {
+            callbacks.onInit?.({ tasks, settings });
+          }
+        })
+        .catch(console.error);
+
+      // Listen to native events
+      if (callbacks.onTaskUpdated) {
+        listen<DownloadTask>('task_updated', (e) => callbacks.onTaskUpdated?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onTaskAdded) {
+        listen<DownloadTask>('task_added', (e) => callbacks.onTaskAdded?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onTaskDeleted) {
+        listen<{ id: string }>('task_deleted', (e) => callbacks.onTaskDeleted?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onTasksCleared) {
+        listen<DownloadTask[]>('tasks_cleared', (e) => callbacks.onTasksCleared?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onNotification) {
+        listen<NotificationItem>('notification', (e) => callbacks.onNotification?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onSettingsUpdated) {
+        listen<AppSettings>('settings_updated', (e) => callbacks.onSettingsUpdated?.(e.payload)).then((u) =>
+          unlisteners.push(u)
+        );
+      }
+      if (callbacks.onEngineInstallProgress) {
+        listen<EngineInstallProgress>('engine_install_progress', (e) =>
+          callbacks.onEngineInstallProgress?.(e.payload)
+        ).then((u) => unlisteners.push(u));
+      }
+
+      return () => {
+        isSubscribed = false;
+        unlisteners.forEach((u) => u());
+      };
+    }
+
     if (this.eventSource) {
       this.eventSource.close();
     }
@@ -166,6 +393,10 @@ export class ApiService {
 
     es.addEventListener('settings_updated', (e) => {
       callbacks.onSettingsUpdated?.(JSON.parse(e.data));
+    });
+
+    es.addEventListener('engine_install_progress', (e) => {
+      callbacks.onEngineInstallProgress?.(JSON.parse(e.data));
     });
 
     es.addEventListener('init', (e) => {

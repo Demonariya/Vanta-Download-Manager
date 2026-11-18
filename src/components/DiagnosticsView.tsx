@@ -17,17 +17,19 @@ import {
   Shield,
   LifeBuoy,
 } from 'lucide-react';
-import { EngineStatusMap, DiagnosticResult, EngineUpdateResult } from '../types';
+import { EngineStatusMap, DiagnosticResult, EngineUpdateResult, EngineInstallProgress } from '../types';
 import { api } from '../services/api';
 
 interface DiagnosticsViewProps {
   engineStatus: EngineStatusMap | null;
   onRefresh: () => void;
+  installProgress?: Record<string, EngineInstallProgress>;
 }
 
 export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   engineStatus,
   onRefresh,
+  installProgress = {},
 }) => {
   const [isRunning, setIsRunning] = useState(false);
   const [results, setResults] = useState<DiagnosticResult[] | null>(null);
@@ -118,11 +120,11 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="grid grid-cols-1 sm:flex sm:items-center gap-2 w-full sm:w-auto">
           <button
             onClick={handleCheckUpdates}
             disabled={isCheckingUpdates || Boolean(updatingEngine)}
-            className="px-3 py-2 bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 text-[#c9d1d9] rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors shrink-0"
+            className="px-3 py-2 bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 text-[#c9d1d9] rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors shrink-0 w-full sm:w-auto"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isCheckingUpdates ? 'animate-spin text-[#58a6ff]' : ''}`} />
             <span>{isCheckingUpdates ? 'Checking...' : 'Check Updates'}</span>
@@ -131,7 +133,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           <button
             onClick={handleUpdateAll}
             disabled={Boolean(updatingEngine) || isCheckingUpdates}
-            className="px-3 py-2 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors shrink-0"
+            className="px-3 py-2 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors shrink-0 w-full sm:w-auto"
           >
             <ArrowUpCircle className={`w-3.5 h-3.5 ${updatingEngine === 'all' ? 'animate-spin' : ''}`} />
             <span>{updatingEngine === 'all' ? 'Upgrading All...' : 'Upgrade All Engines'}</span>
@@ -140,7 +142,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           <button
             onClick={handleRunDiagnostics}
             disabled={isRunning}
-            className="px-4 py-2 bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-2 transition-colors shrink-0"
+            className="px-4 py-2 bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-2 transition-colors shrink-0 w-full sm:w-auto"
           >
             <Play className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
             <span>{isRunning ? 'Running Tests...' : 'Run Diagnostics'}</span>
@@ -183,7 +185,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
             const updateData = updatesInfo ? updatesInfo[key] : null;
             const hasUpdate = updateData?.updateAvailable;
             const isThisUpdating = updatingEngine === key;
-            const canUpdateInApp = key === 'ytdlp' || key === 'spotdl';
+            const canUpdateInApp = key === 'ytdlp' || key === 'spotdl' || key === 'ffmpeg' || key === 'ffprobe';
+            const progressKey = key === 'ytdlp' ? 'yt-dlp' : key === 'ffprobe' ? 'ffmpeg' : key;
+            const prog = installProgress[progressKey];
 
             return (
               <div
@@ -243,6 +247,21 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
                     </div>
                   </div>
 
+                  {prog && prog.status !== 'ready' && (
+                    <div className="space-y-1 p-2 rounded bg-[#0d1117] border border-[#21262d]">
+                      <div className="flex justify-between text-[10px] font-mono">
+                        <span className="text-[#58a6ff]">{prog.phase}</span>
+                        <span className="text-[#c9d1d9]">{prog.progressPercentage.toFixed(0)}%</span>
+                      </div>
+                      <div className="w-full h-1 bg-[#21262d] rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-[#1f6feb] transition-all duration-200 rounded-full"
+                          style={{ width: `${Math.min(100, Math.max(2, prog.progressPercentage))}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {info.error && (
                     <p className="text-[11px] text-[#f85149] bg-[#da3633]/10 p-2 rounded border border-[#da3633]/30 font-mono">
                       {info.error}
@@ -253,18 +272,26 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
                 {/* Engine Card Action Footer */}
                 {canUpdateInApp && (
                   <div className="pt-2 border-t border-[#21262d] flex items-center justify-between">
-                    <span className="text-[11px] text-[#7d8590]">Automated In-App Upgrade</span>
+                    <span className="text-[11px] text-[#7d8590]">SHA-256 Verified Runtime</span>
                     <button
                       onClick={() => handleUpdateEngine(key)}
                       disabled={Boolean(updatingEngine)}
                       className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors flex items-center gap-1.5 ${
-                        hasUpdate
+                        !isReady || hasUpdate
                           ? 'bg-[#1f6feb] hover:bg-[#388bfd] text-white'
                           : 'bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9]'
                       }`}
                     >
                       <ArrowUpCircle className={`w-3.5 h-3.5 ${isThisUpdating ? 'animate-spin' : ''}`} />
-                      <span>{isThisUpdating ? 'Upgrading...' : hasUpdate ? 'Upgrade Now' : 'Reinstall / Verify'}</span>
+                      <span>
+                        {isThisUpdating
+                          ? 'Installing...'
+                          : !isReady
+                          ? 'Install Verified'
+                          : hasUpdate
+                          ? 'Upgrade Now'
+                          : 'Reinstall / Verify'}
+                      </span>
                     </button>
                   </div>
                 )}

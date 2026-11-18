@@ -13,6 +13,34 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Queued => "queued",
+            TaskStatus::Extracting => "extracting",
+            TaskStatus::Downloading => "downloading",
+            TaskStatus::Processing => "processing",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Paused => "paused",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "extracting" => TaskStatus::Extracting,
+            "downloading" => TaskStatus::Downloading,
+            "processing" => TaskStatus::Processing,
+            "completed" => TaskStatus::Completed,
+            "paused" => TaskStatus::Paused,
+            "failed" => TaskStatus::Failed,
+            "cancelled" => TaskStatus::Cancelled,
+            _ => TaskStatus::Queued,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskPriority {
@@ -22,12 +50,33 @@ pub enum TaskPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum EngineType {
-    YtDlp,
-    Spotdl,
-    Ffmpeg,
+impl TaskPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskPriority::Highest => "highest",
+            TaskPriority::High => "high",
+            TaskPriority::Normal => "normal",
+            TaskPriority::Low => "low",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "highest" => TaskPriority::Highest,
+            "high" => TaskPriority::High,
+            "low" => TaskPriority::Low,
+            _ => TaskPriority::Normal,
+        }
+    }
+
+    pub fn order_rank(&self) -> u32 {
+        match self {
+            TaskPriority::Highest => 0,
+            TaskPriority::High => 1,
+            TaskPriority::Normal => 2,
+            TaskPriority::Low => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +88,7 @@ pub struct DownloadTask {
     pub duration: Option<u64>,
     pub duration_string: Option<String>,
     pub thumbnail: Option<String>,
-    pub engine: EngineType,
+    pub engine: String,
     pub status: TaskStatus,
     pub progress_percentage: f64,
     pub speed_str: String,
@@ -66,6 +115,28 @@ pub struct DownloadTask {
     pub completed_at: Option<String>,
     pub retries: u32,
     pub max_retries: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskPayload {
+    pub url: String,
+    pub title: Option<String>,
+    pub uploader: Option<String>,
+    pub duration: Option<u64>,
+    pub duration_string: Option<String>,
+    pub thumbnail: Option<String>,
+    pub format_id: Option<String>,
+    pub format_note: Option<String>,
+    pub ext: Option<String>,
+    pub is_audio_only: Option<bool>,
+    pub audio_format: Option<String>,
+    pub audio_bitrate: Option<String>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_bit_depth: Option<u32>,
+    pub audio_channels: Option<u32>,
+    pub is_lossy_source: Option<bool>,
+    pub output_path: Option<String>,
+    pub priority: Option<TaskPriority>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +173,7 @@ pub struct MediaMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineInfo {
     pub available: bool,
     pub version: String,
@@ -109,9 +181,85 @@ pub struct EngineInfo {
     pub status: String,
     pub last_checked: String,
     pub error: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: Option<bool>,
+    pub is_updating: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatusMap {
+    pub ytdlp: EngineInfo,
+    pub spotdl: EngineInfo,
+    pub ffmpeg: EngineInfo,
+    pub ffprobe: EngineInfo,
+    pub python3: EngineInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineUpdateResult {
+    pub engine: String,
+    pub success: bool,
+    pub previous_version: String,
+    pub current_version: String,
+    pub message: String,
+    pub rolled_back: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineInstallProgress {
+    pub engine: String,
+    pub status: String,
+    pub phase: String,
+    pub progress_percentage: f64,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub message: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedEngineInfo {
+    pub install_dir: String,
+    pub manifest_path: String,
+    pub required_ready: bool,
+    pub missing_required: Vec<String>,
+    pub engines: EngineStatusMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticResult {
+    pub engine: String,
+    pub passed: bool,
+    pub version: Option<String>,
+    pub command: String,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationItem {
+    pub id: String,
+    pub r#type: String,
+    pub title: String,
+    pub message: String,
+    pub timestamp: String,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub download_dir: String,
     pub max_concurrent_downloads: u32,
@@ -134,4 +282,63 @@ pub struct AppSettings {
     pub theme: String,
     pub auto_retry_failed: bool,
     pub auto_resume_on_startup: bool,
+    pub cookies_browser: Option<String>,
+    pub cookies_file: Option<String>,
+    pub cookies_content: Option<String>,
+    pub enable_adult_sites: Option<bool>,
+    pub bypass_age_gate: Option<bool>,
+    pub user_agent: Option<String>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        let default_download_dir = default_downloads_path()
+            .to_string_lossy()
+            .to_string();
+
+        Self {
+            download_dir: default_download_dir,
+            max_concurrent_downloads: 3,
+            fragment_concurrency: 4,
+            global_bandwidth_limit_kbps: 0,
+            per_task_bandwidth_limit_kbps: 0,
+            max_retries: 3,
+            retry_delay_seconds: 5,
+            default_video_format: "best".to_string(),
+            default_audio_format: "mp3".to_string(),
+            default_audio_bitrate: "320k".to_string(),
+            default_audio_bit_depth: Some(24),
+            default_audio_sample_rate: Some(48000),
+            embed_thumbnail: true,
+            embed_metadata: true,
+            filename_template: "%(title)s [%(id)s].%(ext)s".to_string(),
+            proxy_url: "".to_string(),
+            floating_notifications_enabled: true,
+            auto_dismiss_seconds: 5,
+            theme: "dark".to_string(),
+            auto_retry_failed: true,
+            auto_resume_on_startup: true,
+            cookies_browser: Some("auto".to_string()),
+            cookies_file: None,
+            cookies_content: None,
+            enable_adult_sites: Some(true),
+            bypass_age_gate: Some(true),
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string()),
+        }
+    }
+}
+
+pub fn default_downloads_path() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let dl = std::path::PathBuf::from(profile).join("Downloads").join("VANTA");
+            return dl;
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let dl = std::path::PathBuf::from(home).join("Downloads").join("VANTA");
+        return dl;
+    }
+    std::path::PathBuf::from("./downloads")
 }

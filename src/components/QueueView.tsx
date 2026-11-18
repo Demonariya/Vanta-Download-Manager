@@ -13,6 +13,7 @@ import {
   Clock,
   Activity,
   Filter,
+  FileX,
 } from 'lucide-react';
 import { DownloadTask, TaskStatus, TaskPriority } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
@@ -24,10 +25,13 @@ interface QueueViewProps {
   onResumeTask: (id: string) => void;
   onCancelTask: (id: string) => void;
   onRetryTask: (id: string) => void;
-  onDeleteTask: (id: string) => void;
+  onDeleteTask: (id: string, deleteFile?: boolean) => void;
   onPauseAll: () => void;
   onResumeAll: () => void;
-  onClearCompleted: () => void;
+  onClearCompleted: (deleteFiles?: boolean) => void;
+  onClearFailed?: () => void;
+  onClearAll?: (deleteFiles?: boolean) => void;
+  onDeleteFile?: (id: string) => void;
   onOpenNewDownload: () => void;
   searchFilter: string;
 }
@@ -42,6 +46,9 @@ export const QueueView: React.FC<QueueViewProps> = ({
   onPauseAll,
   onResumeAll,
   onClearCompleted,
+  onClearFailed,
+  onClearAll,
+  onDeleteFile,
   onOpenNewDownload,
   searchFilter,
 }) => {
@@ -109,12 +116,33 @@ export const QueueView: React.FC<QueueViewProps> = ({
             <Pause className="w-3.5 h-3.5 text-[#d29922]" />
             <span>Pause All</span>
           </button>
+          {tasks.some((t) => t.status === 'failed') && onClearFailed && (
+            <button
+              onClick={onClearFailed}
+              className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#f85149] bg-[#da3633]/15 hover:bg-[#da3633]/25 border border-[#da3633]/30 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Clear Failed</span>
+            </button>
+          )}
           <button
-            onClick={onClearCompleted}
+            onClick={() => onClearCompleted(false)}
             className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] rounded-lg transition-colors"
           >
             Clear Completed
           </button>
+          {tasks.length > 0 && onClearAll && (
+            <button
+              onClick={() => {
+                if (window.confirm('Clear all tasks from queue?')) {
+                  onClearAll(false);
+                }
+              }}
+              className="flex-1 sm:flex-none px-2.5 sm:px-3 py-1.5 text-xs font-medium text-[#8b949e] hover:text-[#f85149] bg-[#21262d]/60 hover:bg-[#21262d] rounded-lg transition-colors"
+            >
+              Clear All
+            </button>
+          )}
         </div>
       </div>
 
@@ -262,16 +290,34 @@ export const QueueView: React.FC<QueueViewProps> = ({
                   )}
 
                   {task.output_path && task.status === 'completed' && (
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(task.output_path || '');
-                      }}
-                      title="Copy file path to clipboard"
-                      aria-label="Copy file path"
-                      className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
-                    >
-                      <FolderOpen className="w-4 h-4" />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(task.output_path || '');
+                        }}
+                        title="Copy file path to clipboard"
+                        aria-label="Copy file path"
+                        className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#3fb950] hover:bg-[#161b22] rounded-lg transition-colors"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Delete downloaded file "${task.title}" from disk?`)) {
+                            if (onDeleteFile) {
+                              onDeleteFile(task.id);
+                            } else {
+                              onDeleteTask(task.id, true);
+                            }
+                          }
+                        }}
+                        title="Delete file from disk"
+                        aria-label="Delete downloaded file from disk"
+                        className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
+                      >
+                        <FileX className="w-4 h-4" />
+                      </button>
+                    </>
                   )}
 
                   <button
@@ -297,8 +343,11 @@ export const QueueView: React.FC<QueueViewProps> = ({
                   )}
 
                   <button
-                    onClick={() => onDeleteTask(task.id)}
-                    title="Delete"
+                    onClick={() => {
+                      const deleteFile = task.status === 'completed' && Boolean(task.output_path);
+                      onDeleteTask(task.id, deleteFile);
+                    }}
+                    title="Delete task from queue"
                     aria-label="Delete task from queue"
                     className="p-1.5 sm:p-2 text-[#8b949e] hover:text-[#f85149] hover:bg-[#161b22] rounded-lg transition-colors"
                   >

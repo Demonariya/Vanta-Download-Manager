@@ -79,14 +79,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const renderNavContent = (isDrawer = false) => (
-    <div className="flex flex-col justify-between h-full">
-      <div>
+    <div className="flex flex-col h-full min-h-0 justify-between select-none">
+      {/* Scrollable Upper Area (Brand Header + CTA + Navigation) */}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
         {/* Brand header */}
-        <div className="flex items-center justify-between px-4 py-4 border-b border-[#21262d]">
+        <div
+          className={`h-14 flex items-center ${
+            isCollapsed && !isDrawer ? 'justify-center px-2' : 'justify-between px-3.5'
+          } border-b border-[#21262d] shrink-0`}
+        >
           <div className="flex items-center gap-2.5 overflow-hidden">
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#1f6feb] text-white shrink-0 shadow-sm">
+            <button
+              type="button"
+              onClick={!isDrawer && isCollapsed ? () => setIsCollapsed(false) : undefined}
+              className={`flex items-center justify-center w-8 h-8 rounded-lg bg-[#1f6feb] text-white shrink-0 shadow-sm ${
+                isCollapsed && !isDrawer ? 'cursor-pointer hover:bg-[#388bfd] transition-colors focus:ring-1 focus:ring-[#58a6ff]' : ''
+              }`}
+              title={isCollapsed && !isDrawer ? 'Expand sidebar' : undefined}
+              aria-label={isCollapsed && !isDrawer ? 'Expand sidebar' : 'VANTA Download Manager'}
+            >
               <Download className="w-4 h-4" />
-            </div>
+            </button>
             {(!isCollapsed || isDrawer) && (
               <div className="truncate">
                 <span className="font-semibold text-sm tracking-tight text-white block">VANTA</span>
@@ -103,13 +116,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <X className="w-4 h-4" />
             </button>
           ) : (
-            <button
-              onClick={() => setIsCollapsed(!isCollapsed)}
-              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              className="p-1 text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22] rounded transition-colors hidden md:block"
-            >
-              {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-            </button>
+            !isCollapsed && (
+              <button
+                onClick={() => setIsCollapsed(true)}
+                aria-label="Collapse sidebar"
+                title="Collapse sidebar"
+                className="p-1 text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22] rounded transition-colors"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+            )
           )}
         </div>
 
@@ -121,7 +137,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               if (isDrawer) setIsMobileOpen(false);
             }}
             aria-label="New Download"
-            className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-[#238636] hover:bg-[#2ea043] text-white rounded-lg text-xs font-medium transition-all shadow-sm active:scale-[0.98]"
+            title={isCollapsed && !isDrawer ? 'New Download' : undefined}
+            className={`w-full flex items-center ${
+              isCollapsed && !isDrawer ? 'justify-center p-2' : 'justify-center gap-2 py-2 px-3'
+            } bg-[#238636] hover:bg-[#2ea043] text-white rounded-lg text-xs font-medium transition-all shadow-sm active:scale-[0.98]`}
           >
             <PlusCircle className="w-4 h-4 shrink-0" />
             {(!isCollapsed || isDrawer) && <span className="whitespace-nowrap">New Download</span>}
@@ -129,7 +148,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Navigation list */}
-        <nav className="px-2 space-y-1">
+        <nav className="px-2 py-1 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
@@ -138,18 +157,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 key={item.id}
                 onClick={() => handleNavClick(item.id)}
                 aria-label={item.label}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                title={isCollapsed && !isDrawer ? item.label : undefined}
+                className={`w-full flex items-center ${
+                  isCollapsed && !isDrawer ? 'justify-center px-2' : 'gap-3 px-3'
+                } py-2 sm:py-2 rounded-lg text-xs font-medium transition-all duration-150 ${
                   isActive
-                    ? 'bg-[#1f6feb]/15 text-[#58a6ff]'
+                    ? 'bg-[#1f6feb]/15 text-[#58a6ff] font-semibold shadow-xs'
                     : 'text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22]'
-                }`}
+                } active:scale-[0.98]`}
               >
-                <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#58a6ff]' : ''}`} />
+                <Icon className={`w-4 h-4 shrink-0 transition-colors ${isActive ? 'text-[#58a6ff]' : 'text-[#8b949e]'}`} />
                 {(!isCollapsed || isDrawer) && (
                   <span className="truncate flex-1 text-left whitespace-nowrap">{item.label}</span>
                 )}
                 {(!isCollapsed || isDrawer) && item.badge !== undefined && (
-                  <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-[#1f6feb] text-white">
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono rounded-full bg-[#1f6feb] text-white font-medium shrink-0">
                     {item.badge}
                   </span>
                 )}
@@ -160,39 +182,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Engine health summary footer */}
-      <div className="p-3 border-t border-[#21262d] bg-[#0b0e14]">
+      <div className="p-3 border-t border-[#21262d] bg-[#0b0e14] shrink-0">
         {!isCollapsed || isDrawer ? (
           <div className="space-y-2">
             <div className="flex items-center justify-between text-[11px] text-[#8b949e]">
-              <span className="font-medium text-[#c9d1d9]">Engine Status</span>
+              <span className="font-medium text-[#c9d1d9] flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#3fb950] animate-pulse" />
+                Engine Status
+              </span>
               <span className="font-mono text-[10px] text-[#7d8590]">v1.0.0</span>
             </div>
-            <div className="grid grid-cols-3 gap-1 text-[10px] font-mono">
+            <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
               <div
-                className={`px-1.5 py-1 rounded text-center truncate ${
+                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
                   engineStatus?.ytdlp.available
-                    ? 'bg-[#238636]/15 text-[#3fb950]'
-                    : 'bg-[#da3633]/15 text-[#f85149]'
+                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
+                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
                 }`}
                 title={`yt-dlp: ${engineStatus?.ytdlp.version || 'Missing'}`}
               >
                 yt-dlp
               </div>
               <div
-                className={`px-1.5 py-1 rounded text-center truncate ${
+                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
                   engineStatus?.spotdl.available
-                    ? 'bg-[#238636]/15 text-[#3fb950]'
-                    : 'bg-[#da3633]/15 text-[#f85149]'
+                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
+                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
                 }`}
                 title={`spotDL: ${engineStatus?.spotdl.version || 'Missing'}`}
               >
                 spotDL
               </div>
               <div
-                className={`px-1.5 py-1 rounded text-center truncate ${
+                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
                   engineStatus?.ffmpeg.available
-                    ? 'bg-[#238636]/15 text-[#3fb950]'
-                    : 'bg-[#da3633]/15 text-[#f85149]'
+                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
+                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
                 }`}
                 title={`FFmpeg: ${engineStatus?.ffmpeg.version || 'Missing'}`}
               >
@@ -201,7 +226,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
         ) : (
-          <div className="flex justify-center" title="Engine Status">
+          <div className="flex justify-center py-1" title="Engine Status">
             {allEnginesReady ? (
               <ShieldCheck className="w-4 h-4 text-[#3fb950]" />
             ) : (
@@ -219,7 +244,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <aside
         className={`relative hidden md:flex flex-col justify-between border-r border-[#21262d] bg-[#0d1117] transition-all duration-200 select-none ${
           isCollapsed ? 'w-16' : 'w-64'
-        } shrink-0 h-screen overflow-y-auto`}
+        } shrink-0 h-full overflow-hidden`}
       >
         {renderNavContent(false)}
       </aside>
@@ -227,14 +252,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Mobile Backdrop & Drawer */}
       {isMobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs md:hidden"
+          className="fixed top-8 inset-x-0 bottom-0 z-40 bg-black/70 backdrop-blur-xs md:hidden"
           onClick={() => setIsMobileOpen(false)}
           aria-hidden="true"
         />
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-72 bg-[#0d1117] border-r border-[#21262d] shadow-2xl transition-transform duration-200 md:hidden select-none overflow-y-auto ${
+        className={`fixed top-8 bottom-0 left-0 z-50 w-72 bg-[#0d1117] border-r border-[#21262d] shadow-2xl transition-transform duration-200 md:hidden select-none overflow-hidden ${
           isMobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
