@@ -21,6 +21,10 @@ on:
         description: 'Publish as GitHub Release'
         type: boolean
         default: true
+      upload_actions_artifacts:
+        description: 'Upload downloadable GitHub Actions workflow artifacts'
+        type: boolean
+        default: true
       upload_msi_artifact:
         description: 'Upload MSI installer as separate Actions artifact'
         type: boolean
@@ -32,6 +36,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-windows:
@@ -167,31 +172,96 @@ jobs:
           Write-Host "=== SHA256SUMS.txt ==="
           Get-Content "release_artifacts/all/SHA256SUMS.txt"
 
+      - name: Prune Previous Workflow Artifacts in Repository
+        if: github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization          = "Bearer $env:GITHUB_TOKEN"
+            Accept                 = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $repo = "${{ github.repository }}"
+          $currentRunId = [long]"${{ github.run_id }}"
+          $freedBytes = [long]0
+          $deletedCount = 0
+
+          try {
+            $page = 1
+            do {
+              $listUrl = "https://api.github.com/repos/$repo/actions/artifacts?per_page=100&page=$page"
+              $resp = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get
+              $artifacts = $resp.artifacts
+              if (-not $artifacts -or $artifacts.Count -eq 0) { break }
+
+              foreach ($art in $artifacts) {
+                if ($art.expired) { continue }
+                if ($art.workflow_run -and ([long]$art.workflow_run.id -eq $currentRunId)) { continue }
+                try {
+                  $delUrl = "https://api.github.com/repos/$repo/actions/artifacts/$($art.id)"
+                  Invoke-RestMethod -Uri $delUrl -Headers $headers -Method Delete | Out-Null
+                  $freedBytes += [long]$art.size_in_bytes
+                  $deletedCount++
+                  Write-Host "Deleted old artifact '$($art.name)' ($($art.size_in_bytes) bytes) from run $($art.workflow_run.id)"
+                } catch {
+                  Write-Warning "Could not delete artifact $($art.id) ($($art.name)): $_"
+                }
+              }
+              $page++
+            } while ($artifacts.Count -eq 100)
+
+            $freedMiB = [Math]::Round($freedBytes / 1MB, 2)
+            Write-Host "Pruned $deletedCount old artifact(s) in $repo, freeing $freedMiB MiB."
+          } catch {
+            Write-Warning "Failed listing/pruning repository artifacts: $_"
+          }
+
       - name: Upload Recommended NSIS Setup Artifact
+        id: upload_setup
+        if: github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts
+        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-Setup-x64
           path: release_artifacts/setup/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 5
 
       - name: Upload Enterprise MSI Artifact
-        if: github.event_name != 'workflow_dispatch' || inputs.upload_msi_artifact
+        id: upload_msi
+        if: (github.event_name != 'workflow_dispatch' || (inputs.upload_actions_artifacts && inputs.upload_msi_artifact)) && steps.upload_setup.outcome != 'failure'
+        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-MSI-x64
           path: release_artifacts/msi/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 5
 
       - name: Upload Portable ZIP Artifact
-        if: github.event_name != 'workflow_dispatch' || inputs.upload_portable_artifact
+        id: upload_portable
+        if: (github.event_name != 'workflow_dispatch' || (inputs.upload_actions_artifacts && inputs.upload_portable_artifact)) && steps.upload_setup.outcome != 'failure'
+        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-Portable-x64
           path: release_artifacts/portable/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 5
+
+      - name: Report Artifact Storage Quota Notice if Skipped
+        if: steps.upload_setup.outcome == 'failure' || steps.upload_msi.outcome == 'failure' || steps.upload_portable.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Warning "GitHub Actions account artifact storage quota is full (typically 500 MB across all repositories under this account). Proceeding with GitHub Release upload, which does not count against Actions artifact quota."
+          @(
+            '### GitHub Actions Artifact Storage Quota Full'
+            '- Actions artifact upload was skipped because account-wide Actions/Packages storage hit its quota across one or more repositories under this owner.'
+            '- Check **GitHub Settings -> Billing & plans -> Actions** (or delete old workflow artifacts in other repositories such as Android builds).'
+            '- Installers and SHA256SUMS.txt are still attached to the GitHub Release when release creation is enabled.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Create or Update GitHub Release
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release))
