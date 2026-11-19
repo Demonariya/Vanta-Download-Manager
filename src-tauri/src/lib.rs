@@ -4,6 +4,7 @@ pub mod engines;
 pub mod logging;
 pub mod models;
 pub mod process;
+pub mod spotify;
 pub mod state;
 
 pub use state::AppState;

@@ -777,7 +777,11 @@ pub fn test_cookie_extraction(
                 ]);
                 EngineManager::apply_engine_env(&mut cmd);
 
-                match process::run_captured_command(&mut cmd) {
+                let opts = process::ProcessOptions {
+                    timeout: process::COOKIE_TEST_TIMEOUT,
+                    ..process::ProcessOptions::default()
+                };
+                match process::run_command_with_options(&mut cmd, opts) {
                     Ok(out) if out.status.success() => CookieTestResult {
                         success: true,
                         stage: "auth_verified".to_string(),
@@ -941,7 +945,11 @@ pub fn test_cookie_extraction(
             ]);
             EngineManager::apply_engine_env(&mut cmd);
 
-            match process::run_captured_command(&mut cmd) {
+            let opts = process::ProcessOptions {
+                timeout: process::COOKIE_TEST_TIMEOUT,
+                ..process::ProcessOptions::default()
+            };
+            match process::run_command_with_options(&mut cmd, opts) {
                 Ok(out) => {
                     let combined_err = logging::redact_secrets(&format!("{}\n{}", out.stderr, out.stdout));
                     let lower = combined_err.to_ascii_lowercase();

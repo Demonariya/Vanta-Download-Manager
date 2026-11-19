@@ -193,36 +193,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="font-mono text-[10px] text-[#7d8590]">v1.0.0</span>
             </div>
             <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
-              <div
-                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
-                  engineStatus?.ytdlp.available
-                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
-                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
-                }`}
-                title={`yt-dlp: ${engineStatus?.ytdlp.version || 'Missing'}`}
-              >
-                yt-dlp
-              </div>
-              <div
-                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
-                  engineStatus?.spotdl.available
-                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
-                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
-                }`}
-                title={`spotDL: ${engineStatus?.spotdl.version || 'Missing'}`}
-              >
-                spotDL
-              </div>
-              <div
-                className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${
-                  engineStatus?.ffmpeg.available
-                    ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
-                    : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
-                }`}
-                title={`FFmpeg: ${engineStatus?.ffmpeg.version || 'Missing'}`}
-              >
-                FFmpeg
-              </div>
+              {[
+                { label: 'yt-dlp', info: engineStatus?.ytdlp },
+                { label: 'spotDL', info: engineStatus?.spotdl },
+                { label: 'FFmpeg', info: engineStatus?.ffmpeg },
+              ].map(({ label, info }) => {
+                const st = info?.status || 'checking';
+                const pillClass = info?.available
+                  ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
+                  : st === 'checking'
+                  ? 'bg-[#1f6feb]/10 border-[#1f6feb]/30 text-[#58a6ff]'
+                  : st === 'timed_out'
+                  ? 'bg-[#d29922]/10 border-[#d29922]/30 text-[#e3b341]'
+                  : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]';
+                return (
+                  <div
+                    key={label}
+                    className={`px-1.5 py-1 rounded-md text-center truncate border transition-colors ${pillClass}`}
+                    title={`${label}: ${
+                      info?.version || (st === 'checking' ? 'Checking...' : st === 'timed_out' ? 'Timed out' : 'Missing')
+                    }`}
+                  >
+                    {label}
+                  </div>
+                );
+              })}
             </div>
           </div>
         ) : (

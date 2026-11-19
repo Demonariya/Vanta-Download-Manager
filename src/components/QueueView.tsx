@@ -205,10 +205,20 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       src={task.thumbnail}
                       alt={task.title}
                       referrerPolicy="no-referrer"
-                      className="w-14 sm:w-16 h-10 sm:h-11 object-cover rounded-md bg-[#0d1117] shrink-0 border border-[#21262d]"
+                      className={`${
+                        task.engine === 'spotdl'
+                          ? 'w-11 h-11 rounded-md'
+                          : 'w-14 sm:w-16 h-10 sm:h-11 rounded-md'
+                      } object-cover bg-[#0d1117] shrink-0 border border-[#21262d]`}
                     />
                   ) : (
-                    <div className="w-14 sm:w-16 h-10 sm:h-11 rounded-md bg-[#161b22] border border-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]">
+                    <div
+                      className={`${
+                        task.engine === 'spotdl'
+                          ? 'w-11 h-11 rounded-md'
+                          : 'w-14 sm:w-16 h-10 sm:h-11 rounded-md'
+                      } bg-[#161b22] border border-[#21262d] flex items-center justify-center shrink-0 text-[10px] font-mono text-[#8b949e]`}
+                    >
                       {task.ext.toUpperCase()}
                     </div>
                   )}
@@ -218,6 +228,11 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       <h3 className="text-xs font-semibold text-white break-words sm:truncate max-w-full sm:max-w-md">
                         {task.title}
                       </h3>
+                      {task.content_type && (
+                        <span className="text-[#3fb950] bg-[#238636]/15 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase">
+                          {task.content_type}
+                        </span>
+                      )}
                       {getStatusBadge(task.status)}
                     </div>
 
@@ -246,6 +261,12 @@ export const QueueView: React.FC<QueueViewProps> = ({
                         <>
                           <span aria-hidden="true">·</span>
                           <span className="truncate max-w-[120px] sm:max-w-[180px]">{task.uploader}</span>
+                        </>
+                      )}
+                      {task.album && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="truncate max-w-[120px] sm:max-w-[180px] text-[#7d8590]">{task.album}</span>
                         </>
                       )}
                       <span aria-hidden="true">·</span>

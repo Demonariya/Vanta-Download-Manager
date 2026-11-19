@@ -40,6 +40,21 @@ export interface FormatOption {
   is_video_only: boolean;
 }
 
+export type SpotifyContentType = 'track' | 'album' | 'playlist' | 'artist';
+
+export interface SpotifyTrackItem {
+  id: string;
+  title: string;
+  artists: string[];
+  album?: string;
+  duration?: number;
+  duration_string?: string;
+  track_number?: number;
+  artwork?: string;
+  explicit?: boolean;
+  url?: string;
+}
+
 export interface MediaMetadata {
   url: string;
   id: string;
@@ -53,6 +68,18 @@ export interface MediaMetadata {
   is_playlist: boolean;
   playlist_count?: number;
   extractor: string;
+  content_type?: SpotifyContentType;
+  artists?: string[];
+  album?: string;
+  album_artwork?: string;
+  track_number?: number;
+  release_date?: string;
+  explicit?: boolean;
+  tracks?: SpotifyTrackItem[];
+  total_tracks?: number;
+  owner?: string;
+  partial_tracks?: boolean;
+  metadata_source?: string;
 }
 
 export interface DownloadTask {
@@ -63,6 +90,8 @@ export interface DownloadTask {
   duration?: number;
   duration_string?: string;
   thumbnail?: string;
+  album?: string;
+  content_type?: SpotifyContentType | string;
   engine: EngineType;
   status: TaskStatus;
   progress_percentage: number;
@@ -96,8 +125,9 @@ export interface EngineInfo {
   available: boolean;
   version: string;
   path: string;
-  status: 'ready' | 'missing' | 'error';
+  status: 'ready' | 'missing' | 'error' | 'timed_out' | 'checking';
   lastChecked: string;
+  durationMs?: number;
   error?: string;
   latestVersion?: string;
   updateAvailable?: boolean;

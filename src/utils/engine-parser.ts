@@ -1,4 +1,5 @@
 import { EngineType } from '../types';
+import { isSpotifyUrl } from './spotify';
 
 export interface ParsedProgress {
   percentage: number;
@@ -64,12 +65,7 @@ export function formatDuration(seconds: number | undefined | null): string {
 }
 
 export function determineEngineForUrl(url: string): EngineType {
-  const trimmed = url.trim().toLowerCase();
-  if (
-    trimmed.includes('spotify.com') ||
-    trimmed.includes('open.spotify.com') ||
-    trimmed.startsWith('spotify:')
-  ) {
+  if (isSpotifyUrl(url)) {
     return 'spotdl';
   }
   return 'yt-dlp';

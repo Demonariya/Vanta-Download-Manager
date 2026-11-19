@@ -88,6 +88,10 @@ pub struct DownloadTask {
     pub duration: Option<u64>,
     pub duration_string: Option<String>,
     pub thumbnail: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
     pub engine: String,
     pub status: TaskStatus,
     pub progress_percentage: f64,
@@ -125,6 +129,8 @@ pub struct CreateTaskPayload {
     pub duration: Option<u64>,
     pub duration_string: Option<String>,
     pub thumbnail: Option<String>,
+    pub album: Option<String>,
+    pub content_type: Option<String>,
     pub format_id: Option<String>,
     pub format_note: Option<String>,
     pub ext: Option<String>,
@@ -156,7 +162,28 @@ pub struct FormatOption {
     pub is_video_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpotifyTrackItem {
+    pub id: String,
+    pub title: String,
+    pub artists: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_string: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artwork: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MediaMetadata {
     pub url: String,
     pub id: String,
@@ -170,6 +197,30 @@ pub struct MediaMetadata {
     pub is_playlist: bool,
     pub playlist_count: Option<usize>,
     pub extractor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artists: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_artwork: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<SpotifyTrackItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tracks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_tracks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +235,7 @@ pub struct EngineInfo {
     pub latest_version: Option<String>,
     pub update_available: Option<bool>,
     pub is_updating: Option<bool>,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

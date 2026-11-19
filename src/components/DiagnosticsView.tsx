@@ -232,10 +232,20 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
                       className={`text-[10px] font-mono px-2 py-0.5 rounded ${
                         isReady
                           ? 'bg-[#238636]/15 text-[#3fb950]'
+                          : info.status === 'checking'
+                          ? 'bg-[#1f6feb]/15 text-[#58a6ff]'
+                          : info.status === 'timed_out'
+                          ? 'bg-[#d29922]/15 text-[#e3b341]'
                           : 'bg-[#da3633]/15 text-[#f85149]'
                       }`}
                     >
-                      {isReady ? 'OPERATIONAL' : 'UNAVAILABLE'}
+                      {isReady
+                        ? 'OPERATIONAL'
+                        : info.status === 'checking'
+                        ? 'CHECKING'
+                        : info.status === 'timed_out'
+                        ? 'TIMED OUT'
+                        : 'UNAVAILABLE'}
                     </span>
                   </div>
 

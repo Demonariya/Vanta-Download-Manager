@@ -27,6 +27,7 @@ import {
 } from './server/cookies';
 import { validateNetscapeCookies } from './src/utils/cookie-validator';
 import { engineManager } from './server/engineManager';
+import { spotifyMetadataService } from './server/spotify';
 import { queueController } from './server/queueController';
 import { DownloadTask } from './src/types';
 import { determineEngineForUrl } from './src/utils/engine-parser';
@@ -53,14 +54,23 @@ async function startServer() {
   });
 
   // Engines status
-  app.get('/api/engines/status', (req: Request, res: Response) => {
-    const status = engineManager.getEngineStatus();
-    res.json(status);
+  app.get('/api/engines/status', async (req: Request, res: Response) => {
+    try {
+      const force = req.query.force === '1' || req.query.force === 'true';
+      const status = await engineManager.getEngineStatus(force);
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to scan engines' });
+    }
   });
 
   // Managed engine summary
-  app.get('/api/engines/managed', (req: Request, res: Response) => {
-    res.json(engineManager.getManagedEngineInfo());
+  app.get('/api/engines/managed', async (_req: Request, res: Response) => {
+    try {
+      res.json(await engineManager.getManagedEngineInfo());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to read managed engine info' });
+    }
   });
 
   // Install single managed engine
@@ -131,18 +141,55 @@ async function startServer() {
 
   // Inspect URL
   app.post('/api/inspect', async (req: Request, res: Response) => {
-    const { url } = req.body;
+    const { url, requestId } = req.body || {};
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'URL is required' });
     }
 
+    const reqIdStr = typeof requestId === 'string' && requestId.trim() ? requestId.trim() : undefined;
+    const onAbort = () => {
+      if (reqIdStr) {
+        engineManager.cancelInspection(reqIdStr);
+      }
+    };
+    req.on('aborted', onAbort);
+
     try {
       const settings = getSettings();
-      const metadata = await engineManager.inspectUrl(url.trim(), settings.proxy_url);
+      const metadata = await engineManager.inspectUrl(url.trim(), settings.proxy_url, reqIdStr);
       res.json(metadata);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Inspection failed' });
+      const msg = err.message || 'Inspection failed';
+      const lower = msg.toLowerCase();
+      const statusCode =
+        lower.includes('url cannot be empty') ||
+        lower.includes('invalid url') ||
+        lower.includes('unsupported url scheme') ||
+        lower.includes('malformed url') ||
+        lower.includes('malformed spotify') ||
+        lower.includes('unsupported spotify') ||
+        lower.includes('incomplete spotify')
+          ? 400
+          : lower.includes('http 404') || lower.includes('not found, private')
+          ? 404
+          : lower.includes('429') || lower.includes('rate-limited') || lower.includes('rate limit')
+          ? 429
+          : lower.includes('timed out')
+          ? 504
+          : 500;
+      res.status(statusCode).json({ error: msg });
+    } finally {
+      req.off('aborted', onAbort);
     }
+  });
+
+  app.post('/api/inspect/cancel', (req: Request, res: Response) => {
+    const requestId = typeof req.body?.requestId === 'string' ? req.body.requestId.trim() : '';
+    if (!requestId) {
+      return res.status(400).json({ error: 'requestId is required' });
+    }
+    const cancelled = engineManager.cancelInspection(requestId);
+    res.json({ cancelled });
   });
 
   // Tasks API
@@ -151,7 +198,7 @@ async function startServer() {
     res.json(tasks);
   });
 
-  app.post('/api/tasks', (req: Request, res: Response) => {
+  app.post('/api/tasks', async (req: Request, res: Response) => {
     const {
       url,
       title,
@@ -159,6 +206,8 @@ async function startServer() {
       duration,
       duration_string,
       thumbnail,
+      album,
+      content_type,
       format_id,
       format_note,
       ext,
@@ -173,21 +222,68 @@ async function startServer() {
       is_lossy_source,
     } = req.body;
 
-    if (!url) {
+    if (!url || typeof url !== 'string' || !url.trim()) {
       return res.status(400).json({ error: 'URL is required' });
     }
 
+    const trimmedUrl = url.trim();
     const settings = getSettings();
-    const engine = determineEngineForUrl(url);
+    const engine = determineEngineForUrl(trimmedUrl);
+
+    let resolvedUrl = trimmedUrl;
+    let resolvedTitle = typeof title === 'string' ? title.trim() : '';
+    let resolvedUploader = typeof uploader === 'string' ? uploader.trim() || undefined : undefined;
+    let resolvedDuration = duration || undefined;
+    let resolvedDurationStr = duration_string || undefined;
+    let resolvedThumbnail = typeof thumbnail === 'string' ? thumbnail.trim() || undefined : undefined;
+    let resolvedAlbum = typeof album === 'string' ? album.trim() || undefined : undefined;
+    let resolvedContentType = typeof content_type === 'string' ? content_type.trim() || undefined : undefined;
+
+    const isPlaceholderTitle =
+      !resolvedTitle ||
+      resolvedTitle === 'Download Task' ||
+      resolvedTitle === 'Queued Item' ||
+      resolvedTitle === 'Spotify Track / Album' ||
+      resolvedTitle === 'Spotify Music Track' ||
+      resolvedTitle === 'Spotify Album / Playlist' ||
+      resolvedTitle.startsWith('Batch Item:');
+
+    if (engine === 'spotdl' && (isPlaceholderTitle || !resolvedThumbnail)) {
+      try {
+        const meta = await spotifyMetadataService.resolveSpotifyUrl(trimmedUrl);
+        resolvedUrl = meta.url || resolvedUrl;
+        resolvedTitle = meta.title;
+        resolvedUploader = meta.artists?.join(', ') || meta.owner || meta.uploader || resolvedUploader;
+        resolvedDuration = meta.duration ?? resolvedDuration;
+        resolvedDurationStr = meta.duration_string ?? resolvedDurationStr;
+        resolvedThumbnail = meta.album_artwork || meta.thumbnail || resolvedThumbnail;
+        resolvedAlbum = meta.album ?? resolvedAlbum;
+        resolvedContentType = meta.content_type ?? resolvedContentType;
+      } catch (err: any) {
+        const msg = err?.message || 'Failed to resolve Spotify metadata.';
+        const lower = msg.toLowerCase();
+        const code =
+          lower.includes('malformed') || lower.includes('unsupported') || lower.includes('incomplete')
+            ? 400
+            : lower.includes('404') || lower.includes('not found')
+            ? 404
+            : lower.includes('429')
+            ? 429
+            : 502;
+        return res.status(code).json({ error: msg });
+      }
+    }
 
     const task: DownloadTask = {
       id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      url: url.trim(),
-      title: title || 'Queued Item',
-      uploader: uploader || undefined,
-      duration: duration || undefined,
-      duration_string: duration_string || undefined,
-      thumbnail: thumbnail || undefined,
+      url: resolvedUrl,
+      title: resolvedTitle || 'Queued Item',
+      uploader: resolvedUploader,
+      duration: resolvedDuration,
+      duration_string: resolvedDurationStr,
+      thumbnail: resolvedThumbnail,
+      album: resolvedAlbum,
+      content_type: resolvedContentType,
       engine,
       status: 'queued',
       progress_percentage: 0,
@@ -199,14 +295,14 @@ async function startServer() {
       current_phase: 'Queued',
       format_id: format_id || 'best',
       format_note: format_note || undefined,
-      ext: ext || (is_audio_only ? 'mp3' : 'mp4'),
-      is_audio_only: Boolean(is_audio_only),
+      ext: ext || (is_audio_only || engine === 'spotdl' ? 'mp3' : 'mp4'),
+      is_audio_only: Boolean(is_audio_only || engine === 'spotdl'),
       audio_format: audio_format || settings.default_audio_format,
       audio_bitrate: audio_bitrate || settings.default_audio_bitrate,
       audio_sample_rate: audio_sample_rate ? parseInt(audio_sample_rate, 10) : settings.default_audio_sample_rate,
       audio_bit_depth: audio_bit_depth ? parseInt(audio_bit_depth, 10) : settings.default_audio_bit_depth,
       audio_channels: audio_channels ? parseInt(audio_channels, 10) : undefined,
-      is_lossy_source: is_lossy_source !== undefined ? Boolean(is_lossy_source) : false,
+      is_lossy_source: is_lossy_source !== undefined ? Boolean(is_lossy_source) : engine === 'spotdl',
       output_path: output_path || settings.download_dir,
       priority: priority || 'normal',
       created_at: new Date().toISOString(),

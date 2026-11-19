@@ -1,24 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Search,
   Download,
   Music,
   Video,
-  Layers,
-  Settings2,
-  Clock,
-  User,
-  ExternalLink,
-  Check,
   AlertCircle,
-  Sparkles,
   ClipboardPaste,
-  FileText,
   Info,
   Trash2,
   Cookie,
   Upload,
+  Loader2,
+  RotateCw,
+  Disc,
+  ListMusic,
 } from 'lucide-react';
 import {
   CookieStatus,
@@ -30,6 +26,8 @@ import { api } from '../services/api';
 import { isLikelyLossySource } from '../utils/audio-quality';
 import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
+import { InspectionController } from '../utils/inspection-controller';
+import { isSpotifyUrl } from '../utils/spotify';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
@@ -70,6 +68,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [isExtracting, setIsExtracting] = useState(false);
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [isTimeoutError, setIsTimeoutError] = useState(false);
 
   // Live cookie status & inline import panel
   const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
@@ -78,7 +77,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [inlineCookieValidation, setInlineCookieValidation] = useState<CookieValidationResult | null>(null);
   const [inlineCookieError, setInlineCookieError] = useState<string | null>(null);
   const [savingInlineCookies, setSavingInlineCookies] = useState(false);
-  const inlineFileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const inlineFileInputRef = useRef<HTMLInputElement | null>(null);
+  const inspectionControllerRef = useRef<InspectionController>(new InspectionController());
 
   // Selected download settings
   const [selectedTab, setSelectedTab] = useState<'video' | 'audio' | 'advanced'>('video');
@@ -91,27 +91,73 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const applyInspectionPatch = (patch: Partial<{
+    isExtracting: boolean;
+    metadata: MediaMetadata | null;
+    extractError: string | null;
+    isTimeoutError: boolean;
+  }>) => {
+    if (patch.isExtracting !== undefined) setIsExtracting(patch.isExtracting);
+    if (patch.metadata !== undefined) {
+      setMetadata(patch.metadata);
+      if (patch.metadata?.extractor === 'spotdl') {
+        setSelectedTab('audio');
+      }
+    }
+    if (patch.extractError !== undefined) setExtractError(patch.extractError);
+    if (patch.isTimeoutError !== undefined) setIsTimeoutError(patch.isTimeoutError);
+  };
+
+  const inspect = async (targetUrl: string) => {
+    await inspectionControllerRef.current.startInspection(targetUrl, {
+      inspectUrl: (u, opts) => api.inspectUrl(u, opts),
+      cancelInspection: (id) => api.cancelInspection(id),
+      onStateChange: applyInspectionPatch,
+    });
+  };
+
+  const handleCancelInspection = () => {
+    inspectionControllerRef.current.cancelCurrent(
+      (id) => api.cancelInspection(id),
+      applyInspectionPatch
+    );
+  };
+
+  const handleCloseModal = () => {
+    handleCancelInspection();
+    onClose();
+  };
+
   const refreshCookies = async () => {
     try {
       const status = await api.getCookieStatus();
-      setCookieStatus(status);
+      if (inspectionControllerRef.current.isMounted()) {
+        setCookieStatus(status);
+      }
     } catch {
       // ignore
     }
   };
 
   useEffect(() => {
-    if (isOpen) {
-      refreshCookies();
-    }
-  }, [isOpen]);
+    const controller = inspectionControllerRef.current;
+    controller.markMounted();
+    return () => {
+      controller.dispose((id) => api.cancelInspection(id));
+    };
+  }, []);
 
   useEffect(() => {
-    if (initialUrl && initialUrl !== url) {
-      setUrl(initialUrl);
-      inspect(initialUrl);
+    if (isOpen) {
+      refreshCookies();
+      if (initialUrl) {
+        setUrl(initialUrl);
+        inspect(initialUrl);
+      }
+    } else {
+      handleCancelInspection();
     }
-  }, [initialUrl]);
+  }, [isOpen, initialUrl]);
 
   useEffect(() => {
     if (!inlineCookieText.trim()) {
@@ -125,31 +171,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   const cookieBadge = describeCookieStatus(cookieStatus);
 
-  const inspect = async (targetUrl: string) => {
-    if (!targetUrl.trim()) return;
-    setIsExtracting(true);
-    setExtractError(null);
-    setMetadata(null);
-
-    try {
-      const data = await api.inspectUrl(targetUrl.trim());
-      setMetadata(data);
-      if (data.extractor === 'spotdl') {
-        setSelectedTab('audio');
-      }
-    } catch (err: any) {
-      setExtractError(err.message || 'Failed to inspect URL. You can still proceed with standard download.');
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
   const handlePasteClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
       if (text) {
-        setUrl(text.trim());
-        inspect(text.trim());
+        const cleaned = text.trim();
+        setUrl(cleaned);
+        inspect(cleaned);
       }
     } catch {
       // ignore
@@ -167,58 +195,76 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
       if (lines.length === 0) return;
       setIsSubmitting(true);
+      try {
+        for (const line of lines) {
+          const lineIsSpotify = isSpotifyUrl(line);
+          const isAudioOnly = selectedTab === 'audio' || lineIsSpotify;
+          await api.createTask({
+            url: line,
+            title: lineIsSpotify ? undefined : `Batch Item: ${line.substring(0, 40)}`,
+            format_id: isAudioOnly ? 'bestaudio' : 'best',
+            ext: isAudioOnly ? selectedAudioFormat : selectedContainer,
+            is_audio_only: isAudioOnly,
+            audio_format: selectedAudioFormat,
+            audio_bitrate: selectedAudioBitrate,
+            audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+            audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+            is_lossy_source: isLikelyLossySource(line),
+            priority,
+          });
+        }
 
-      for (const line of lines) {
-        const isAudioOnly = selectedTab === 'audio';
-        await api.createTask({
-          url: line,
-          title: `Batch Item: ${line.substring(0, 40)}`,
-          format_id: isAudioOnly ? 'bestaudio' : 'best',
-          ext: isAudioOnly ? selectedAudioFormat : 'mp4',
-          is_audio_only: isAudioOnly,
-          audio_format: selectedAudioFormat,
-          audio_bitrate: selectedAudioBitrate,
-          audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
-          audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
-          is_lossy_source: isLikelyLossySource(line),
-          priority,
-        });
+        handleCloseModal();
+        onTaskCreated();
+      } catch (err: any) {
+        setExtractError(err?.message || 'Failed to enqueue batch download tasks.');
+      } finally {
+        setIsSubmitting(false);
       }
-
-      setIsSubmitting(false);
-      onTaskCreated();
-      onClose();
       return;
     }
 
-    if (!url.trim()) return;
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) return;
     setIsSubmitting(true);
+    try {
+      const urlIsSpotify = metadata?.extractor === 'spotdl' || isSpotifyUrl(trimmedUrl);
+      const isAudioOnly = selectedTab === 'audio' || urlIsSpotify;
+      const chosenFormatId = quickDownload ? (isAudioOnly ? 'bestaudio' : 'best') : selectedFormatId;
+      const isSourceLossy = isLikelyLossySource(trimmedUrl, metadata?.extractor);
+      const resolvedUploader =
+        metadata?.artists && metadata.artists.length > 0
+          ? metadata.artists.join(', ')
+          : metadata?.owner || metadata?.uploader;
+      const resolvedArtwork = metadata?.album_artwork || metadata?.thumbnail;
 
-    const isAudioOnly = selectedTab === 'audio' || (metadata?.extractor === 'spotdl');
-    const chosenFormatId = quickDownload ? 'best' : selectedFormatId;
-    const isSourceLossy = isLikelyLossySource(url.trim(), metadata?.extractor);
+      await api.createTask({
+        url: trimmedUrl,
+        title: metadata?.title || (urlIsSpotify ? undefined : 'Download Task'),
+        uploader: resolvedUploader,
+        duration: metadata?.duration,
+        duration_string: metadata?.duration_string,
+        thumbnail: resolvedArtwork,
+        album: metadata?.album,
+        content_type: metadata?.content_type,
+        format_id: chosenFormatId,
+        ext: isAudioOnly ? selectedAudioFormat : selectedContainer,
+        is_audio_only: isAudioOnly,
+        audio_format: selectedAudioFormat,
+        audio_bitrate: selectedAudioBitrate,
+        audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+        audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+        is_lossy_source: isSourceLossy,
+        priority,
+      });
 
-    await api.createTask({
-      url: url.trim(),
-      title: metadata?.title || 'Download Task',
-      uploader: metadata?.uploader,
-      duration: metadata?.duration,
-      duration_string: metadata?.duration_string,
-      thumbnail: metadata?.thumbnail,
-      format_id: chosenFormatId,
-      ext: isAudioOnly ? selectedAudioFormat : selectedContainer,
-      is_audio_only: isAudioOnly,
-      audio_format: selectedAudioFormat,
-      audio_bitrate: selectedAudioBitrate,
-      audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
-      audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
-      is_lossy_source: isSourceLossy,
-      priority,
-    });
-
-    setIsSubmitting(false);
-    onTaskCreated();
-    onClose();
+      handleCloseModal();
+      onTaskCreated();
+    } catch (err: any) {
+      setExtractError(err?.message || 'Failed to create download task.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -231,7 +277,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             <h2 className="text-sm font-semibold text-white">Universal Download Workstation</h2>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleCloseModal}
             aria-label="Close dialog"
             className="p-1 text-[#8b949e] hover:text-white hover:bg-[#21262d] rounded transition-colors"
           >
@@ -254,7 +300,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               Single URL
             </button>
             <button
-              onClick={() => setMode('batch')}
+              onClick={() => {
+                handleCancelInspection();
+                setMode('batch');
+              }}
               className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
                 mode === 'batch'
                   ? 'bg-[#21262d] text-white shadow-xs'
@@ -278,7 +327,20 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                       type="text"
                       placeholder="https://www.youtube.com/watch?v=... or https://open.spotify.com/track/..."
                       value={url}
-                      onChange={(e) => setUrl(e.target.value)}
+                      onChange={(e) => {
+                        const nextVal = e.target.value;
+                        setUrl(nextVal);
+                        if (isExtracting) {
+                          handleCancelInspection();
+                        }
+                        if (extractError) {
+                          setExtractError(null);
+                          setIsTimeoutError(false);
+                        }
+                        if (metadata) {
+                          setMetadata(null);
+                        }
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault();
@@ -300,11 +362,15 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   <button
                     type="button"
                     onClick={() => inspect(url)}
-                    disabled={isExtracting || !url.trim()}
+                    disabled={!url.trim()}
                     aria-label="Analyze URL"
                     className="px-3.5 py-2 bg-[#21262d] hover:bg-[#30363d] disabled:opacity-40 text-xs font-medium text-white rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
                   >
-                    <Search className="w-3.5 h-3.5" />
+                    {isExtracting ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#58a6ff]" />
+                    ) : (
+                      <Search className="w-3.5 h-3.5" />
+                    )}
                     <span>{isExtracting ? 'Analyzing...' : 'Analyze'}</span>
                   </button>
 
@@ -312,9 +378,11 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        handleCancelInspection();
                         setUrl('');
                         setMetadata(null);
                         setExtractError(null);
+                        setIsTimeoutError(false);
                       }}
                       title="Clear URL and reset"
                       aria-label="Clear URL and reset"
@@ -405,17 +473,65 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
           )}
 
-          {/* Extraction Error Notice with Inline Cookie Import Trigger */}
+          {/* Non-blocking active inspection progress banner with Cancel button */}
+          {isExtracting && mode === 'single' && (
+            <div className="p-3 bg-[#1f6feb]/10 border border-[#1f6feb]/30 rounded-lg flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Loader2 className="w-4 h-4 text-[#58a6ff] animate-spin shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[#e6edf3] font-medium truncate">Inspecting media formats & metadata...</p>
+                  <p className="text-[11px] text-[#8b949e] truncate">
+                    Timeout protection active (60s). You can cancel anytime or queue directly with Quick Add.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCancelInspection}
+                className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#f85149] border border-[#30363d] rounded text-[11px] font-medium shrink-0 transition-colors"
+              >
+                Cancel Analysis
+              </button>
+            </div>
+          )}
+
+          {/* Extraction Error / Timeout Notice with Retry & Inline Cookie Import */}
           {extractError && (
-            <div className="p-3 bg-[#da3633]/15 border border-[#f85149]/40 rounded-lg text-xs text-[#f85149] space-y-2">
+            <div
+              className={`p-3 rounded-lg text-xs space-y-2 border ${
+                isTimeoutError
+                  ? 'bg-[#d29922]/15 border-[#d29922]/40 text-[#e3b341]'
+                  : 'bg-[#da3633]/15 border-[#f85149]/40 text-[#f85149]'
+              }`}
+            >
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span className="whitespace-pre-line">{extractError}</span>
+                <div className="space-y-1 min-w-0 flex-1">
+                  {isTimeoutError && (
+                    <span className="inline-block text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#d29922]/25 text-[#e3b341] mr-2">
+                      Timed Out
+                    </span>
+                  )}
+                  <span className="whitespace-pre-line break-words">{extractError}</span>
+                </div>
               </div>
-              <div className="pt-1 border-t border-[#f85149]/30 flex flex-wrap items-center gap-2">
+              <div
+                className={`pt-1.5 border-t flex flex-wrap items-center gap-2 ${
+                  isTimeoutError ? 'border-[#d29922]/30' : 'border-[#f85149]/30'
+                }`}
+              >
                 <span className="text-[11px] text-[#e6edf3]">
-                  Authentication or cookie access issue?
+                  {isTimeoutError ? 'Extractor did not respond in time:' : 'Authentication or extraction issue?'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => inspect(url)}
+                  disabled={!url.trim()}
+                  className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-white text-[11px] font-medium rounded transition-colors flex items-center gap-1"
+                >
+                  <RotateCw className="w-3 h-3 text-[#58a6ff]" />
+                  <span>Retry Analysis</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowInlineCookieImport(true)}
@@ -428,7 +544,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      onClose();
+                      handleCloseModal();
                       onOpenCookieSettings();
                     }}
                     className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#58a6ff] text-[11px] font-medium rounded transition-colors"
@@ -436,13 +552,6 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     Open Cookie Settings
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => inspect(url)}
-                  className="px-2.5 py-1 bg-[#da3633]/25 hover:bg-[#da3633]/40 text-[#ff7b72] text-[11px] font-medium rounded transition-colors"
-                >
-                  Retry Analysis
-                </button>
               </div>
             </div>
           )}
@@ -562,41 +671,166 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           )}
 
           {/* Metadata Preview Card */}
-          {metadata && (
-            <div className="p-3.5 rounded-lg border border-[#30363d] bg-[#161b22] flex items-start gap-3">
-              {metadata.thumbnail ? (
-                <img
-                  src={metadata.thumbnail}
-                  alt={metadata.title}
-                  referrerPolicy="no-referrer"
-                  className="w-24 h-16 object-cover rounded bg-[#0d1117] shrink-0 border border-[#21262d]"
-                />
-              ) : (
-                <div className="w-24 h-16 rounded bg-[#21262d] flex items-center justify-center shrink-0 text-xs font-mono text-[#8b949e]">
-                  MEDIA
-                </div>
-              )}
-              <div className="flex-1 min-w-0">
-                <h3 className="text-xs font-semibold text-white truncate">{metadata.title}</h3>
-                <div className="flex items-center gap-3 text-[11px] text-[#8b949e] mt-1 font-mono">
-                  {metadata.uploader && <span>{metadata.uploader}</span>}
-                  {metadata.duration_string && (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <span>{metadata.duration_string}</span>
-                    </>
+          {metadata && (() => {
+            const isSpotify = metadata.extractor === 'spotdl';
+            const artworkUrl = metadata.album_artwork || metadata.thumbnail;
+            const artistText =
+              metadata.artists && metadata.artists.length > 0
+                ? metadata.artists.join(', ')
+                : metadata.owner
+                ? `By ${metadata.owner}`
+                : metadata.uploader;
+            const trackCount = metadata.total_tracks ?? metadata.playlist_count ?? metadata.tracks?.length;
+
+            return (
+              <div className="p-3.5 rounded-lg border border-[#30363d] bg-[#161b22] space-y-3">
+                <div className="flex items-start gap-3">
+                  {artworkUrl ? (
+                    <img
+                      src={artworkUrl}
+                      alt={metadata.title}
+                      referrerPolicy="no-referrer"
+                      className={`${
+                        isSpotify ? 'w-20 h-20 rounded-lg' : 'w-24 h-16 rounded'
+                      } object-cover bg-[#0d1117] shrink-0 border border-[#21262d]`}
+                    />
+                  ) : (
+                    <div
+                      className={`${
+                        isSpotify ? 'w-20 h-20 rounded-lg' : 'w-24 h-16 rounded'
+                      } bg-[#21262d] flex items-center justify-center shrink-0 text-xs font-mono text-[#8b949e]`}
+                    >
+                      {isSpotify ? <Disc className="w-7 h-7 text-[#3fb950]" /> : 'MEDIA'}
+                    </div>
                   )}
-                  <span aria-hidden="true">·</span>
-                  <span className="text-[#58a6ff]">{metadata.extractor}</span>
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <h3 className="text-xs sm:text-sm font-semibold text-white truncate max-w-full">
+                        {metadata.title}
+                      </h3>
+                      {metadata.content_type && (
+                        <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#238636]/15 text-[#3fb950] border border-[#238636]/30">
+                          {metadata.content_type}
+                        </span>
+                      )}
+                      {metadata.explicit && (
+                        <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#30363d] text-[#c9d1d9]">
+                          Explicit
+                        </span>
+                      )}
+                      {metadata.metadata_source === 'spotify-oembed' && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#d29922]/15 text-[#e3b341] border border-[#d29922]/30">
+                          Partial oEmbed
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-[#8b949e] mt-1 font-mono">
+                      {artistText && <span className="text-[#c9d1d9]">{artistText}</span>}
+                      {metadata.duration_string && (
+                        <>
+                          {artistText && <span aria-hidden="true">·</span>}
+                          <span>{metadata.duration_string}</span>
+                        </>
+                      )}
+                      {trackCount && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{trackCount} {trackCount === 1 ? 'track' : 'tracks'}</span>
+                        </>
+                      )}
+                      <span aria-hidden="true">·</span>
+                      <span className={isSpotify ? 'text-[#3fb950]' : 'text-[#58a6ff]'}>
+                        {isSpotify ? 'Spotify' : metadata.extractor}
+                      </span>
+                    </div>
+
+                    {(metadata.album || metadata.release_date || metadata.track_number) && (
+                      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-[#7d8590] mt-1">
+                        {metadata.album && metadata.content_type !== 'album' && (
+                          <span className="truncate max-w-xs">Album: {metadata.album}</span>
+                        )}
+                        {metadata.track_number && (
+                          <span>Track #{metadata.track_number}</span>
+                        )}
+                        {metadata.release_date && (
+                          <span>Released {metadata.release_date}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {metadata.is_playlist && !metadata.tracks?.length && (
+                      <p className="text-[11px] text-[#d29922] mt-1">
+                        {metadata.metadata_source === 'spotify-oembed'
+                          ? 'Partial public metadata retrieved via oEmbed fallback; full tracklist details are unavailable without Spotify Web API credentials or full embed payload.'
+                          : `Collection detected (${metadata.playlist_count || 'multiple'} items)`}
+                      </p>
+                    )}
+                  </div>
                 </div>
-                {metadata.is_playlist && (
-                  <p className="text-[11px] text-[#d29922] mt-1">
-                    Playlist detected ({metadata.playlist_count || 'multiple'} items)
-                  </p>
+
+                {metadata.tracks && metadata.tracks.length > 0 && (
+                  <div className="pt-2 border-t border-[#21262d] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-[#8b949e]">
+                      <span className="flex items-center gap-1.5 font-medium text-[#c9d1d9]">
+                        <ListMusic className="w-3.5 h-3.5 text-[#3fb950]" />
+                        <span>
+                          {metadata.content_type === 'artist' ? 'Top Tracks' : 'Tracklist'}
+                        </span>
+                      </span>
+                      {metadata.partial_tracks && metadata.total_tracks ? (
+                        <span className="text-[10px] font-mono text-[#e3b341]">
+                          Showing {metadata.tracks.length} of {metadata.total_tracks} tracks (public preview limit)
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono text-[#7d8590]">
+                          {metadata.tracks.length} track{metadata.tracks.length === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="max-h-40 overflow-y-auto divide-y divide-[#21262d] rounded-md border border-[#21262d] bg-[#0d1117]/80">
+                      {metadata.tracks.map((track, idx) => (
+                        <div
+                          key={`${track.id}-${idx}`}
+                          className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-[10px] font-mono text-[#6e7681] w-5 shrink-0 text-right">
+                              {track.track_number ?? idx + 1}
+                            </span>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[#e6edf3] font-medium truncate">
+                                  {track.title}
+                                </span>
+                                {track.explicit && (
+                                  <span className="text-[9px] font-mono uppercase px-1 rounded bg-[#30363d] text-[#c9d1d9] shrink-0">
+                                    E
+                                  </span>
+                                )}
+                              </div>
+                              {track.artists.length > 0 && (
+                                <p className="text-[10px] text-[#8b949e] truncate">
+                                  {track.artists.join(', ')}
+                                  {track.album && metadata.content_type !== 'album' ? ` · ${track.album}` : ''}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          {track.duration_string && (
+                            <span className="text-[10px] font-mono text-[#7d8590] shrink-0">
+                              {track.duration_string}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Format and Stream Customization Section */}
           <div className="space-y-3 pt-2 border-t border-[#21262d]">
@@ -734,8 +968,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     <div className="p-2.5 rounded-lg border border-[#d29922]/30 bg-[#d29922]/10 text-xs text-[#e3b341] flex items-start gap-2">
                       <Info className="w-4 h-4 shrink-0 mt-0.5 text-[#d29922]" />
                       <div className="text-[11px] leading-relaxed">
-                        <span className="font-semibold text-white">Lossy Source Stream Detected: </span>
-                        This source (YouTube/Spotify) delivers lossy compressed audio (~128–160 kbps). Converting to{' '}
+                        <span className="font-semibold text-white">Matched Lossy Audio Source: </span>
+                        {metadata?.extractor === 'spotdl' || isSpotifyUrl(url)
+                          ? 'spotDL resolves verified Spotify metadata and artwork, then downloads matched public audio streams (e.g., YouTube Music) encoded as lossy audio. Converting to '
+                          : 'This source delivers lossy compressed audio (~128–160 kbps). Converting to '}
                         {selectedAudioFormat.toUpperCase()} ({selectedBitDepth}-bit / {selectedSampleRate / 1000} kHz) produces a lossless container with zero generational re-compression, but cannot recover high-frequency data omitted during original encoding.
                       </div>
                     </div>
@@ -770,7 +1006,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 px-4 sm:px-5 py-3 border-t border-[#21262d] bg-[#0d1117]">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCloseModal}
             className="w-full sm:w-auto px-3.5 py-1.5 text-xs text-[#8b949e] hover:text-[#e6edf3] transition-colors text-center"
           >
             Cancel

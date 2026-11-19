@@ -1,20 +1,30 @@
 use crate::logging;
 use crate::models::{
-    AppSettings, DownloadTask, NotificationItem, TaskPriority, TaskStatus,
+    AppSettings, DownloadTask, EngineStatusMap, NotificationItem, TaskPriority, TaskStatus,
 };
 use crate::process;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct TrackedInspection {
+    pub pid: Arc<AtomicU32>,
+    pub cancelled: Arc<AtomicBool>,
+}
 
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub active_processes: Arc<Mutex<HashMap<String, u32>>>,
+    pub active_inspections: Arc<Mutex<HashMap<String, TrackedInspection>>>,
+    pub cached_engine_status: Mutex<Option<(Instant, EngineStatusMap)>>,
     pub is_shutting_down: AtomicBool,
     pub is_running_diagnostics: AtomicBool,
+    pub is_scanning_engines: AtomicBool,
 }
 
 impl AppState {
@@ -55,13 +65,25 @@ impl AppState {
     }
 
     pub fn init() -> Result<Self, String> {
+        let init_start = Instant::now();
         let db_dir = Self::app_data_dir();
-        fs::create_dir_all(&db_dir)
-            .map_err(|e| format!("Failed to create app data directory '{}': {}", db_dir.display(), e))?;
+        fs::create_dir_all(&db_dir).map_err(|e| {
+            format!(
+                "Failed to create app data directory '{}': {}",
+                db_dir.display(),
+                e
+            )
+        })?;
         let db_path = db_dir.join("vanta_native.db");
 
-        let conn = Connection::open(&db_path)
-            .map_err(|e| format!("Failed to open SQLite database '{}': {}", db_path.display(), e))?;
+        let db_start = Instant::now();
+        let conn = Connection::open(&db_path).map_err(|e| {
+            format!(
+                "Failed to open SQLite database '{}': {}",
+                db_path.display(),
+                e
+            )
+        })?;
 
         conn.execute_batch(
             "
@@ -102,7 +124,9 @@ impl AppState {
                 created_at TEXT NOT NULL,
                 completed_at TEXT,
                 retries INTEGER DEFAULT 0,
-                max_retries INTEGER DEFAULT 3
+                max_retries INTEGER DEFAULT 3,
+                album TEXT,
+                content_type TEXT
             );
 
             CREATE TABLE IF NOT EXISTS history (
@@ -137,6 +161,10 @@ impl AppState {
         )
         .map_err(|e| format!("Failed to initialize SQLite tables: {}", e))?;
 
+        // Safe column migrations for existing databases
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN album TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN content_type TEXT", []);
+
         // Scrub any legacy plaintext cookies_content row from SQLite settings
         let _ = conn.execute(
             "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
@@ -149,60 +177,116 @@ impl AppState {
             [],
         );
 
+        let db_ms = db_start.elapsed().as_millis();
         logging::info(
             "state",
-            &format!("Initialized SQLite state at '{}'", db_path.display()),
+            &format!(
+                "Initialized SQLite state at '{}' in {}ms (total AppState::init {}ms).",
+                db_path.display(),
+                db_ms,
+                init_start.elapsed().as_millis()
+            ),
         );
 
         Ok(Self {
             db: Mutex::new(conn),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
+            active_inspections: Arc::new(Mutex::new(HashMap::new())),
+            cached_engine_status: Mutex::new(None),
             is_shutting_down: AtomicBool::new(false),
             is_running_diagnostics: AtomicBool::new(false),
+            is_scanning_engines: AtomicBool::new(false),
         })
     }
 
+    pub fn register_inspection(&self, request_id: &str) -> TrackedInspection {
+        let tracked = TrackedInspection {
+            pid: Arc::new(AtomicU32::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let mut map = self
+            .active_inspections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.insert(request_id.to_string(), tracked.clone());
+        tracked
+    }
+
+    pub fn remove_inspection(&self, request_id: &str) {
+        let mut map = self
+            .active_inspections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.remove(request_id);
+    }
+
+    pub fn cancel_inspection(&self, request_id: &str) -> bool {
+        let tracked_opt = {
+            let map = self
+                .active_inspections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.get(request_id).cloned()
+        };
+
+        if let Some(tracked) = tracked_opt {
+            tracked.cancelled.store(true, Ordering::SeqCst);
+            let pid = tracked.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                process::kill_process_tree(pid);
+            }
+            logging::info(
+                "inspect",
+                &format!("Cancelled active URL inspection request '{}'", request_id),
+            );
+            return true;
+        }
+        false
+    }
+
     fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
-        let status_str: String = row.get(8)?;
-        let priority_str: String = row.get(29)?;
-        let is_audio_only_int: i32 = row.get(19)?;
-        let is_lossy_int: Option<i32> = row.get(25)?;
+        let status_str: String = row.get("status")?;
+        let priority_str: String = row.get("priority")?;
+        let is_audio_only_int: i32 = row.get("is_audio_only")?;
+        let is_lossy_int: Option<i32> = row.get("is_lossy_source")?;
 
         Ok(DownloadTask {
-            id: row.get(0)?,
-            url: row.get(1)?,
-            title: row.get(2)?,
-            uploader: row.get(3)?,
-            duration: row.get(4)?,
-            duration_string: row.get(5)?,
-            thumbnail: row.get(6)?,
-            engine: row.get(7)?,
+            id: row.get("id")?,
+            url: row.get("url")?,
+            title: row.get("title")?,
+            uploader: row.get("uploader")?,
+            duration: row.get("duration")?,
+            duration_string: row.get("duration_string")?,
+            thumbnail: row.get("thumbnail")?,
+            album: row.get("album").ok().flatten(),
+            content_type: row.get("content_type").ok().flatten(),
+            engine: row.get("engine")?,
             status: TaskStatus::from_str(&status_str),
-            progress_percentage: row.get(9)?,
-            speed_str: row.get(10)?,
-            speed_bytes_per_sec: row.get(11)?,
-            downloaded_bytes: row.get(12)?,
-            total_bytes: row.get(13)?,
-            eta_str: row.get(14)?,
-            current_phase: row.get(15)?,
-            format_id: row.get(16)?,
-            format_note: row.get(17)?,
-            ext: row.get(18)?,
+            progress_percentage: row.get("progress_percentage")?,
+            speed_str: row.get("speed_str")?,
+            speed_bytes_per_sec: row.get("speed_bytes_per_sec")?,
+            downloaded_bytes: row.get("downloaded_bytes")?,
+            total_bytes: row.get("total_bytes")?,
+            eta_str: row.get("eta_str")?,
+            current_phase: row.get("current_phase")?,
+            format_id: row.get("format_id")?,
+            format_note: row.get("format_note")?,
+            ext: row.get("ext")?,
             is_audio_only: is_audio_only_int == 1,
-            audio_format: row.get(20)?,
-            audio_bitrate: row.get(21)?,
-            audio_sample_rate: row.get(22)?,
-            audio_bit_depth: row.get(23)?,
-            audio_channels: row.get(24)?,
+            audio_format: row.get("audio_format")?,
+            audio_bitrate: row.get("audio_bitrate")?,
+            audio_sample_rate: row.get("audio_sample_rate")?,
+            audio_bit_depth: row.get("audio_bit_depth")?,
+            audio_channels: row.get("audio_channels")?,
             is_lossy_source: is_lossy_int.map(|v| v == 1),
-            verified_audio_info: row.get(26)?,
-            output_path: row.get(27)?,
-            error_message: row.get(28)?,
+            verified_audio_info: row.get("verified_audio_info")?,
+            output_path: row.get("output_path")?,
+            error_message: row.get("error_message")?,
             priority: TaskPriority::from_str(&priority_str),
-            created_at: row.get(30)?,
-            completed_at: row.get(31)?,
-            retries: row.get(32)?,
-            max_retries: row.get(33)?,
+            created_at: row.get("created_at")?,
+            completed_at: row.get("completed_at")?,
+            retries: row.get("retries")?,
+            max_retries: row.get("max_retries")?,
         })
     }
 
@@ -244,19 +328,19 @@ impl AppState {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO tasks (
-                id, url, title, uploader, duration, duration_string, thumbnail, engine, status,
+                id, url, title, uploader, duration, duration_string, thumbnail, album, content_type, engine, status,
                 progress_percentage, speed_str, speed_bytes_per_sec, downloaded_bytes, total_bytes,
                 eta_str, current_phase, format_id, format_note, ext, is_audio_only, audio_format,
                 audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
                 verified_audio_info, output_path, error_message, priority, created_at, completed_at,
                 retries, max_retries
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23, ?24, ?25, ?26,
-                ?27, ?28, ?29, ?30, ?31, ?32,
-                ?33, ?34
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                ?24, ?25, ?26, ?27, ?28,
+                ?29, ?30, ?31, ?32, ?33, ?34,
+                ?35, ?36
             )",
             params![
                 task.id,
@@ -266,6 +350,8 @@ impl AppState {
                 task.duration,
                 task.duration_string,
                 task.thumbnail,
+                task.album,
+                task.content_type,
                 task.engine,
                 task.status.as_str(),
                 task.progress_percentage,
@@ -415,11 +501,25 @@ impl AppState {
     }
 
     pub fn safe_shutdown(&self) {
-        if self.is_shutting_down.swap(true, Ordering::SeqCst) {
-            // Already triggered, still ensure any remaining tracked PIDs are killed
-        }
+        let first_invocation = !self.is_shutting_down.swap(true, Ordering::SeqCst);
 
-        let pids: Vec<u32> = {
+        let inspection_pids: Vec<u32> = {
+            let mut inspections = self
+                .active_inspections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut pids = Vec::new();
+            for (_id, tracked) in inspections.drain() {
+                tracked.cancelled.store(true, Ordering::SeqCst);
+                let pid = tracked.pid.load(Ordering::SeqCst);
+                if pid != 0 {
+                    pids.push(pid);
+                }
+            }
+            pids
+        };
+
+        let task_pids: Vec<u32> = {
             let mut procs = self
                 .active_processes
                 .lock()
@@ -427,14 +527,20 @@ impl AppState {
             procs.drain().map(|(_id, pid)| pid).collect()
         };
 
-        if !pids.is_empty() {
+        let total_killed = inspection_pids.len() + task_pids.len();
+        if first_invocation || total_killed > 0 {
             logging::info(
                 "shutdown",
-                &format!("Terminating {} active child process tree(s).", pids.len()),
+                &format!(
+                    "Safe shutdown invoked (first={}, active_downloads={}, active_inspections={}).",
+                    first_invocation,
+                    task_pids.len(),
+                    inspection_pids.len()
+                ),
             );
         }
 
-        for pid in pids {
+        for pid in inspection_pids.into_iter().chain(task_pids.into_iter()) {
             process::kill_process_tree(pid);
         }
     }

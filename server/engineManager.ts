@@ -22,15 +22,179 @@ import {
   determineEngineForUrl,
 } from '../src/utils/engine-parser';
 import { sanitizeLog, classifyDownloadError } from '../src/utils/error-classifier';
+import { tryParseSpotifyInput } from '../src/utils/spotify';
 import { getSettings } from './db';
 import {
   resolveCookieSource,
   testCookieExtraction as runCookieTest,
   appendAppLog,
 } from './cookies';
+import { spotifyMetadataService } from './spotify';
+
+const ENGINE_VERSION_TIMEOUT_MS = 8_000;
+const DIAGNOSTICS_TIMEOUT_MS = 15_000;
+const INSPECT_URL_TIMEOUT_MS = 60_000;
+const INSPECT_MAX_STDOUT_BYTES = 16 * 1024 * 1024;
+const ENGINE_STATUS_CACHE_TTL_MS = 15_000;
+
+interface TrackedInspection {
+  proc: ChildProcess | null;
+  cancelled: boolean;
+  abort?: () => void;
+}
+
+function killChildProcessTree(proc: ChildProcess | null): void {
+  if (!proc) return;
+  const pid = proc.pid;
+  if (process.platform === 'win32' && pid) {
+    try {
+      const killer = spawn('taskkill', ['/F', '/T', '/PID', String(pid)], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      killer.unref();
+    } catch {
+      try {
+        proc.kill();
+      } catch {
+        // ignore
+      }
+    }
+    return;
+  }
+
+  if (pid) {
+    try {
+      process.kill(-pid, 'SIGTERM');
+      const timer = setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // ignore
+        }
+      }, 250);
+      timer.unref?.();
+      return;
+    } catch {
+      // Fall back to direct kill if process is not a group leader
+    }
+  }
+
+  try {
+    proc.kill('SIGTERM');
+    const timer = setTimeout(() => {
+      try {
+        if (!proc.killed) proc.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+    }, 250);
+    timer.unref?.();
+  } catch {
+    // ignore
+  }
+}
+
+function runProcessAsync(
+  command: string,
+  args: string[],
+  timeoutMs: number
+): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean; durationMs: number }> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const proc = spawn(command, args, {
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChildProcessTree(proc);
+    }, timeoutMs);
+
+    proc.stdout?.on('data', (chunk) => {
+      if (stdout.length < 64 * 1024) {
+        stdout += chunk.toString('utf-8');
+      }
+    });
+
+    proc.stderr?.on('data', (chunk) => {
+      if (stderr.length < 64 * 1024) {
+        stderr += chunk.toString('utf-8');
+      }
+    });
+
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        stdout,
+        stderr,
+        code,
+        timedOut,
+        durationMs: Date.now() - start,
+      });
+    });
+  });
+}
+
+export function validateInspectionUrl(raw: string): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    throw new Error('URL cannot be empty. Enter an HTTP or HTTPS media URL.');
+  }
+  if (/[\s\u0000-\u001F\u007F]/.test(trimmed)) {
+    throw new Error('Invalid URL: contains whitespace or control characters.');
+  }
+  if (trimmed.startsWith('-')) {
+    throw new Error('Invalid URL: must start with http://, https://, or spotify:.');
+  }
+
+  // Validate Spotify URIs and Spotify URLs explicitly (supports spotify:<type>:<id>, open.spotify.com, spotify.link)
+  const parsedSpotify = tryParseSpotifyInput(trimmed);
+  if (parsedSpotify) {
+    if (parsedSpotify.kind === 'invalid') {
+      throw new Error(parsedSpotify.error);
+    }
+    return trimmed;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('Malformed URL. Check the URL and try again.');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Unsupported URL scheme. Only http:// and https:// URLs are supported.');
+  }
+  if (!parsed.hostname || parsed.hostname.startsWith('.')) {
+    throw new Error('Malformed URL host. Check the URL and try again.');
+  }
+
+  return trimmed;
+}
 
 export class EngineManager {
   private activeProcesses: Map<string, ChildProcess> = new Map();
+  private activeInspections: Map<string, TrackedInspection> = new Map();
+  private cachedEngineStatus: { ts: number; data: EngineStatusMap } | null = null;
+  private inflightEngineScan: Promise<EngineStatusMap> | null = null;
 
   public getManagedRootDir(): string {
     if (process.platform === 'win32') {
@@ -75,10 +239,14 @@ export class EngineManager {
     }
 
     try {
-      const out = execSync(`which ${name} 2>/dev/null`, {
+      const lookupCmd = process.platform === 'win32' ? `where ${exeName}` : `which ${name} 2>/dev/null`;
+      const out = execSync(lookupCmd, {
         encoding: 'utf-8',
         windowsHide: true,
-      }).trim();
+        timeout: 2000,
+      })
+        .split(/\r?\n/)[0]
+        ?.trim();
       if (out && fs.existsSync(out)) return out;
     } catch {
       // not in PATH
@@ -87,8 +255,19 @@ export class EngineManager {
     return null;
   }
 
-  public getEngineStatus(): EngineStatusMap {
-    const check = (name: string, verFlag = '--version'): EngineInfo => {
+  public async getEngineStatus(forceRefresh = false): Promise<EngineStatusMap> {
+    if (!forceRefresh && this.cachedEngineStatus) {
+      if (Date.now() - this.cachedEngineStatus.ts < ENGINE_STATUS_CACHE_TTL_MS) {
+        return this.cachedEngineStatus.data;
+      }
+    }
+
+    if (this.inflightEngineScan) {
+      return this.inflightEngineScan;
+    }
+
+    const check = async (name: string, verFlag = '--version'): Promise<EngineInfo> => {
+      const start = Date.now();
       const p = this.findExecutable(name);
       if (!p) {
         return {
@@ -97,23 +276,46 @@ export class EngineManager {
           path: '',
           status: 'missing',
           lastChecked: new Date().toISOString(),
+          durationMs: Date.now() - start,
           error: `Executable ${name} not found in system paths.`,
         };
       }
 
       try {
-        const out = execSync(`"${p}" ${verFlag} 2>&1`, {
-          encoding: 'utf-8',
-          timeout: 10000,
-          windowsHide: true,
-        }).trim();
-        const firstLine = out.split('\n')[0].replace(/^.*?version\s*/i, '').trim();
+        const res = await runProcessAsync(p, [verFlag], ENGINE_VERSION_TIMEOUT_MS);
+        if (res.timedOut) {
+          appendAppLog('WARN', 'engines', `${name} version check timed out after ${res.durationMs}ms`);
+          return {
+            available: false,
+            version: '',
+            path: p,
+            status: 'timed_out',
+            lastChecked: new Date().toISOString(),
+            durationMs: res.durationMs,
+            error: `Version check timed out after ${Math.round(ENGINE_VERSION_TIMEOUT_MS / 1000)}s`,
+          };
+        }
+        if (res.code !== 0) {
+          const cleanErr = sanitizeLog((res.stderr || res.stdout || '').trim());
+          return {
+            available: false,
+            version: '',
+            path: p,
+            status: 'error',
+            lastChecked: new Date().toISOString(),
+            durationMs: res.durationMs,
+            error: cleanErr || `Exited with status ${res.code}`,
+          };
+        }
+        const combined = (res.stdout || res.stderr).trim();
+        const firstLine = (combined.split('\n')[0] || '').replace(/^.*?version\s*/i, '').trim();
         return {
           available: true,
           version: firstLine,
           path: p,
           status: 'ready',
           lastChecked: new Date().toISOString(),
+          durationMs: res.durationMs,
         };
       } catch (err: any) {
         return {
@@ -122,22 +324,36 @@ export class EngineManager {
           path: p,
           status: 'error',
           lastChecked: new Date().toISOString(),
-          error: err.message || 'Execution failed',
+          durationMs: Date.now() - start,
+          error: sanitizeLog(err.message || 'Execution failed'),
         };
       }
     };
 
-    return {
-      ytdlp: check('yt-dlp', '--version'),
-      spotdl: check('spotdl', '--version'),
-      ffmpeg: check('ffmpeg', '-version'),
-      ffprobe: check('ffprobe', '-version'),
-      python3: check('python3', '--version'),
-    };
+    const scanPromise = (async () => {
+      const [ytdlp, spotdl, ffmpeg, ffprobe, python3] = await Promise.all([
+        check('yt-dlp', '--version'),
+        check('spotdl', '--version'),
+        check('ffmpeg', '-version'),
+        check('ffprobe', '-version'),
+        check('python3', '--version'),
+      ]);
+      const data: EngineStatusMap = { ytdlp, spotdl, ffmpeg, ffprobe, python3 };
+      this.cachedEngineStatus = { ts: Date.now(), data };
+      return data;
+    })();
+
+    this.inflightEngineScan = scanPromise;
+    try {
+      return await scanPromise;
+    } finally {
+      if (this.inflightEngineScan === scanPromise) {
+        this.inflightEngineScan = null;
+      }
+    }
   }
 
   public async runDiagnostics(): Promise<DiagnosticResult[]> {
-    const results: DiagnosticResult[] = [];
     const engines = [
       { name: 'yt-dlp', flag: '--version' },
       { name: 'spotdl', flag: '--version' },
@@ -145,46 +361,52 @@ export class EngineManager {
       { name: 'ffprobe', flag: '-version' },
     ];
 
-    for (const eng of engines) {
-      const start = Date.now();
-      const execPath = this.findExecutable(eng.name);
-      if (!execPath) {
-        results.push({
-          engine: eng.name,
-          passed: false,
-          command: `${eng.name} ${eng.flag}`,
-          output: `Executable not found in system or bin/ directory.`,
-          duration_ms: Date.now() - start,
-        });
-        continue;
-      }
+    return Promise.all(
+      engines.map(async (eng): Promise<DiagnosticResult> => {
+        const start = Date.now();
+        const execPath = this.findExecutable(eng.name);
+        if (!execPath) {
+          return {
+            engine: eng.name,
+            passed: false,
+            command: `${eng.name} ${eng.flag}`,
+            output: 'Executable not found in system or bin/ directory.',
+            duration_ms: Date.now() - start,
+          };
+        }
 
-      try {
-        const out = execSync(`"${execPath}" ${eng.flag} 2>&1`, {
-          encoding: 'utf-8',
-          timeout: 5000,
-          windowsHide: true,
-        });
-        results.push({
-          engine: eng.name,
-          passed: true,
-          version: out.split('\n')[0],
-          command: `"${execPath}" ${eng.flag}`,
-          output: out.slice(0, 500),
-          duration_ms: Date.now() - start,
-        });
-      } catch (err: any) {
-        results.push({
-          engine: eng.name,
-          passed: false,
-          command: `"${execPath}" ${eng.flag}`,
-          output: err.stderr || err.stdout || err.message,
-          duration_ms: Date.now() - start,
-        });
-      }
-    }
-
-    return results;
+        try {
+          const res = await runProcessAsync(execPath, [eng.flag], DIAGNOSTICS_TIMEOUT_MS);
+          if (res.timedOut) {
+            return {
+              engine: eng.name,
+              passed: false,
+              command: `"${execPath}" ${eng.flag}`,
+              output: `Diagnostic check timed out after ${Math.round(DIAGNOSTICS_TIMEOUT_MS / 1000)}s.`,
+              duration_ms: res.durationMs,
+            };
+          }
+          const combined = sanitizeLog((res.stdout || res.stderr || '').trim());
+          const passed = res.code === 0;
+          return {
+            engine: eng.name,
+            passed,
+            version: passed ? combined.split('\n')[0] : undefined,
+            command: `"${execPath}" ${eng.flag}`,
+            output: combined.slice(0, 500) || (passed ? 'OK' : `Exited with code ${res.code}`),
+            duration_ms: res.durationMs,
+          };
+        } catch (err: any) {
+          return {
+            engine: eng.name,
+            passed: false,
+            command: `"${execPath}" ${eng.flag}`,
+            output: sanitizeLog(err.message || 'Execution failed'),
+            duration_ms: Date.now() - start,
+          };
+        }
+      })
+    );
   }
 
   public getRequestAndCookieArgs(url: string, settings?: AppSettings, overrideBrowser?: string): string[] {
@@ -233,20 +455,42 @@ export class EngineManager {
     return runCookieTest(ytdlpPath, settings, browser, profile, testUrl);
   }
 
-  public async inspectUrl(url: string, proxy?: string): Promise<MediaMetadata> {
+  public cancelInspection(requestId: string): boolean {
+    const entry = this.activeInspections.get(requestId);
+    if (!entry) return false;
+    entry.cancelled = true;
+    killChildProcessTree(entry.proc);
+    entry.abort?.();
+    return true;
+  }
+
+  public async inspectUrl(
+    rawUrl: string,
+    proxy?: string,
+    requestId?: string,
+    options?: {
+      timeoutMs?: number;
+      maxStdoutBytes?: number;
+      ytdlpBinary?: string;
+    }
+  ): Promise<MediaMetadata> {
+    const url = validateInspectionUrl(rawUrl);
     const engine = determineEngineForUrl(url);
 
     if (engine === 'spotdl') {
-      return this.inspectSpotdlUrl(url);
+      return this.inspectSpotdlUrl(url, requestId, options?.timeoutMs);
     }
 
-    const ytdlpPath = this.findExecutable('yt-dlp');
+    const ytdlpPath = options?.ytdlpBinary || this.findExecutable('yt-dlp');
     if (!ytdlpPath) {
       throw new Error('yt-dlp engine is not installed or not available.');
     }
 
     const settings = getSettings();
     const cookieRequestArgs = this.getRequestAndCookieArgs(url, settings);
+    const reqId = requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const timeoutMs = options?.timeoutMs ?? INSPECT_URL_TIMEOUT_MS;
+    const maxStdoutBytes = options?.maxStdoutBytes ?? INSPECT_MAX_STDOUT_BYTES;
 
     const args = [
       '--dump-single-json',
@@ -254,6 +498,14 @@ export class EngineManager {
       '--no-warnings',
       '--no-call-home',
       '--no-cache-dir',
+      '--skip-download',
+      '--no-exec',
+      '--socket-timeout',
+      '15',
+      '--retries',
+      '2',
+      '--extractor-retries',
+      '2',
       ...cookieRequestArgs,
     ];
 
@@ -261,42 +513,126 @@ export class EngineManager {
       args.push('--proxy', proxy || settings.proxy_url);
     }
 
-    args.push(url);
+    args.push('--', url);
+
+    const tracker: TrackedInspection = { proc: null, cancelled: false };
+    this.activeInspections.set(reqId, tracker);
 
     try {
+      appendAppLog('INFO', 'inspect', `Starting URL inspection '${reqId}' (timeout=${timeoutMs}ms)`);
       return await new Promise<MediaMetadata>((resolve, reject) => {
         const proc = spawn(ytdlpPath, args, {
           windowsHide: true,
+          detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
         });
-        let stdout = '';
-        let stderr = '';
+        tracker.proc = proc;
 
-        proc.stdout.on('data', (d) => {
-          stdout += d.toString();
+        const stdoutChunks: Buffer[] = [];
+        let stdoutBytes = 0;
+        let stderr = '';
+        let settled = false;
+        let timedOut = false;
+        let overflowed = false;
+
+        const terminateChild = () => {
+          killChildProcessTree(proc);
+        };
+
+        const finishReject = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.activeInspections.delete(reqId);
+          reject(err);
+        };
+
+        const finishResolve = (meta: MediaMetadata) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.activeInspections.delete(reqId);
+          resolve(meta);
+        };
+
+        tracker.abort = () => {
+          finishReject(new Error('Inspection cancelled.'));
+        };
+
+        const timer = setTimeout(() => {
+          timedOut = true;
+          terminateChild();
+          finishReject(
+            new Error(
+              `URL inspection timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s because the target site or extractor did not respond in time.`
+            )
+          );
+        }, timeoutMs);
+
+        if (tracker.cancelled) {
+          terminateChild();
+          finishReject(new Error('Inspection cancelled.'));
+          return;
+        }
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+          if (settled) return;
+          stdoutBytes += chunk.length;
+          if (stdoutBytes > maxStdoutBytes) {
+            overflowed = true;
+            terminateChild();
+            finishReject(
+              new Error(
+                `Metadata payload exceeded safe limit (${Math.max(1, Math.round(maxStdoutBytes / (1024 * 1024)))} MiB) and was aborted safely.`
+              )
+            );
+            return;
+          }
+          stdoutChunks.push(chunk);
         });
 
-        proc.stderr.on('data', (d) => {
-          stderr += d.toString();
+        proc.stderr.on('data', (d: Buffer) => {
+          if (stderr.length < 64 * 1024) {
+            stderr += d.toString('utf-8');
+          }
         });
 
         proc.on('error', (err) => {
-          reject(new Error(`Failed to execute yt-dlp: ${err.message}`));
+          finishReject(new Error(`Failed to execute yt-dlp: ${err.message}`));
         });
 
         proc.on('close', (code) => {
+          if (settled) return;
+          if (tracker.cancelled) {
+            return finishReject(new Error('Inspection cancelled.'));
+          }
+          if (timedOut) {
+            return finishReject(
+              new Error(
+                `URL inspection timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s because the target site or extractor did not respond in time.`
+              )
+            );
+          }
+          if (overflowed) {
+            return finishReject(
+              new Error('Metadata payload exceeded safe limit and was aborted safely.')
+            );
+          }
+
+          const stdoutText = Buffer.concat(stdoutChunks).toString('utf-8');
           if (code !== 0) {
-            const rawErr = stderr.trim() || stdout.trim() || `Process exited with code ${code}`;
-            return reject(new Error(rawErr));
+            const rawErr = stderr.trim() || stdoutText.trim() || `Process exited with code ${code}`;
+            return finishReject(new Error(rawErr));
           }
 
           try {
-            const raw = JSON.parse(stdout);
+            const raw = JSON.parse(stdoutText);
             const isPlaylist = Boolean(raw._type === 'playlist' || Array.isArray(raw.entries));
 
             const parsedFormats: FormatOption[] = [];
             if (Array.isArray(raw.formats)) {
-              for (const f of raw.formats) {
+              for (const f of raw.formats.slice(0, 500)) {
+                if (!f?.format_id) continue;
                 const isAudioOnly = f.vcodec === 'none' && f.acodec !== 'none';
                 const isVideoOnly = f.acodec === 'none' && f.vcodec !== 'none';
 
@@ -328,23 +664,30 @@ export class EngineManager {
               duration: raw.duration,
               duration_string: formatDuration(raw.duration),
               thumbnail: raw.thumbnail || (raw.thumbnails && raw.thumbnails[0]?.url) || undefined,
-              description: raw.description ? raw.description.slice(0, 300) : undefined,
+              description: raw.description ? String(raw.description).slice(0, 500) : undefined,
               formats: parsedFormats,
               is_playlist: isPlaylist,
               playlist_count: isPlaylist && raw.entries ? raw.entries.length : undefined,
               extractor: raw.extractor || 'generic',
             };
 
-            resolve(metadata);
+            finishResolve(metadata);
           } catch (err: any) {
-            reject(new Error(`Failed to parse metadata JSON: ${err.message}`));
+            finishReject(
+              new Error(`Received invalid or incomplete metadata from extractor: ${err.message}`)
+            );
           }
         });
       });
     } catch (err: any) {
+      this.activeInspections.delete(reqId);
       const msg = sanitizeLog(err.message || '');
       const lower = msg.toLowerCase();
-      appendAppLog('ERROR', 'inspect', msg);
+      appendAppLog('ERROR', 'inspect', `Request '${reqId}' failed: ${msg}`);
+
+      if (lower === 'inspection cancelled.' || lower.includes('timed out') || lower.includes('exceeded safe limit')) {
+        throw new Error(msg);
+      }
 
       if (
         lower.includes('could not copy chrome cookie database') ||
@@ -367,55 +710,38 @@ export class EngineManager {
         );
       }
 
+      if (lower.includes('received invalid or incomplete metadata')) {
+        throw new Error(msg);
+      }
+
       throw new Error(`Extraction failed: ${msg}`);
+    } finally {
+      this.activeInspections.delete(reqId);
     }
   }
 
-  private async inspectSpotdlUrl(url: string): Promise<MediaMetadata> {
-    // For Spotify URLs, spotDL matches tracks against audio streaming sources
-    // Generate clean metadata response
-    const trackId = url.split('/').pop()?.split('?')[0] || 'track';
-    const isPlaylist = url.includes('/playlist/') || url.includes('/album/');
-
-    return {
-      url,
-      id: trackId,
-      title: isPlaylist ? 'Spotify Album / Playlist' : 'Spotify Music Track',
-      uploader: 'Spotify Artist',
-      duration: 180,
-      duration_string: '03:00',
-      thumbnail: 'https://open.spotifycdn.com/cdn/images/favicon.0f31d2ea.ico',
-      description: 'Music track processed via spotDL high-fidelity audio pipeline with embedded ID3 tags and cover artwork.',
-      formats: [
-        {
-          format_id: 'spotdl-best',
-          ext: 'mp3',
-          resolution: '320kbps Audio',
-          is_audio_only: true,
-          is_video_only: false,
-          format_note: 'High-Fidelity MP3 (320 kbps) with embedded cover artwork',
-        },
-        {
-          format_id: 'spotdl-flac',
-          ext: 'flac',
-          resolution: 'Lossless Audio',
-          is_audio_only: true,
-          is_video_only: false,
-          format_note: 'Lossless FLAC audio',
-        },
-        {
-          format_id: 'spotdl-m4a',
-          ext: 'm4a',
-          resolution: 'AAC Audio',
-          is_audio_only: true,
-          is_video_only: false,
-          format_note: 'AAC M4A audio',
-        },
-      ],
-      is_playlist: isPlaylist,
-      playlist_count: isPlaylist ? 10 : undefined,
-      extractor: 'spotdl',
+  private async inspectSpotdlUrl(
+    url: string,
+    requestId?: string,
+    timeoutMs?: number
+  ): Promise<MediaMetadata> {
+    const reqId = requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const abortController = new AbortController();
+    const tracker: TrackedInspection = {
+      proc: null,
+      cancelled: false,
+      abort: () => abortController.abort(new Error('Inspection cancelled.')),
     };
+    this.activeInspections.set(reqId, tracker);
+
+    try {
+      return await spotifyMetadataService.resolveSpotifyUrl(url, {
+        requestTimeoutMs: timeoutMs,
+        signal: abortController.signal,
+      });
+    } finally {
+      this.activeInspections.delete(reqId);
+    }
   }
 
   public startDownload(
@@ -526,7 +852,14 @@ export class EngineManager {
       args.push('-N', String(settings.fragment_concurrency));
     }
 
-    args.push(task.url);
+    let validatedTaskUrl = task.url;
+    try {
+      validatedTaskUrl = validateInspectionUrl(task.url);
+    } catch (urlErr: any) {
+      return onError(urlErr.message || 'Invalid download URL');
+    }
+
+    args.push('--', validatedTaskUrl);
 
     onProgress({
       status: 'extracting',
@@ -619,14 +952,28 @@ export class EngineManager {
       fs.mkdirSync(outDir, { recursive: true });
     }
 
+    const parsedSpotify = tryParseSpotifyInput(task.url);
+    if (parsedSpotify && parsedSpotify.kind === 'invalid') {
+      return onError(parsedSpotify.error);
+    }
+
+    const targetUrl =
+      parsedSpotify && parsedSpotify.kind === 'resource'
+        ? parsedSpotify.canonicalUrl
+        : task.url;
+
     const format = task.audio_format || settings.default_audio_format || 'mp3';
     const bitrate = task.audio_bitrate || settings.default_audio_bitrate || '320k';
+    const outputTemplate =
+      task.content_type === 'playlist' || task.content_type === 'album'
+        ? path.join(outDir, '{list-name}', '{artists} - {title}.{output-ext}')
+        : path.join(outDir, '{artists} - {title}.{output-ext}');
 
     const args = [
       'download',
-      task.url,
+      targetUrl,
       '--output',
-      outDir,
+      outputTemplate,
       '--format',
       format,
       '--bitrate',
@@ -637,12 +984,15 @@ export class EngineManager {
 
     onProgress({
       status: 'extracting',
-      current_phase: 'Resolving track metadata...',
+      current_phase: 'Matching audio source via spotDL...',
       progress_percentage: 10,
     });
 
     try {
-      const proc = spawn(spotdlPath, args, { windowsHide: true });
+      const proc = spawn(spotdlPath, args, {
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+      });
       this.activeProcesses.set(task.id, proc);
 
       let lastOutput = '';
@@ -650,7 +1000,7 @@ export class EngineManager {
       proc.stdout.on('data', (d) => {
         const text = d.toString();
         lastOutput = (lastOutput + text).slice(-4000);
-        if (text.includes('Searching for')) {
+        if (text.includes('Searching for') || text.includes('Found')) {
           onProgress({
             status: 'extracting',
             current_phase: 'Matching audio source...',
@@ -662,10 +1012,10 @@ export class EngineManager {
             current_phase: 'Downloading audio stream...',
             progress_percentage: 60,
           });
-        } else if (text.includes('Converting') || text.includes('Embedding')) {
+        } else if (text.includes('Converting') || text.includes('Embedding') || text.includes('Downloaded')) {
           onProgress({
             status: 'processing',
-            current_phase: 'Embedding metadata & artwork...',
+            current_phase: 'Embedding metadata & cover artwork...',
             progress_percentage: 85,
           });
         }
@@ -682,13 +1032,13 @@ export class EngineManager {
         } else if (code === null) {
           // Process killed
         } else {
-          onError(`spotDL failed (code ${code}): ${lastOutput || 'Unknown error'}`);
+          onError(`spotDL failed (code ${code}): ${sanitizeLog(lastOutput || 'Unknown error')}`);
         }
       });
 
       proc.on('error', (err) => {
         this.activeProcesses.delete(task.id);
-        onError(`Execution error: ${err.message}`);
+        onError(`Execution error: ${sanitizeLog(err.message)}`);
       });
     } catch (err: any) {
       this.activeProcesses.delete(task.id);
@@ -755,7 +1105,7 @@ export class EngineManager {
   }
 
   public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
-    const status = this.getEngineStatus();
+    const status = await this.getEngineStatus();
     const result: Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }> = {};
 
     // 1. yt-dlp check
@@ -804,7 +1154,7 @@ export class EngineManager {
   }
 
   public async updateEngine(engineName: string): Promise<EngineUpdateResult> {
-    const status = this.getEngineStatus();
+    const status = await this.getEngineStatus();
     const binDir = path.resolve(process.cwd(), 'bin');
     if (!fs.existsSync(binDir)) {
       fs.mkdirSync(binDir, { recursive: true });
@@ -907,8 +1257,8 @@ export class EngineManager {
     };
   }
 
-  public getManagedEngineInfo(): ManagedEngineInfo {
-    const engines = this.getEngineStatus();
+  public async getManagedEngineInfo(): Promise<ManagedEngineInfo> {
+    const engines = await this.getEngineStatus();
     const missingRequired: string[] = [];
     if (!engines.ytdlp.available) missingRequired.push('yt-dlp');
     if (!engines.ffmpeg.available) missingRequired.push('ffmpeg');
@@ -929,7 +1279,7 @@ export class EngineManager {
     onProgress?: (progress: EngineInstallProgress) => void
   ): Promise<EngineUpdateResult> {
     const normalized = engineName.toLowerCase() === 'ytdlp' ? 'yt-dlp' : engineName.toLowerCase();
-    const status = this.getEngineStatus();
+    const status = await this.getEngineStatus();
     const alreadyReady =
       (normalized === 'yt-dlp' && status.ytdlp.available) ||
       ((normalized === 'ffmpeg' || normalized === 'ffprobe') && status.ffmpeg.available && status.ffprobe.available) ||

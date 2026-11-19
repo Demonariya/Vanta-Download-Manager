@@ -13,7 +13,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
+
+struct InspectionDropGuard<'a> {
+    state: &'a AppState,
+    request_id: String,
+}
+
+impl<'a> Drop for InspectionDropGuard<'a> {
+    fn drop(&mut self) {
+        self.state.remove_inspection(&self.request_id);
+    }
+}
 
 #[tauri::command]
 pub fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
@@ -21,20 +33,90 @@ pub fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String
 }
 
 #[tauri::command]
-pub fn create_task(
+pub async fn create_task(
     app: AppHandle,
     state: State<'_, AppState>,
     payload: CreateTaskPayload,
 ) -> Result<DownloadTask, String> {
     let settings = state.get_settings();
-    let is_spotify = payload.url.contains("spotify.com");
+    let trimmed_url = payload.url.trim().to_string();
+    let is_spotify = crate::spotify::is_spotify_url(&trimmed_url);
     let is_audio = payload.is_audio_only.unwrap_or(is_spotify);
     let requires_ffmpeg = is_audio
         || settings.embed_thumbnail
         || settings.embed_metadata
         || payload.format_id.as_deref().unwrap_or("best") == "best";
 
-    EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)?;
+    tokio::task::spawn_blocking(move || {
+        EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)
+    })
+    .await
+    .map_err(|e| format!("Engine preflight failed: {}", e))??;
+
+    let mut resolved_url = trimmed_url.clone();
+    let mut resolved_title = payload.title.clone().unwrap_or_default().trim().to_string();
+    let mut resolved_uploader = payload
+        .uploader
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut resolved_duration = payload.duration;
+    let mut resolved_duration_str = payload.duration_string.clone();
+    let mut resolved_thumbnail = payload
+        .thumbnail
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut resolved_album = payload
+        .album
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut resolved_content_type = payload
+        .content_type
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let is_placeholder_title = resolved_title.is_empty()
+        || resolved_title == "Queued Download"
+        || resolved_title == "Download Task"
+        || resolved_title == "Queued Item"
+        || resolved_title == "Spotify Track / Album"
+        || resolved_title == "Spotify Music Track"
+        || resolved_title == "Spotify Album / Playlist"
+        || resolved_title.starts_with("Batch Item:");
+
+    if is_spotify && (is_placeholder_title || resolved_thumbnail.is_none()) {
+        let meta = crate::spotify::resolve_spotify_metadata_async(&trimmed_url, None).await?;
+        if !meta.url.is_empty() {
+            resolved_url = meta.url;
+        }
+        resolved_title = meta.title;
+        if let Some(ref artists) = meta.artists {
+            if !artists.is_empty() {
+                resolved_uploader = Some(artists.join(", "));
+            }
+        }
+        if resolved_uploader.is_none() {
+            resolved_uploader = meta.owner.or(meta.uploader);
+        }
+        if resolved_duration.is_none() {
+            resolved_duration = meta.duration;
+        }
+        if resolved_duration_str.is_none() {
+            resolved_duration_str = meta.duration_string;
+        }
+        if resolved_thumbnail.is_none() {
+            resolved_thumbnail = meta.album_artwork.or(meta.thumbnail);
+        }
+        if resolved_album.is_none() {
+            resolved_album = meta.album;
+        }
+        if resolved_content_type.is_none() {
+            resolved_content_type = meta.content_type;
+        }
+    }
 
     let id = format!(
         "task_{}_{}",
@@ -58,12 +140,18 @@ pub fn create_task(
 
     let task = DownloadTask {
         id: id.clone(),
-        url: payload.url.trim().to_string(),
-        title: payload.title.unwrap_or_else(|| "Queued Download".to_string()),
-        uploader: payload.uploader,
-        duration: payload.duration,
-        duration_string: payload.duration_string,
-        thumbnail: payload.thumbnail,
+        url: resolved_url,
+        title: if resolved_title.is_empty() {
+            "Queued Download".to_string()
+        } else {
+            resolved_title
+        },
+        uploader: resolved_uploader,
+        duration: resolved_duration,
+        duration_string: resolved_duration_str,
+        thumbnail: resolved_thumbnail,
+        album: resolved_album,
+        content_type: resolved_content_type,
         engine,
         status: TaskStatus::Queued,
         progress_percentage: 0.0,
@@ -88,7 +176,7 @@ pub fn create_task(
             .or(settings.default_audio_sample_rate),
         audio_bit_depth: payload.audio_bit_depth.or(settings.default_audio_bit_depth),
         audio_channels: payload.audio_channels,
-        is_lossy_source: payload.is_lossy_source,
+        is_lossy_source: payload.is_lossy_source.or(Some(is_spotify)),
         verified_audio_info: None,
         output_path: payload
             .output_path
@@ -306,14 +394,68 @@ pub fn clear_notifications(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+const ENGINE_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
+
 #[tauri::command]
-pub fn get_engine_status() -> Result<EngineStatusMap, String> {
-    Ok(EngineManager::get_engine_status())
+pub async fn get_engine_status(
+    state: State<'_, AppState>,
+    force_refresh: Option<bool>,
+) -> Result<EngineStatusMap, String> {
+    let force = force_refresh.unwrap_or(false);
+    if !force {
+        let cached = state
+            .cached_engine_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some((captured_at, status)) = cached {
+            if captured_at.elapsed() < ENGINE_STATUS_CACHE_TTL {
+                return Ok(status);
+            }
+        }
+    }
+
+    // Deduplicate concurrent scans: wait briefly if another scan is already active
+    if state.is_scanning_engines.swap(true, Ordering::SeqCst) {
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if !state.is_scanning_engines.load(Ordering::SeqCst) {
+                let cached = state
+                    .cached_engine_status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some((_ts, status)) = cached {
+                    return Ok(status);
+                }
+                break;
+            }
+        }
+        state.is_scanning_engines.store(true, Ordering::SeqCst);
+    }
+
+    let scan_res = tokio::task::spawn_blocking(EngineManager::get_engine_status)
+        .await
+        .map_err(|e| format!("Engine scan task failed: {}", e));
+
+    state.is_scanning_engines.store(false, Ordering::SeqCst);
+
+    let status = scan_res?;
+    {
+        let mut cache = state
+            .cached_engine_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *cache = Some((Instant::now(), status.clone()));
+    }
+    Ok(status)
 }
 
 #[tauri::command]
-pub fn get_managed_engine_info() -> Result<ManagedEngineInfo, String> {
-    Ok(EngineManager::get_managed_engine_info())
+pub async fn get_managed_engine_info() -> Result<ManagedEngineInfo, String> {
+    tokio::task::spawn_blocking(EngineManager::get_managed_engine_info)
+        .await
+        .map_err(|e| format!("Managed engine lookup failed: {}", e))
 }
 
 #[tauri::command]
@@ -331,8 +473,11 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
 }
 
 #[tauri::command]
-pub fn check_engine_updates() -> Result<serde_json::Value, String> {
-    let status = EngineManager::get_engine_status();
+pub async fn check_engine_updates() -> Result<serde_json::Value, String> {
+    let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
+        .await
+        .map_err(|e| format!("Update check failed: {}", e))?;
+
     Ok(serde_json::json!({
         "ytdlp": {
             "currentVersion": status.ytdlp.version,
@@ -394,11 +539,48 @@ pub async fn update_all_engines(app: AppHandle) -> Result<Vec<EngineUpdateResult
 pub async fn inspect_url(
     state: State<'_, AppState>,
     url: String,
+    request_id: Option<String>,
 ) -> Result<MediaMetadata, String> {
+    let validated_url = EngineManager::validate_inspection_url(&url)?;
+    let req_id = request_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("insp_{}", uuid::Uuid::new_v4()));
+
+    let tracked = state.register_inspection(&req_id);
+    let _guard = InspectionDropGuard {
+        state: state.inner(),
+        request_id: req_id.clone(),
+    };
+
+    if crate::spotify::is_spotify_url(&validated_url) {
+        return crate::spotify::resolve_spotify_metadata_async(
+            &validated_url,
+            Some(tracked.cancelled),
+        )
+        .await;
+    }
+
     let settings = state.get_settings();
-    tokio::task::spawn_blocking(move || EngineManager::inspect_url(&url, &settings))
-        .await
-        .map_err(|e| format!("URL inspection task panicked: {}", e))?
+
+    tokio::task::spawn_blocking(move || {
+        EngineManager::inspect_url_with_tracking(
+            &req_id,
+            &validated_url,
+            &settings,
+            Some(tracked.cancelled),
+            Some(tracked.pid),
+        )
+    })
+    .await
+    .map_err(|e| format!("URL inspection worker panicked: {}", e))?
+}
+
+#[tauri::command]
+pub fn cancel_inspection(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<bool, String> {
+    Ok(state.cancel_inspection(&request_id))
 }
 
 #[tauri::command]
@@ -614,7 +796,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     }
 
     let settings = state.get_settings();
-    let is_spotdl = task.engine == "spotdl" || task.url.contains("spotify.com");
+    let is_spotdl = task.engine == "spotdl" || crate::spotify::is_spotify_url(&task.url);
     let requires_ffmpeg = task.is_audio_only
         || is_spotdl
         || settings.embed_thumbnail
@@ -656,6 +838,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             }
         };
 
+        let target_url = match crate::spotify::try_parse_spotify_input(&task.url) {
+            Some(crate::spotify::ParsedSpotifyInput::Resource { canonical_url, .. }) => {
+                canonical_url
+            }
+            Some(crate::spotify::ParsedSpotifyInput::Invalid { error }) => {
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some(error);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+            _ => task.url.clone(),
+        };
+
         let format = task
             .audio_format
             .clone()
@@ -665,11 +862,23 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             .clone()
             .unwrap_or_else(|| settings.default_audio_bitrate.clone());
 
+        let is_collection = matches!(
+            task.content_type.as_deref(),
+            Some("album") | Some("playlist")
+        );
+        let output_template = if is_collection {
+            out_dir
+                .join("{list-name}")
+                .join("{artists} - {title}.{output-ext}")
+        } else {
+            out_dir.join("{artists} - {title}.{output-ext}")
+        };
+
         let args = vec![
             "download".to_string(),
-            task.url.clone(),
+            target_url,
             "--output".to_string(),
-            out_dir.to_string_lossy().to_string(),
+            output_template.to_string_lossy().to_string(),
             "--format".to_string(),
             format,
             "--bitrate".to_string(),
@@ -786,7 +995,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push("--embed-metadata".to_string());
         }
 
-        args.push(task.url.clone());
+        let validated_url = match EngineManager::validate_inspection_url(&task.url) {
+            Ok(u) => u,
+            Err(url_err) => {
+                logging::error("download", &format!("Task '{}' invalid URL: {}", task_id, url_err));
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some(url_err);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+        };
+
+        args.push("--".to_string());
+        args.push(validated_url);
         (ytdlp_path, args)
     };
 

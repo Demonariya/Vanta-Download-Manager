@@ -9,6 +9,7 @@ fn main() {
     logging::install_panic_hook();
     logging::info("startup", "Starting VANTA Download Manager desktop runtime.");
 
+    let startup_t0 = std::time::Instant::now();
     let state = match AppState::init() {
         Ok(s) => s,
         Err(err) => {
@@ -17,6 +18,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    logging::info(
+        "startup",
+        &format!(
+            "AppState ready in {}ms; launching window.",
+            startup_t0.elapsed().as_millis()
+        ),
+    );
 
     let app = match tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -53,6 +61,7 @@ fn main() {
             update_engine,
             update_all_engines,
             inspect_url,
+            cancel_inspection,
             get_cookie_status,
             validate_cookies_text,
             save_cookies,

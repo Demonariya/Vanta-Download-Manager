@@ -4,7 +4,10 @@ use crate::models::{
     AppSettings, DiagnosticResult, EngineInfo, EngineInstallProgress, EngineStatusMap,
     EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata,
 };
-use crate::process;
+use crate::process::{
+    self, ProcessError, ProcessOptions, DIAGNOSTICS_TIMEOUT, ENGINE_VERSION_TIMEOUT,
+    FFPROBE_TIMEOUT, INSPECT_MAX_STDOUT_BYTES, INSPECT_URL_TIMEOUT,
+};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,8 +17,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const YTDLP_WIN_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
@@ -194,16 +198,23 @@ impl EngineManager {
     }
 
     pub fn check_single_engine(name: &str, ver_flag: &str) -> EngineInfo {
+        let start = Instant::now();
         let path_opt = Self::find_executable(name);
         let now = chrono::Utc::now().to_rfc3339();
 
-        match path_opt {
+        let info = match path_opt {
             Some(path) => {
                 let mut cmd = Command::new(&path);
                 cmd.arg(ver_flag);
                 Self::apply_engine_env(&mut cmd);
 
-                match process::run_captured_command(&mut cmd) {
+                let opts = ProcessOptions {
+                    timeout: ENGINE_VERSION_TIMEOUT,
+                    truncate_stdout_tail: true,
+                    ..ProcessOptions::default()
+                };
+
+                match process::run_command_with_options(&mut cmd, opts) {
                     Ok(output) if output.status.success() => {
                         let first_line = output.stdout.lines().next().unwrap_or("").trim().to_string();
                         let clean_version = first_line
@@ -227,6 +238,7 @@ impl EngineManager {
                             latest_version: None,
                             update_available: Some(false),
                             is_updating: Some(false),
+                            duration_ms: Some(output.duration_ms),
                         }
                     }
                     Ok(output) => {
@@ -238,13 +250,38 @@ impl EngineManager {
                             status: "error".to_string(),
                             last_checked: now,
                             error: Some(if err_msg.is_empty() {
-                                "Process returned error exit code".to_string()
+                                format!(
+                                    "Process returned non-zero exit status ({:?})",
+                                    output.status.code()
+                                )
                             } else {
                                 err_msg
                             }),
                             latest_version: None,
                             update_available: Some(false),
                             is_updating: Some(false),
+                            duration_ms: Some(output.duration_ms),
+                        }
+                    }
+                    Err(ProcessError::TimedOut { duration_ms }) => {
+                        logging::warn(
+                            "engines",
+                            &format!("Engine '{}' version check timed out after {}ms", name, duration_ms),
+                        );
+                        EngineInfo {
+                            available: false,
+                            version: String::new(),
+                            path: path.to_string_lossy().to_string(),
+                            status: "timed_out".to_string(),
+                            last_checked: now,
+                            error: Some(format!(
+                                "Version check timed out after {:.1}s",
+                                duration_ms as f64 / 1000.0
+                            )),
+                            latest_version: None,
+                            update_available: Some(false),
+                            is_updating: Some(false),
+                            duration_ms: Some(duration_ms),
                         }
                     }
                     Err(e) => EngineInfo {
@@ -257,6 +294,7 @@ impl EngineManager {
                         latest_version: None,
                         update_available: Some(false),
                         is_updating: Some(false),
+                        duration_ms: Some(start.elapsed().as_millis() as u64),
                     },
                 }
             }
@@ -273,17 +311,63 @@ impl EngineManager {
                 latest_version: None,
                 update_available: Some(false),
                 is_updating: Some(false),
+                duration_ms: Some(start.elapsed().as_millis() as u64),
             },
-        }
+        };
+
+        logging::info(
+            "engines",
+            &format!(
+                "Checked engine '{}': status={}, duration={}ms",
+                name,
+                info.status,
+                info.duration_ms.unwrap_or(0)
+            ),
+        );
+        info
     }
 
     pub fn get_engine_status() -> EngineStatusMap {
+        let total_start = Instant::now();
+        let (ytdlp, spotdl, ffmpeg, ffprobe, python3) = std::thread::scope(|s| {
+            let h_ytdlp = s.spawn(|| Self::check_single_engine("yt-dlp", "--version"));
+            let h_spotdl = s.spawn(|| Self::check_single_engine("spotdl", "--version"));
+            let h_ffmpeg = s.spawn(|| Self::check_single_engine("ffmpeg", "-version"));
+            let h_ffprobe = s.spawn(|| Self::check_single_engine("ffprobe", "-version"));
+            let h_python = s.spawn(|| Self::check_single_engine("python3", "--version"));
+
+            let y = h_ytdlp
+                .join()
+                .unwrap_or_else(|_| Self::check_single_engine("yt-dlp", "--version"));
+            let sp = h_spotdl
+                .join()
+                .unwrap_or_else(|_| Self::check_single_engine("spotdl", "--version"));
+            let ff = h_ffmpeg
+                .join()
+                .unwrap_or_else(|_| Self::check_single_engine("ffmpeg", "-version"));
+            let fp = h_ffprobe
+                .join()
+                .unwrap_or_else(|_| Self::check_single_engine("ffprobe", "-version"));
+            let py = h_python
+                .join()
+                .unwrap_or_else(|_| Self::check_single_engine("python3", "--version"));
+            (y, sp, ff, fp, py)
+        });
+
+        logging::info(
+            "engines",
+            &format!(
+                "Completed parallel engine health scan in {}ms.",
+                total_start.elapsed().as_millis()
+            ),
+        );
+
         EngineStatusMap {
-            ytdlp: Self::check_single_engine("yt-dlp", "--version"),
-            spotdl: Self::check_single_engine("spotdl", "--version"),
-            ffmpeg: Self::check_single_engine("ffmpeg", "-version"),
-            ffprobe: Self::check_single_engine("ffprobe", "-version"),
-            python3: Self::check_single_engine("python3", "--version"),
+            ytdlp,
+            spotdl,
+            ffmpeg,
+            ffprobe,
+            python3,
         }
     }
 
@@ -520,7 +604,12 @@ impl EngineManager {
             }
         }
 
-        let output = process::run_captured_command(&mut cmd)
+        let opts = ProcessOptions {
+            timeout: ENGINE_VERSION_TIMEOUT,
+            truncate_stdout_tail: true,
+            ..ProcessOptions::default()
+        };
+        let output = process::run_command_with_options(&mut cmd, opts)
             .map_err(|e| format!("Failed to execute verification command: {}", e))?;
 
         if !output.status.success() {
@@ -973,62 +1062,83 @@ impl EngineManager {
             ("ffprobe", "-version"),
         ];
 
-        let mut results = Vec::new();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = engines
+                .iter()
+                .map(|&(name, flag)| {
+                    s.spawn(move || {
+                        let start = Instant::now();
+                        let path_opt = Self::find_executable(name);
 
-        for (name, flag) in engines {
-            let start = Instant::now();
-            let path_opt = Self::find_executable(name);
+                        match path_opt {
+                            Some(path) => {
+                                let mut cmd = Command::new(&path);
+                                cmd.arg(flag);
+                                Self::apply_engine_env(&mut cmd);
+                                let opts = ProcessOptions {
+                                    timeout: DIAGNOSTICS_TIMEOUT,
+                                    truncate_stdout_tail: true,
+                                    ..ProcessOptions::default()
+                                };
+                                let cmd_res = process::run_command_with_options(&mut cmd, opts);
+                                let duration_ms = start.elapsed().as_millis() as u64;
 
-            match path_opt {
-                Some(path) => {
-                    let mut cmd = Command::new(&path);
-                    cmd.arg(flag);
-                    Self::apply_engine_env(&mut cmd);
-                    let cmd_res = process::run_captured_command(&mut cmd);
-                    let duration_ms = start.elapsed().as_millis() as u64;
+                                match cmd_res {
+                                    Ok(output) => {
+                                        let stdout = output.stdout.trim().to_string();
+                                        let stderr = logging::redact_secrets(output.stderr.trim());
+                                        let combined =
+                                            if stdout.is_empty() { stderr } else { stdout };
+                                        let first_line =
+                                            combined.lines().next().unwrap_or("").to_string();
 
-                    match cmd_res {
-                        Ok(output) => {
-                            let stdout = output.stdout.trim().to_string();
-                            let stderr = logging::redact_secrets(output.stderr.trim());
-                            let combined = if stdout.is_empty() { stderr } else { stdout };
-                            let first_line = combined.lines().next().unwrap_or("").to_string();
-
-                            results.push(DiagnosticResult {
-                                engine: name.to_string(),
-                                passed: output.status.success(),
-                                version: Some(first_line),
-                                command: format!("{} {}", path.display(), flag),
-                                output: combined.chars().take(400).collect(),
-                                duration_ms,
-                            });
-                        }
-                        Err(e) => {
-                            results.push(DiagnosticResult {
+                                        DiagnosticResult {
+                                            engine: name.to_string(),
+                                            passed: output.status.success(),
+                                            version: Some(first_line),
+                                            command: format!("{} {}", path.display(), flag),
+                                            output: combined.chars().take(400).collect(),
+                                            duration_ms,
+                                        }
+                                    }
+                                    Err(e) => DiagnosticResult {
+                                        engine: name.to_string(),
+                                        passed: false,
+                                        version: None,
+                                        command: format!("{} {}", path.display(), flag),
+                                        output: e.to_string(),
+                                        duration_ms,
+                                    },
+                                }
+                            }
+                            None => DiagnosticResult {
                                 engine: name.to_string(),
                                 passed: false,
                                 version: None,
-                                command: format!("{} {}", path.display(), flag),
-                                output: e.to_string(),
-                                duration_ms,
-                            });
+                                command: format!("{} {}", name, flag),
+                                output: "Binary not detected in managed runtime or PATH".to_string(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                            },
                         }
-                    }
-                }
-                None => {
-                    results.push(DiagnosticResult {
-                        engine: name.to_string(),
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .enumerate()
+                .map(|(idx, h)| {
+                    h.join().unwrap_or_else(|_| DiagnosticResult {
+                        engine: engines[idx].0.to_string(),
                         passed: false,
                         version: None,
-                        command: format!("{} {}", name, flag),
-                        output: "Binary not detected in managed runtime or PATH".to_string(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                    });
-                }
-            }
-        }
-
-        results
+                        command: format!("{} {}", engines[idx].0, engines[idx].1),
+                        output: "Diagnostic worker panicked".to_string(),
+                        duration_ms: 0,
+                    })
+                })
+                .collect()
+        })
     }
 
     pub fn sanitize_log(text: &str) -> String {
@@ -1079,89 +1189,188 @@ impl EngineManager {
         Ok(args)
     }
 
-    pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
-        if url.contains("spotify.com") {
-            let track_id = url
-                .split('/')
-                .last()
-                .and_then(|s| s.split('?').next())
-                .unwrap_or("track")
-                .to_string();
-            let is_playlist = url.contains("/playlist/") || url.contains("/album/");
-            return Ok(MediaMetadata {
-                url: url.to_string(),
-                id: track_id,
-                title: if is_playlist {
-                    "Spotify Album / Playlist".to_string()
-                } else {
-                    "Spotify Music Track".to_string()
-                },
-                uploader: Some("Spotify Artist".to_string()),
-                duration: Some(180),
-                duration_string: Some("03:00".to_string()),
-                thumbnail: Some("https://open.spotifycdn.com/cdn/images/favicon.0f31d2ea.ico".to_string()),
-                description: Some("Music track processed via spotDL audio pipeline.".to_string()),
-                formats: vec![
-                    FormatOption {
-                        format_id: "spotdl-best".to_string(),
-                        ext: "mp3".to_string(),
-                        resolution: Some("320kbps Audio".to_string()),
-                        width: None,
-                        height: None,
-                        fps: None,
-                        vcodec: None,
-                        acodec: None,
-                        filesize: None,
-                        filesize_approx: None,
-                        format_note: Some("High-Fidelity MP3 (320 kbps)".to_string()),
-                        is_audio_only: true,
-                        is_video_only: false,
-                    },
-                    FormatOption {
-                        format_id: "spotdl-flac".to_string(),
-                        ext: "flac".to_string(),
-                        resolution: Some("Lossless Audio".to_string()),
-                        width: None,
-                        height: None,
-                        fps: None,
-                        vcodec: None,
-                        acodec: None,
-                        filesize: None,
-                        filesize_approx: None,
-                        format_note: Some("Lossless FLAC audio".to_string()),
-                        is_audio_only: true,
-                        is_video_only: false,
-                    },
-                ],
-                is_playlist,
-                playlist_count: if is_playlist { Some(10) } else { None },
-                extractor: "spotdl".to_string(),
-            });
+    pub fn validate_inspection_url(raw: &str) -> Result<String, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("URL cannot be empty. Enter an HTTP or HTTPS media URL.".to_string());
+        }
+        if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err("Invalid URL: contains whitespace or control characters.".to_string());
+        }
+        if trimmed.starts_with('-') {
+            return Err("Invalid URL: must start with http://, https://, or spotify:.".to_string());
         }
 
-        Self::ensure_required_engines(false, false)?;
-        let ytdlp_path = Self::find_executable("yt-dlp")
-            .ok_or_else(|| "yt-dlp executable not found".to_string())?;
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("spotify:") {
+            return match crate::spotify::try_parse_spotify_input(trimmed) {
+                Some(crate::spotify::ParsedSpotifyInput::Resource { .. }) => Ok(trimmed.to_string()),
+                Some(crate::spotify::ParsedSpotifyInput::Invalid { error }) => Err(error),
+                _ => Err("Invalid Spotify URI.".to_string()),
+            };
+        }
 
-        let extra_args = Self::build_ytdlp_request_args(url, settings)?;
+        let after_scheme = if lower.starts_with("https://") {
+            &trimmed[8..]
+        } else if lower.starts_with("http://") {
+            &trimmed[7..]
+        } else {
+            return Err("Unsupported URL scheme. Only http:// and https:// URLs are supported.".to_string());
+        };
 
-        let mut cmd = Command::new(&ytdlp_path);
+        let authority = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or("");
+        if authority.is_empty()
+            || authority.starts_with('.')
+            || authority.contains('"')
+            || authority.contains('\'')
+            || authority.contains(';')
+            || authority.contains('|')
+        {
+            return Err("Malformed URL host. Check the URL and try again.".to_string());
+        }
+
+        if let Some(crate::spotify::ParsedSpotifyInput::Invalid { error }) =
+            crate::spotify::try_parse_spotify_input(trimmed)
+        {
+            return Err(error);
+        }
+
+        Ok(trimmed.to_string())
+    }
+
+    pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
+        Self::inspect_url_with_tracking("direct", url, settings, None, None)
+    }
+
+    pub fn inspect_url_with_tracking(
+        request_id: &str,
+        raw_url: &str,
+        settings: &AppSettings,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        pid_slot: Option<Arc<AtomicU32>>,
+    ) -> Result<MediaMetadata, String> {
+        let url = Self::validate_inspection_url(raw_url)?;
+        if cancel_flag.as_ref().map(|f| f.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false) {
+            return Err("Inspection cancelled.".to_string());
+        }
+
+        if crate::spotify::is_spotify_url(&url) {
+            return crate::spotify::resolve_spotify_metadata_blocking(&url, cancel_flag);
+        }
+
+        let ytdlp_path = Self::find_executable("yt-dlp").ok_or_else(|| {
+            "yt-dlp engine is not installed. Use Install Engines in Dashboard or Diagnostics first."
+                .to_string()
+        })?;
+
+        Self::inspect_url_with_binary(
+            &ytdlp_path,
+            request_id,
+            &url,
+            settings,
+            INSPECT_URL_TIMEOUT,
+            INSPECT_MAX_STDOUT_BYTES,
+            cancel_flag,
+            pid_slot,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn inspect_url_with_binary(
+        ytdlp_path: &Path,
+        request_id: &str,
+        url: &str,
+        settings: &AppSettings,
+        timeout: Duration,
+        max_stdout_bytes: usize,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        pid_slot: Option<Arc<AtomicU32>>,
+    ) -> Result<MediaMetadata, String> {
+        let validated_url = Self::validate_inspection_url(url)?;
+        let extra_args = Self::build_ytdlp_request_args(&validated_url, settings)?;
+
+        let mut cmd = Command::new(ytdlp_path);
         cmd.args([
             "--dump-single-json",
             "--no-playlist",
             "--no-warnings",
             "--no-call-home",
             "--no-cache-dir",
+            "--skip-download",
+            "--no-exec",
+            "--socket-timeout",
+            "15",
+            "--retries",
+            "2",
+            "--extractor-retries",
+            "2",
         ]);
         cmd.args(&extra_args);
         if !settings.proxy_url.trim().is_empty() {
             cmd.args(["--proxy", settings.proxy_url.trim()]);
         }
-        cmd.arg(url);
+        cmd.arg("--");
+        cmd.arg(&validated_url);
         Self::apply_engine_env(&mut cmd);
 
-        let output = process::run_captured_command(&mut cmd)
-            .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+        logging::info(
+            "inspect",
+            &format!("Starting URL inspection request '{}' (timeout={}s)", request_id, timeout.as_secs()),
+        );
+
+        let opts = ProcessOptions {
+            timeout,
+            max_stdout_bytes,
+            truncate_stdout_tail: false,
+            cancel_flag,
+            pid_slot,
+            ..ProcessOptions::default()
+        };
+
+        let output = match process::run_command_with_options(&mut cmd, opts) {
+            Ok(out) => out,
+            Err(ProcessError::TimedOut { duration_ms }) => {
+                logging::warn(
+                    "inspect",
+                    &format!("Inspection request '{}' timed out after {}ms", request_id, duration_ms),
+                );
+                return Err(format!(
+                    "URL inspection timed out after {:.0}s because the target site or extractor did not respond in time.",
+                    (duration_ms as f64 / 1000.0).max(1.0)
+                ));
+            }
+            Err(ProcessError::Cancelled) => {
+                logging::info("inspect", &format!("Inspection request '{}' cancelled", request_id));
+                return Err("Inspection cancelled.".to_string());
+            }
+            Err(ProcessError::OutputLimitExceeded { limit_bytes, .. }) => {
+                logging::warn(
+                    "inspect",
+                    &format!(
+                        "Inspection request '{}' exceeded metadata output limit ({} bytes)",
+                        request_id, limit_bytes
+                    ),
+                );
+                return Err(format!(
+                    "Metadata payload exceeded safe limit ({} MiB) and was aborted safely.",
+                    (limit_bytes / (1024 * 1024)).max(1)
+                ));
+            }
+            Err(e) => {
+                logging::error("inspect", &format!("Inspection request '{}' spawn/wait error: {}", request_id, e));
+                return Err(format!("Failed to execute yt-dlp: {}", e));
+            }
+        };
+
+        logging::info(
+            "inspect",
+            &format!(
+                "Inspection request '{}' exited with {:?} in {}ms",
+                request_id,
+                output.status.code(),
+                output.duration_ms
+            ),
+        );
 
         if !output.status.success() {
             let err_clean = Self::sanitize_log(if output.stderr.trim().is_empty() {
@@ -1190,15 +1399,31 @@ impl EngineManager {
                 ));
             }
 
-            return Err(format!("Inspection failed: {}", err_clean));
+            if lower.contains("unsupported url") {
+                return Err(format!(
+                    "Unsupported media URL or provider: {}",
+                    err_clean.lines().next().unwrap_or("Unsupported URL")
+                ));
+            }
+
+            return Err(format!(
+                "Inspection failed (exit code {}): {}",
+                output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                if err_clean.is_empty() { "No diagnostic details reported by yt-dlp." } else { &err_clean }
+            ));
         }
 
-        let val: serde_json::Value = serde_json::from_str(&output.stdout)
-            .map_err(|e| format!("Failed to parse JSON metadata: {}", e))?;
+        let val: serde_json::Value = serde_json::from_str(&output.stdout).map_err(|e| {
+            logging::warn(
+                "inspect",
+                &format!("Inspection request '{}' returned malformed JSON: {}", request_id, e),
+            );
+            format!("Received invalid or incomplete metadata from extractor: {}", e)
+        })?;
 
         let mut formats = Vec::new();
         if let Some(formats_arr) = val.get("formats").and_then(|f| f.as_array()) {
-            for f in formats_arr {
+            for f in formats_arr.iter().take(500) {
                 let format_id = f
                     .get("format_id")
                     .and_then(|v| v.as_str())
@@ -1258,7 +1483,7 @@ impl EngineManager {
         }
 
         Ok(MediaMetadata {
-            url: url.to_string(),
+            url: validated_url,
             id: val
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1285,15 +1510,16 @@ impl EngineManager {
             description: val
                 .get("description")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(|s| s.chars().take(500).collect()),
             formats,
-            is_playlist: false,
-            playlist_count: None,
+            is_playlist: val.get("_type").and_then(|v| v.as_str()) == Some("playlist"),
+            playlist_count: val.get("entries").and_then(|v| v.as_array()).map(|a| a.len()),
             extractor: val
                 .get("extractor")
                 .and_then(|v| v.as_str())
                 .unwrap_or("yt-dlp")
                 .to_string(),
+            ..MediaMetadata::default()
         })
     }
 
@@ -1335,7 +1561,12 @@ impl EngineManager {
         ]);
         Self::apply_engine_env(&mut cmd);
 
-        let output = process::run_captured_command(&mut cmd).ok()?;
+        let opts = ProcessOptions {
+            timeout: FFPROBE_TIMEOUT,
+            truncate_stdout_tail: false,
+            ..ProcessOptions::default()
+        };
+        let output = process::run_command_with_options(&mut cmd, opts).ok()?;
         if !output.status.success() {
             return None;
         }
@@ -1491,5 +1722,189 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
                 .expect("should build args when cookies disabled");
             assert!(!args_disabled.iter().any(|a| a == "--cookies" || a == "--cookies-from-browser"));
         }
+    }
+
+    #[test]
+    fn test_validate_inspection_url() {
+        assert!(EngineManager::validate_inspection_url("").is_err());
+        assert!(EngineManager::validate_inspection_url("   ").is_err());
+        assert!(EngineManager::validate_inspection_url("--exec whoami").is_err());
+        assert!(EngineManager::validate_inspection_url("file:///etc/passwd").is_err());
+        assert!(EngineManager::validate_inspection_url("javascript:alert(1)").is_err());
+        assert!(EngineManager::validate_inspection_url("https://example.com/v?a=1 b=2").is_err());
+        assert!(EngineManager::validate_inspection_url("https://").is_err());
+
+        let ok = EngineManager::validate_inspection_url("  https://www.youtube.com/watch?v=dQw4w9WgXcQ  ")
+            .expect("valid https url should pass");
+        assert_eq!(ok, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    }
+
+    #[cfg(unix)]
+    fn write_mock_ytdlp_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let content = format!("#!/bin/sh\n{}", body);
+        fs::write(&path, content).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_inspect_url_with_binary_scenarios() {
+        let dir = env::temp_dir().join(format!("vanta_inspect_test_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut settings = AppSettings::default();
+        settings.cookies_browser = Some("none".to_string());
+        settings.cookies_file = None;
+
+        // 1. Valid JSON metadata with formats + verified '--' separator passed before URL
+        let ok_script = write_mock_ytdlp_script(
+            &dir,
+            "ytdlp_ok.sh",
+            r#"
+printf '{"id":"vid123","title":"Sample Video","uploader":"Creator","duration":125,"extractor":"generic","formats":[{"format_id":"18","ext":"mp4","height":360,"vcodec":"avc1","acodec":"mp4a"}]}\n'
+"#,
+        );
+        let meta = EngineManager::inspect_url_with_binary(
+            &ok_script,
+            "req_ok",
+            "https://example.com/watch?v=1",
+            &settings,
+            Duration::from_secs(5),
+            1024 * 1024,
+            None,
+            None,
+        )
+        .expect("valid JSON should succeed");
+        assert_eq!(meta.id, "vid123");
+        assert_eq!(meta.title, "Sample Video");
+        assert_eq!(meta.formats.len(), 1);
+        assert_eq!(meta.formats[0].format_id, "18");
+
+        // 2. Malformed JSON should fail cleanly with descriptive message
+        let bad_json_script = write_mock_ytdlp_script(
+            &dir,
+            "ytdlp_bad_json.sh",
+            r#"printf '{"id":"partial"'\n"#,
+        );
+        let err_malformed = EngineManager::inspect_url_with_binary(
+            &bad_json_script,
+            "req_bad_json",
+            "https://example.com/bad",
+            &settings,
+            Duration::from_secs(5),
+            1024 * 1024,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err_malformed.contains("invalid or incomplete metadata"), "got: {}", err_malformed);
+
+        // 3. Oversized JSON must abort safely instead of head-truncating JSON
+        let huge_script = write_mock_ytdlp_script(
+            &dir,
+            "ytdlp_huge.sh",
+            r#"
+yes '{"format_id":"a"}' | head -n 500
+"#,
+        );
+        let err_huge = EngineManager::inspect_url_with_binary(
+            &huge_script,
+            "req_huge",
+            "https://example.com/huge",
+            &settings,
+            Duration::from_secs(5),
+            512,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err_huge.contains("exceeded safe limit"), "got: {}", err_huge);
+
+        // 4. Hung extractor process must time out cleanly and kill child
+        let hang_script = write_mock_ytdlp_script(
+            &dir,
+            "ytdlp_hang.sh",
+            "sleep 10\n",
+        );
+        let err_timeout = EngineManager::inspect_url_with_binary(
+            &hang_script,
+            "req_hang",
+            "https://example.com/hang",
+            &settings,
+            Duration::from_millis(250),
+            1024 * 1024,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err_timeout.contains("timed out"), "got: {}", err_timeout);
+
+        // 5. Auth required / Chrome DPAPI lock errors return actionable error guidance
+        let dpapi_script = write_mock_ytdlp_script(
+            &dir,
+            "ytdlp_dpapi.sh",
+            "echo 'ERROR: Could not copy Chrome cookie database (DPAPI locked)' 1>&2\nexit 1\n",
+        );
+        let err_dpapi = EngineManager::inspect_url_with_binary(
+            &dpapi_script,
+            "req_dpapi",
+            "https://example.com/locked",
+            &settings,
+            Duration::from_secs(5),
+            1024 * 1024,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err_dpapi.contains("Browser cookie database access failed"), "got: {}", err_dpapi);
+
+        // 6. Cancellation flag stops running inspection promptly
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_trigger = Arc::clone(&cancel_flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            cancel_trigger.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let err_cancel = EngineManager::inspect_url_with_binary(
+            &hang_script,
+            "req_cancel",
+            "https://example.com/cancel",
+            &settings,
+            Duration::from_secs(10),
+            1024 * 1024,
+            Some(cancel_flag),
+            None,
+        )
+        .unwrap_err();
+        assert!(err_cancel.contains("cancelled"), "got: {}", err_cancel);
+
+        // 7. Concurrent inspection requests complete independently without crashing
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let s_script = ok_script.clone();
+                let s_settings = settings.clone();
+                std::thread::spawn(move || {
+                    EngineManager::inspect_url_with_binary(
+                        &s_script,
+                        &format!("req_concurrent_{}", i),
+                        &format!("https://example.com/watch?v={}", i),
+                        &s_settings,
+                        Duration::from_secs(5),
+                        1024 * 1024,
+                        None,
+                        None,
+                    )
+                })
+            })
+            .collect();
+        for h in handles {
+            let res = h.join().expect("thread should not panic").expect("concurrent inspect ok");
+            assert_eq!(res.id, "vid123");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

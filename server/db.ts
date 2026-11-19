@@ -66,6 +66,8 @@ try { db.exec('ALTER TABLE tasks ADD COLUMN audio_bit_depth INTEGER'); } catch {
 try { db.exec('ALTER TABLE tasks ADD COLUMN audio_channels INTEGER'); } catch {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN album TEXT'); } catch {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN content_type TEXT'); } catch {}
 
 // Remove legacy plaintext cookie/circumvention settings from DB
 try {
@@ -198,14 +200,14 @@ export function getTaskById(id: string): DownloadTask | null {
 export function upsertTask(task: DownloadTask): void {
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO tasks (
-      id, url, title, uploader, duration, duration_string, thumbnail, engine, status,
+      id, url, title, uploader, duration, duration_string, thumbnail, album, content_type, engine, status,
       progress_percentage, speed_str, speed_bytes_per_sec, downloaded_bytes, total_bytes,
       eta_str, current_phase, format_id, format_note, ext, is_audio_only, audio_format,
       audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
       verified_audio_info, output_path, error_message, priority, created_at, completed_at,
       retries, max_retries
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
@@ -222,6 +224,8 @@ export function upsertTask(task: DownloadTask): void {
     task.duration ?? null,
     task.duration_string ?? null,
     task.thumbnail ?? null,
+    task.album ?? null,
+    task.content_type ?? null,
     task.engine,
     task.status,
     task.progress_percentage ?? 0,

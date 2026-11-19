@@ -3,15 +3,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   DownloadTask,
+  EngineInfo,
   EngineStatusMap,
   AppSettings,
   NotificationItem,
   EngineInstallProgress,
 } from './types';
 import { api } from './services/api';
+
+function makeCheckingEngine(): EngineInfo {
+  return {
+    available: false,
+    version: '',
+    path: '',
+    status: 'checking',
+    lastChecked: new Date().toISOString(),
+  };
+}
+
+function createInitialCheckingEngineStatus(): EngineStatusMap {
+  return {
+    ytdlp: makeCheckingEngine(),
+    spotdl: makeCheckingEngine(),
+    ffmpeg: makeCheckingEngine(),
+    ffprobe: makeCheckingEngine(),
+    python3: makeCheckingEngine(),
+  };
+}
 import { Sidebar, ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { DashboardView } from './components/DashboardView';
@@ -29,7 +50,11 @@ import { SafeCloseDialog } from './components/SafeCloseDialog';
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(null);
+  const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
+    createInitialCheckingEngineStatus
+  );
+  const isRefreshingEnginesRef = useRef(false);
+  const [isRefreshingEngines, setIsRefreshingEngines] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -72,21 +97,44 @@ export default function App() {
     executeNativeClose();
   };
 
-  // Load initial data & subscribe to real-time events
-  useEffect(() => {
-    // 1. Initial fetches
-    api.getEngineStatus().then(setEngineStatus).catch(console.error);
-    api.getSettings().then(setSettings).catch(console.error);
-    api.getTasks().then(setTasks).catch(console.error);
-    api.getNotifications().then(setNotifications).catch(console.error);
+  const runEngineScan = async (forceRefresh: boolean, isStillMounted?: () => boolean) => {
+    if (isRefreshingEnginesRef.current) return;
+    isRefreshingEnginesRef.current = true;
+    setIsRefreshingEngines(true);
+    try {
+      const status = await api.getEngineStatus(forceRefresh);
+      if (!isStillMounted || isStillMounted()) {
+        setEngineStatus(status);
+      }
+    } catch (err) {
+      console.error('Engine status scan failed:', err);
+    } finally {
+      isRefreshingEnginesRef.current = false;
+      if (!isStillMounted || isStillMounted()) {
+        setIsRefreshingEngines(false);
+      }
+    }
+  };
 
-    // 2. Real-time SSE subscription
+  // Load initial data & subscribe to real-time events without blocking first paint
+  useEffect(() => {
+    let mounted = true;
+
+    // 1. Initial non-blocking background fetches
+    runEngineScan(false, () => mounted);
+    api.getSettings().then((s) => mounted && setSettings(s)).catch(console.error);
+    api.getTasks().then((t) => mounted && setTasks(t)).catch(console.error);
+    api.getNotifications().then((n) => mounted && setNotifications(n)).catch(console.error);
+
+    // 2. Real-time SSE / Tauri event subscription
     const unsubscribe = api.subscribeEvents({
       onInit: (data) => {
+        if (!mounted) return;
         setTasks(data.tasks);
         setSettings(data.settings);
       },
       onTaskUpdated: (updatedTask) => {
+        if (!mounted) return;
         setTasks((prev) => {
           const index = prev.findIndex((t) => t.id === updatedTask.id);
           if (index >= 0) {
@@ -98,21 +146,27 @@ export default function App() {
         });
       },
       onTaskAdded: (newTask) => {
+        if (!mounted) return;
         setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
       },
       onTaskDeleted: ({ id }) => {
+        if (!mounted) return;
         setTasks((prev) => prev.filter((t) => t.id !== id));
       },
       onTasksCleared: (clearedTasks) => {
+        if (!mounted) return;
         setTasks(clearedTasks);
       },
       onNotification: (notif) => {
+        if (!mounted) return;
         setNotifications((prev) => [notif, ...prev]);
       },
       onSettingsUpdated: (newSettings) => {
+        if (!mounted) return;
         setSettings(newSettings);
       },
       onEngineInstallProgress: (progress) => {
+        if (!mounted) return;
         setInstallProgress((prev) => ({
           ...prev,
           [progress.engine]: progress,
@@ -121,6 +175,7 @@ export default function App() {
     });
 
     return () => {
+      mounted = false;
       unsubscribe();
     };
   }, []);
@@ -175,8 +230,7 @@ export default function App() {
   };
 
   const handleRefreshEngines = async () => {
-    const updated = await api.getEngineStatus();
-    setEngineStatus(updated);
+    await runEngineScan(true);
   };
 
   const handleInstallAllEngines = async (force = false) => {
@@ -266,6 +320,7 @@ export default function App() {
               onCancelTask={handleCancelTask}
               onViewQueue={() => setActiveTab('queue')}
               onRefreshEngines={handleRefreshEngines}
+              isRefreshingEngines={isRefreshingEngines}
               onClearFailed={handleClearFailed}
               installProgress={installProgress}
               isInstallingEngines={isInstallingEngines}

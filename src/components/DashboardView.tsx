@@ -30,6 +30,7 @@ interface DashboardViewProps {
   onCancelTask: (id: string) => void;
   onViewQueue: () => void;
   onRefreshEngines: () => void;
+  isRefreshingEngines?: boolean;
   onClearFailed?: () => void;
   installProgress?: Record<string, EngineInstallProgress>;
   isInstallingEngines?: boolean;
@@ -47,6 +48,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onCancelTask,
   onViewQueue,
   onRefreshEngines,
+  isRefreshingEngines = false,
   onClearFailed,
   installProgress = {},
   isInstallingEngines = false,
@@ -69,9 +71,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const missingRequired: string[] = [];
   if (engineStatus) {
-    if (!engineStatus.ytdlp.available) missingRequired.push('yt-dlp');
-    if (!engineStatus.ffmpeg.available) missingRequired.push('FFmpeg');
-    if (!engineStatus.ffprobe.available) missingRequired.push('FFprobe');
+    if (!engineStatus.ytdlp.available && engineStatus.ytdlp.status !== 'checking') {
+      missingRequired.push('yt-dlp');
+    }
+    if (!engineStatus.ffmpeg.available && engineStatus.ffmpeg.status !== 'checking') {
+      missingRequired.push('FFmpeg');
+    }
+    if (!engineStatus.ffprobe.available && engineStatus.ffprobe.status !== 'checking') {
+      missingRequired.push('FFprobe');
+    }
   }
   const activeInstalls = Object.values(installProgress).filter(
     (p) => p.status !== 'ready' && p.status !== 'error'
@@ -392,101 +400,59 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={onRefreshEngines}
+              disabled={isRefreshingEngines}
               title="Refresh engines status"
-              className="p-1.5 text-[#8b949e] hover:text-white hover:bg-[#21262d] rounded transition-colors"
+              className="p-1.5 text-[#8b949e] hover:text-white disabled:opacity-50 hover:bg-[#21262d] rounded transition-colors"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingEngines ? 'animate-spin text-[#58a6ff]' : ''}`} />
             </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-2.5">
-            {/* yt-dlp */}
-            <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-white">yt-dlp</span>
-                <span
-                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                    engineStatus?.ytdlp.available
-                      ? 'bg-[#238636]/15 text-[#3fb950]'
-                      : 'bg-[#da3633]/15 text-[#f85149]'
-                  }`}
-                >
-                  {engineStatus?.ytdlp.status || 'unknown'}
-                </span>
-              </div>
-              <p className="text-[11px] font-mono text-[#8b949e] mt-1.5 truncate">
-                {engineStatus?.ytdlp.version || 'Not installed'}
-              </p>
-              <p className="text-[10px] font-mono text-[#6e7681] truncate mt-0.5">
-                {engineStatus?.ytdlp.path || 'Unavailable'}
-              </p>
-            </div>
+            {[
+              { key: 'ytdlp', label: 'yt-dlp', info: engineStatus?.ytdlp },
+              { key: 'spotdl', label: 'spotDL', info: engineStatus?.spotdl },
+              { key: 'ffmpeg', label: 'FFmpeg', info: engineStatus?.ffmpeg },
+              { key: 'ffprobe', label: 'FFprobe', info: engineStatus?.ffprobe },
+            ].map(({ key, label, info }) => {
+              const st = info?.status || 'checking';
+              const badgeClass = info?.available
+                ? 'bg-[#238636]/15 text-[#3fb950]'
+                : st === 'checking'
+                ? 'bg-[#1f6feb]/15 text-[#58a6ff]'
+                : st === 'timed_out'
+                ? 'bg-[#d29922]/15 text-[#e3b341]'
+                : 'bg-[#da3633]/15 text-[#f85149]';
+              const versionText = info?.version
+                ? info.version
+                : st === 'checking'
+                ? 'Checking...'
+                : st === 'timed_out'
+                ? 'Version check timed out'
+                : 'Not installed';
+              const pathText = info?.path
+                ? info.path
+                : st === 'checking'
+                ? 'Scanning local paths...'
+                : 'Unavailable';
 
-            {/* spotDL */}
-            <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-white">spotDL</span>
-                <span
-                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                    engineStatus?.spotdl.available
-                      ? 'bg-[#238636]/15 text-[#3fb950]'
-                      : 'bg-[#da3633]/15 text-[#f85149]'
-                  }`}
-                >
-                  {engineStatus?.spotdl.status || 'unknown'}
-                </span>
-              </div>
-              <p className="text-[11px] font-mono text-[#8b949e] mt-1.5 truncate">
-                {engineStatus?.spotdl.version || 'Not installed'}
-              </p>
-              <p className="text-[10px] font-mono text-[#6e7681] truncate mt-0.5">
-                {engineStatus?.spotdl.path || 'Unavailable'}
-              </p>
-            </div>
-
-            {/* FFmpeg */}
-            <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-white">FFmpeg</span>
-                <span
-                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                    engineStatus?.ffmpeg.available
-                      ? 'bg-[#238636]/15 text-[#3fb950]'
-                      : 'bg-[#da3633]/15 text-[#f85149]'
-                  }`}
-                >
-                  {engineStatus?.ffmpeg.status || 'unknown'}
-                </span>
-              </div>
-              <p className="text-[11px] font-mono text-[#8b949e] mt-1.5 truncate">
-                {engineStatus?.ffmpeg.version || 'Not installed'}
-              </p>
-              <p className="text-[10px] font-mono text-[#6e7681] truncate mt-0.5">
-                {engineStatus?.ffmpeg.path || 'Unavailable'}
-              </p>
-            </div>
-
-            {/* FFprobe */}
-            <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-white">FFprobe</span>
-                <span
-                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                    engineStatus?.ffprobe.available
-                      ? 'bg-[#238636]/15 text-[#3fb950]'
-                      : 'bg-[#da3633]/15 text-[#f85149]'
-                  }`}
-                >
-                  {engineStatus?.ffprobe.status || 'unknown'}
-                </span>
-              </div>
-              <p className="text-[11px] font-mono text-[#8b949e] mt-1.5 truncate">
-                {engineStatus?.ffprobe.version || 'Not installed'}
-              </p>
-              <p className="text-[10px] font-mono text-[#6e7681] truncate mt-0.5">
-                {engineStatus?.ffprobe.path || 'Unavailable'}
-              </p>
-            </div>
+              return (
+                <div key={key} className="p-3 rounded-lg border border-[#21262d] bg-[#161b22]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-white">{label}</span>
+                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${badgeClass}`}>
+                      {st}
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-[#8b949e] mt-1.5 truncate">
+                    {versionText}
+                  </p>
+                  <p className="text-[10px] font-mono text-[#6e7681] truncate mt-0.5">
+                    {pathText}
+                  </p>
+                </div>
+              );
+            })}
           </div>
         </div>
 

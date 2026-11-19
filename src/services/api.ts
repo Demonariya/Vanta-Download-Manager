@@ -25,11 +25,12 @@ export class ApiService {
     return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   }
 
-  public async getEngineStatus(): Promise<EngineStatusMap> {
+  public async getEngineStatus(forceRefresh = false): Promise<EngineStatusMap> {
     if (this.isTauri()) {
-      return invoke<EngineStatusMap>('get_engine_status');
+      return invoke<EngineStatusMap>('get_engine_status', { forceRefresh });
     }
-    const res = await fetch('/api/engines/status');
+    const url = forceRefresh ? '/api/engines/status?force=1' : '/api/engines/status';
+    const res = await fetch(url);
     if (!res.ok) throw new Error('Failed to fetch engine status');
     return res.json();
   }
@@ -111,14 +112,70 @@ export class ApiService {
     return res.json();
   }
 
-  public async inspectUrl(url: string): Promise<MediaMetadata> {
-    if (this.isTauri()) {
-      return invoke<MediaMetadata>('inspect_url', { url });
+  public async cancelInspection(requestId: string): Promise<boolean> {
+    if (!requestId) return false;
+    try {
+      if (this.isTauri()) {
+        return await invoke<boolean>('cancel_inspection', { requestId });
+      }
+      const res = await fetch('/api/inspect/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => ({ cancelled: false }));
+      return Boolean(data?.cancelled);
+    } catch {
+      return false;
     }
+  }
+
+  public async inspectUrl(
+    url: string,
+    options?: { requestId?: string; signal?: AbortSignal }
+  ): Promise<MediaMetadata> {
+    const requestId =
+      options?.requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const signal = options?.signal;
+
+    if (signal?.aborted) {
+      throw new DOMException('Inspection cancelled.', 'AbortError');
+    }
+
+    if (this.isTauri()) {
+      return new Promise<MediaMetadata>((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          this.cancelInspection(requestId).catch(() => {});
+          reject(new DOMException('Inspection cancelled.', 'AbortError'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+
+        invoke<MediaMetadata>('inspect_url', { url, requestId })
+          .then((data) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            resolve(data);
+          })
+          .catch((err) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            const msg = typeof err === 'string' ? err : err?.message || 'Failed to inspect URL';
+            reject(new Error(msg));
+          });
+      });
+    }
+
     const res = await fetch('/api/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, requestId }),
+      signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Extraction failed' }));
@@ -145,7 +202,10 @@ export class ApiService {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(taskData),
     });
-    if (!res.ok) throw new Error('Failed to create download task');
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to create download task');
+    }
     return res.json();
   }
 
