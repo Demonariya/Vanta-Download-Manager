@@ -597,6 +597,11 @@ pub fn build_media_metadata_from_entity(
         .into_iter()
         .flatten()
         .collect();
+        let description = if desc_parts.is_empty() {
+            None
+        } else {
+            Some(desc_parts.join(" · "))
+        };
 
         return Ok(MediaMetadata {
             url: canonical_url.to_string(),
@@ -606,11 +611,7 @@ pub fn build_media_metadata_from_entity(
             duration: duration_sec,
             duration_string,
             thumbnail: artwork.clone(),
-            description: if desc_parts.is_empty() {
-                None
-            } else {
-                Some(desc_parts.join(" · "))
-            },
+            description,
             formats: Vec::new(),
             is_playlist: false,
             playlist_count: None,
@@ -729,6 +730,11 @@ pub fn build_media_metadata_from_entity(
             .into_iter()
             .flatten()
             .collect();
+            let description = if desc_parts.is_empty() {
+                None
+            } else {
+                Some(desc_parts.join(" · "))
+            };
 
             Ok(MediaMetadata {
                 url: canonical_url.to_string(),
@@ -738,11 +744,7 @@ pub fn build_media_metadata_from_entity(
                 duration: total_duration,
                 duration_string: total_duration.map(format_duration),
                 thumbnail: artwork.clone(),
-                description: if desc_parts.is_empty() {
-                    None
-                } else {
-                    Some(desc_parts.join(" · "))
-                },
+                description,
                 formats: Vec::new(),
                 is_playlist: true,
                 playlist_count: total_tracks,
@@ -997,6 +999,11 @@ pub fn build_media_metadata_from_web_api(
             .into_iter()
             .flatten()
             .collect();
+            let description = if desc_parts.is_empty() {
+                None
+            } else {
+                Some(desc_parts.join(" · "))
+            };
 
             Ok(MediaMetadata {
                 url: canonical_url.to_string(),
@@ -1006,11 +1013,7 @@ pub fn build_media_metadata_from_web_api(
                 duration,
                 duration_string: duration.map(format_duration),
                 thumbnail: artwork.clone(),
-                description: if desc_parts.is_empty() {
-                    None
-                } else {
-                    Some(desc_parts.join(" · "))
-                },
+                description,
                 formats: Vec::new(),
                 is_playlist: false,
                 playlist_count: None,

@@ -837,7 +837,7 @@ pub fn test_cookie_extraction(
                         extraction_succeeded: false,
                         auth_verified: Some(false),
                         record_count: status.record_count,
-                        message: e,
+                        message: e.to_string(),
                         next_action: Some("Check yt-dlp installation in Diagnostics.".to_string()),
                     },
                 }
@@ -1088,7 +1088,7 @@ pub fn test_cookie_extraction(
                     extraction_succeeded: false,
                     auth_verified: None,
                     record_count: 0,
-                    message: e,
+                    message: e.to_string(),
                     next_action: Some("Check yt-dlp health in Diagnostics.".to_string()),
                 },
             }
