@@ -117,12 +117,12 @@ VANTA builds **slim installers** by default (no 300+ MiB bundled engine binaries
 
 - **Windows 10 or Windows 11** (64-bit)
 - **PowerShell 7+** recommended (compatible with Windows PowerShell 5.1)
-- **Node.js 20+ (Node.js 24 LTS recommended)** and `npm` — [nodejs.org](https://nodejs.org/)
+- **Node.js >= 20.19.0** (Node.js 24 LTS recommended; Node 26.x supported) and `npm` — [nodejs.org](https://nodejs.org/)
 - **Rust Stable Toolchain** (`x86_64-pc-windows-msvc`) — [rustup.rs](https://rustup.rs/)
 - **Visual Studio 2022 Build Tools** with **Desktop development with C++** and the **Windows 10/11 SDK**
 - **Microsoft Edge WebView2 Runtime** (pre-installed on modern Windows 10/11)
 
-> For detailed developer setup, manual clean rebuilds, NSIS/MSI packaging internals, and CI workflow parity, see **[BUILDING.md](./BUILDING.md)**.
+> For detailed developer setup, lockfile repair, manual clean rebuilds, NSIS/MSI packaging internals, and CI workflow parity, see **[BUILDING.md](./BUILDING.md)**.
 
 ---
 
@@ -141,13 +141,13 @@ cd Vanta-Download-Manager
 .\build.ps1
 ```
 
-### Pre-flight Check (Fast Validation Without Building Installers)
+### Pre-flight Check (Read-Only Diagnostics Without Modifying Files)
 
 ```powershell
 .\build.ps1 -Check
 ```
 
-Validates Node.js/npm/Rust/Tauri toolchains, icons, capabilities, runs `npm run lint` (`tsc --noEmit`), `cargo check --features desktop`, and `npm run build`.
+Validates Node.js/npm/Rust/MSVC/Windows SDK/WebView2/Tauri toolchains, cross-platform `package-lock.json` entries via `npm ci --dry-run --include=optional`, icons, capabilities, TypeScript lint (`npm run lint`), and Cargo formatting/metadata without modifying project files.
 
 ---
 
@@ -159,10 +159,12 @@ Validates Node.js/npm/Rust/Tauri toolchains, icons, capabilities, runs `npm run 
 | `-Dev` | Switch | Off | Build debug Tauri binary/bundles (`tauri build --debug`) |
 | `-Clean` | Switch | Off | Remove `dist/`, staging folders, and run `cargo clean` before building |
 | `-Target` | String | `all` | Package target: `all`, `nsis`, `msi`, or `portable` |
-| `-SkipInstall` | Switch | Off | Skip `npm ci` when `node_modules/` and Tauri CLI are already present |
-| `-SkipTests` | Switch | Off | Skip `npm run lint` and `cargo test` for faster local iteration |
-| `-Check` | Switch | Off | Run environment, icon/config, typecheck, and `cargo check` diagnostics only |
+| `-SkipInstall` | Switch | Off | Skip `npm ci --include=optional` when `node_modules/` and Tauri CLI exist |
+| `-SkipTests` | Switch | Off | Skip `npm run lint`, `cargo fmt`, and `cargo test` for faster local iteration |
+| `-Check` | Switch | Off | Read-only environment, SDK, lockfile, icon, lint, and Cargo metadata checks |
+| `-RepairLockfile` | Switch | Off | Regenerate cross-platform `package-lock.json` and verify clean `npm ci --include=optional` |
 | `-RustTarget` | String | `x86_64-pc-windows-msvc` | Target Rust triple passed to `rustup` and `tauri build` |
+| `-CommandTimeoutSeconds` | Int | `1800` | Process timeout per external step before terminating its process tree |
 
 ### Common Examples
 
@@ -178,6 +180,9 @@ Validates Node.js/npm/Rust/Tauri toolchains, icons, capabilities, runs `npm run 
 
 # MSI package without running unit tests
 .\build.ps1 -Target msi -SkipTests
+
+# Explicitly regenerate package-lock.json with full OS/CPU optional dependencies
+.\build.ps1 -RepairLockfile
 ```
 
 ### Generated `dist/` Structure

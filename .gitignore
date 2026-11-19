@@ -5,6 +5,7 @@ build/
 coverage/
 
 # Rust & Tauri Build
+target/
 src-tauri/target/
 release_artifacts/
 portable_package/

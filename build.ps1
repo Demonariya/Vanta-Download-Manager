@@ -1,28 +1,28 @@
 <#
 .SYNOPSIS
-    Production Windows build and packaging pipeline for VANTA Download Manager.
+    Production Windows build, diagnostics, and lockfile-repair pipeline for VANTA Download Manager.
 
 .DESCRIPTION
-    Validates toolchain prerequisites, builds the Vite/React frontend, executes Rust
-    verification and tests, compiles the Tauri 2 desktop application, packages Windows
-    installers (NSIS / MSI) and portable archive, verifies artifact integrity, and
-    publishes final outputs plus build-report.txt and SHA256SUMS.txt into dist/.
+    Canonical Windows build entrypoint for VANTA Download Manager (Rust + Tauri 2 + React/Vite).
+    Supports read-only pre-flight verification (-Check), clean rebuilds (-Clean), release/debug
+    packaging (-Release / -Dev), targeted bundles (-Target all|nsis|msi|portable), and explicit
+    cross-platform lockfile repair (-RepairLockfile).
 
 .EXAMPLE
     .\build.ps1
-    Runs a full Release build targeting NSIS, MSI, and Portable ZIP into dist/.
-
-.EXAMPLE
-    .\build.ps1 -Clean -Release -Target all
-    Performs a clean production build of all release formats.
-
-.EXAMPLE
-    .\build.ps1 -Target nsis -SkipInstall
-    Builds only the NSIS installer using already-installed node_modules.
+    Runs a deterministic Release build producing NSIS, MSI, Portable ZIP, SHA256SUMS.txt, and build-report.txt in dist/.
 
 .EXAMPLE
     .\build.ps1 -Check
-    Runs pre-flight environment diagnostics, icon/config checks, frontend typecheck, and Cargo check.
+    Runs read-only environment, Visual Studio/SDK/WebView2, Rust target, lockfile, icon, and TypeScript checks.
+
+.EXAMPLE
+    .\build.ps1 -Clean -Release -Target all
+    Cleans generated build directories and Cargo target cache, then performs a full release build.
+
+.EXAMPLE
+    .\build.ps1 -RepairLockfile
+    Regenerates package-lock.json with full cross-platform optional dependencies and verifies clean npm ci --include=optional.
 #>
 [CmdletBinding()]
 param(
@@ -34,13 +34,14 @@ param(
     [string]$Target = 'all',
     [switch]$Check,
     [switch]$SkipTests,
-    [string]$RustTarget = 'x86_64-pc-windows-msvc'
+    [switch]$RepairLockfile,
+    [string]$RustTarget = 'x86_64-pc-windows-msvc',
+    [int]$CommandTimeoutSeconds = 1800
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Ensure UTF-8 console output cleanly on both PowerShell 5.1 and PowerShell 7+
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {
@@ -50,6 +51,8 @@ try {
 $script:TotalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:StepIndex = 0
 $script:TotalSteps = 7
+$script:RepoRoot = $null
+$script:DistDir = $null
 
 function Write-Stage {
     param(
@@ -78,16 +81,150 @@ function Write-Warn {
     Write-Host "  [WARN] $Message" -ForegroundColor Yellow
 }
 
+function Test-IsWindowsHost {
+    if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+        return [bool]$IsWindows
+    }
+    return ($env:OS -eq 'Windows_NT')
+}
+
+function Format-CommandArgument {
+    param([string]$Arg)
+    if ($null -eq $Arg) { return '""' }
+    if ($Arg -eq '') { return '""' }
+    if ($Arg -match '[\s"&|<>^()]') {
+        $escaped = $Arg -replace '(\\*)"', '$1$1\"'
+        $escaped = $escaped -replace '(\\+)$', '$1$1'
+        return '"' + $escaped + '"'
+    }
+    return $Arg
+}
+
+function Get-FailureDiagnosis {
+    param(
+        [string]$Stage,
+        [string]$Command,
+        [int]$ExitCode,
+        [string[]]$OutputLines
+    )
+
+    $joined = ($OutputLines -join "`n")
+
+    if ($joined -match 'EUSAGE' -or $joined -match 'package\.json and package-lock\.json are in sync' -or $joined -match 'Missing: .* from lock file') {
+        return "npm lockfile mismatch (EUSAGE): package-lock.json is out of sync or missing platform optional dependencies. Run '.\build.ps1 -RepairLockfile' locally and commit the updated package-lock.json. Do NOT switch to 'npm install' or '--omit=optional'."
+    }
+    if ($joined -match 'Cannot find native binding' -or $joined -match '@rolldown/binding' -or $joined -match '@tailwindcss/oxide' -or $joined -match 'lightningcss') {
+        return "Missing native frontend binding (Rolldown / Tailwind Oxide / LightningCSS). Run '.\build.ps1 -RepairLockfile' followed by a clean '.\build.ps1 -Clean'."
+    }
+    if ($joined -match 'EJSONPARSE' -or $joined -match 'Invalid package\.json') {
+        return "Invalid JSON syntax in package.json or package-lock.json. Validate both JSON files before retrying."
+    }
+    if ($joined -match 'ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|SELF_SIGNED_CERT|unable to get local issuer certificate|proxy') {
+        return "Network / DNS / TLS / proxy failure reaching registry or crates.io. Check internet connectivity, corporate proxy environment variables (HTTP_PROXY/HTTPS_PROXY), and retry."
+    }
+    if ($joined -match 'is not recognized as an internal or external command|Cannot find module .*vite|Cannot find module .*tauri') {
+        return "Missing Vite or Tauri CLI binary inside node_modules. Run a clean 'npm ci --include=optional' (or '.\build.ps1' without -SkipInstall)."
+    }
+    if ($joined -match 'error TS\d+:') {
+        return "TypeScript compilation error detected. Fix the reported TypeScript diagnostics in src/ or server/ before building."
+    }
+    if ($joined -match "can't find crate for|target may not be installed|target .* not found") {
+        return "Missing Rust target triple ('$RustTarget'). Install it via: rustup target add $RustTarget"
+    }
+    if ($joined -match 'linker `link\.exe` not found|LNK\d+|msvc.*not found') {
+        return "MSVC C++ linker failure (link.exe missing or broken). Install Visual Studio 2022 Build Tools with 'Desktop development with C++' and restart your shell."
+    }
+    if ($joined -match 'kernel32\.lib|windows\.h|rc\.exe|Windows SDK') {
+        return "Missing Windows 10/11 SDK components. Open Visual Studio Installer -> Modify -> enable Windows 10/11 SDK."
+    }
+    if ($joined -match 'error\[E\d+\]|aborting due to \d+ previous error') {
+        return "Rust compiler error in src-tauri/. Review the Rust diagnostics printed above."
+    }
+    if ($joined -match 'failed to select a version|no matching package|Cargo\.lock') {
+        return "Cargo dependency resolution failure. Check src-tauri/Cargo.toml, Cargo.lock, and crates.io network access."
+    }
+    if ($joined -match 'makensis|nsis|candle\.exe|light\.exe|wix') {
+        return "Tauri Windows installer bundler (NSIS/WiX) failed. Inspect bundled files, antivirus locks on target/, and Tauri bundle configuration."
+    }
+    if ($joined -match 'frontendDist|dist.*does not exist') {
+        return "Frontend distribution directory configured by Tauri (../dist) is missing. Ensure 'npm run build' succeeds before packaging."
+    }
+    if ($joined -match 'icon|capabilities|tauri\.conf\.json') {
+        return "Tauri configuration, capability, or icon validation failure. Check src-tauri/tauri.conf.json, capabilities/default.json, and src-tauri/icons/."
+    }
+    if ($ExitCode -eq 124) {
+        return "Command exceeded timeout ($CommandTimeoutSeconds s) and its process tree was terminated."
+    }
+
+    return "Review the captured output above and the saved failure log for exact diagnostics."
+}
+
 function Fail-Build {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Message
+        [string]$Message,
+        [string]$Stage = 'Pipeline',
+        [string]$Command = '',
+        [int]$ExitCode = 1,
+        [string[]]$CapturedLines = @(),
+        [string]$Suggestion = ''
     )
-    $script:TotalStopwatch.Stop()
+
+    if ($script:TotalStopwatch.IsRunning) {
+        $script:TotalStopwatch.Stop()
+    }
+
+    $logSavedPath = $null
+    if ($CapturedLines.Count -gt 0 -and $script:RepoRoot) {
+        try {
+            $logTarget = if ($script:DistDir -and (Test-Path $script:DistDir)) {
+                Join-Path $script:DistDir 'last-build-failure.log'
+            } else {
+                Join-Path $script:RepoRoot 'last-build-failure.log'
+            }
+            @(
+                "VANTA Build Failure Log"
+                "Timestamp : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC'))"
+                "Stage     : $Stage"
+                "Command   : $Command"
+                "ExitCode  : $ExitCode"
+                "Summary   : $Message"
+                "------------------------------------------------------------------------"
+            ) + $CapturedLines | Out-File -FilePath $logTarget -Encoding utf8
+            $logSavedPath = $logTarget
+        } catch {
+            $logSavedPath = $null
+        }
+    }
+
     Write-Host ""
     Write-Host "========================================================================" -ForegroundColor Red
-    Write-Host "  BUILD FAILED ($($script:TotalStopwatch.Elapsed.ToString('mm\:ss\.ff')))" -ForegroundColor Red
-    Write-Host "  Error: $Message" -ForegroundColor Red
+    Write-Host ("  BUILD FAILED ({0})" -f $script:TotalStopwatch.Elapsed.ToString('mm\:ss\.ff')) -ForegroundColor Red
+    Write-Host ("  Stage     : {0}" -f $Stage) -ForegroundColor Red
+    if ($Command) {
+        Write-Host ("  Command   : {0}" -f $Command) -ForegroundColor Red
+    }
+    Write-Host ("  Exit Code : {0}" -f $ExitCode) -ForegroundColor Red
+    Write-Host ("  Error     : {0}" -f $Message) -ForegroundColor Red
+
+    if ($CapturedLines.Count -gt 0) {
+        $tailCount = [Math]::Min(25, $CapturedLines.Count)
+        $tail = $CapturedLines[($CapturedLines.Count - $tailCount)..($CapturedLines.Count - 1)]
+        Write-Host ""
+        Write-Host "  Recent Output Lines:" -ForegroundColor DarkYellow
+        foreach ($line in $tail) {
+            Write-Host ("    {0}" -f $line) -ForegroundColor Gray
+        }
+    }
+
+    $diag = if ($Suggestion) { $Suggestion } else { Get-FailureDiagnosis -Stage $Stage -Command $Command -ExitCode $ExitCode -OutputLines $CapturedLines }
+    if ($diag) {
+        Write-Host ""
+        Write-Host ("  Diagnosis : {0}" -f $diag) -ForegroundColor Yellow
+    }
+    if ($logSavedPath) {
+        Write-Host ("  Log File  : {0}" -f $logSavedPath) -ForegroundColor DarkGray
+    }
     Write-Host "========================================================================" -ForegroundColor Red
     exit 1
 }
@@ -98,30 +235,161 @@ function Invoke-NativeStep {
         [string]$Description,
         [Parameter(Mandatory = $true)]
         [string]$Executable,
-        [string[]]$Arguments = @()
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = $CommandTimeoutSeconds,
+        [switch]$AllowFailure,
+        [switch]$Quiet
     )
 
-    $displayArgs = ($Arguments -join ' ').Trim()
-    $fullCmd = if ($displayArgs) { "$Executable $displayArgs" } else { $Executable }
-    Write-Info "Running: $fullCmd"
+    $resolvedCmd = Get-Command $Executable -ErrorAction SilentlyContinue
+    $exePath = if ($resolvedCmd) { $resolvedCmd.Source } else { $Executable }
 
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $Executable @Arguments
-    $exitCode = $LASTEXITCODE
-    $sw.Stop()
+    $formattedArgs = @()
+    foreach ($a in $Arguments) {
+        $formattedArgs += (Format-CommandArgument -Arg $a)
+    }
+    $argString = ($formattedArgs -join ' ').Trim()
+    $displayCmd = if ($argString) { "$Executable $argString" } else { $Executable }
 
-    if ($exitCode -ne 0) {
-        Fail-Build "$Description failed with exit code $exitCode.`n  Command: $fullCmd"
+    if (-not $Quiet) {
+        Write-Info "Running: $displayCmd"
     }
 
-    Write-Ok ("{0} completed in {1:N1}s" -f $Description, $sw.Elapsed.TotalSeconds)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.WorkingDirectory = if ($script:RepoRoot) { $script:RepoRoot } else { (Get-Location).Path }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    if ((Test-IsWindowsHost) -and ($exePath -match '\.(cmd|bat)$')) {
+        $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        $innerCmd = Format-CommandArgument -Arg $exePath
+        if ($argString) {
+            $psi.Arguments = "/d /s /c `"$innerCmd $argString`""
+        } else {
+            $psi.Arguments = "/d /s /c `"$innerCmd`""
+        }
+    } else {
+        $psi.FileName = $exePath
+        $psi.Arguments = $argString
+    }
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+
+    $captured = New-Object System.Collections.Generic.List[string]
+    $timedOut = $false
+    $exitCode = -1
+
+    try {
+        if (-not $proc.Start()) {
+            throw "Failed to launch process '$exePath'."
+        }
+
+        $outTask = $proc.StandardOutput.ReadLineAsync()
+        $errTask = $proc.StandardError.ReadLineAsync()
+        $outDone = $false
+        $errDone = $false
+        $timeoutMs = [Math]::Max(1, $TimeoutSeconds) * 1000
+
+        while (-not ($outDone -and $errDone -and $proc.HasExited)) {
+            $madeProgress = $false
+
+            if (-not $outDone -and $outTask.IsCompleted) {
+                $line = $outTask.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $outDone = $true
+                } else {
+                    $captured.Add($line)
+                    if (-not $Quiet) { Write-Host "    $line" }
+                    $outTask = $proc.StandardOutput.ReadLineAsync()
+                }
+                $madeProgress = $true
+            }
+
+            if (-not $errDone -and $errTask.IsCompleted) {
+                $line = $errTask.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $errDone = $true
+                } else {
+                    $captured.Add($line)
+                    if (-not $Quiet) { Write-Host "    $line" }
+                    $errTask = $proc.StandardError.ReadLineAsync()
+                }
+                $madeProgress = $true
+            }
+
+            if ($sw.ElapsedMilliseconds -ge $timeoutMs) {
+                $timedOut = $true
+                break
+            }
+
+            if (-not $madeProgress) {
+                $pending = New-Object System.Collections.Generic.List[System.Threading.Tasks.Task]
+                if (-not $outDone) { $pending.Add($outTask) }
+                if (-not $errDone) { $pending.Add($errTask) }
+                if ($pending.Count -gt 0) {
+                    [void][System.Threading.Tasks.Task]::WaitAny($pending.ToArray(), 150)
+                } else {
+                    [void]$proc.WaitForExit(150)
+                }
+            }
+        }
+
+        if ($timedOut) {
+            try {
+                if (Test-IsWindowsHost) {
+                    & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+                } else {
+                    $proc.Kill()
+                }
+            } catch {
+                try { $proc.Kill() } catch {}
+            }
+            $exitCode = 124
+        } else {
+            $proc.WaitForExit()
+            $exitCode = $proc.ExitCode
+        }
+    } finally {
+        $proc.Dispose()
+        $sw.Stop()
+    }
+
+    if ($exitCode -ne 0) {
+        if ($AllowFailure) {
+            return [PSCustomObject]@{
+                ExitCode = $exitCode
+                Lines    = $captured.ToArray()
+                Command  = $displayCmd
+                TimedOut = $timedOut
+            }
+        }
+        $errMsg = if ($timedOut) {
+            "$Description timed out after $TimeoutSeconds seconds."
+        } else {
+            "$Description failed with exit code $exitCode."
+        }
+        Fail-Build -Message $errMsg -Stage $Description -Command $displayCmd -ExitCode $exitCode -CapturedLines $captured.ToArray()
+    }
+
+    if (-not $Quiet) {
+        Write-Ok ("{0} completed in {1:N1}s" -f $Description, $sw.Elapsed.TotalSeconds)
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = 0
+        Lines    = $captured.ToArray()
+        Command  = $displayCmd
+        TimedOut = $false
+    }
 }
 
 function Resolve-RepoRoot {
     $candidates = @()
-    if ($PSScriptRoot) {
-        $candidates += $PSScriptRoot
-    }
+    if ($PSScriptRoot) { $candidates += $PSScriptRoot }
     $candidates += (Get-Location).Path
 
     foreach ($candidate in $candidates) {
@@ -134,14 +402,12 @@ function Resolve-RepoRoot {
                 return $dir
             }
             $parent = Split-Path -Path $dir -Parent
-            if (-not $parent -or $parent -eq $dir) {
-                break
-            }
+            if (-not $parent -or $parent -eq $dir) { break }
             $current = Resolve-Path -Path $parent -ErrorAction SilentlyContinue
         }
     }
 
-    Fail-Build "Could not locate repository root containing package.json and src-tauri/tauri.conf.json."
+    Fail-Build -Message "Could not locate repository root containing package.json and src-tauri/tauri.conf.json." -Stage 'Discovery'
 }
 
 function Get-ToolVersion {
@@ -150,25 +416,14 @@ function Get-ToolVersion {
         [string[]]$CommandArgs = @('--version')
     )
     $cmd = Get-Command $CommandName -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        return $null
-    }
+    if (-not $cmd) { return $null }
     try {
         $out = & $cmd.Source @CommandArgs 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            return $null
-        }
+        if ($LASTEXITCODE -ne 0) { return $null }
         return (($out | Out-String).Trim() -split "`r?`n")[0]
     } catch {
         return $null
     }
-}
-
-function Test-IsWindowsHost {
-    if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
-        return [bool]$IsWindows
-    }
-    return ($env:OS -eq 'Windows_NT')
 }
 
 function Resolve-NpmExecutable {
@@ -191,40 +446,203 @@ function Resolve-NpxExecutable {
     return $null
 }
 
-# Validate mutually exclusive build modes
+function Test-LockfileConsistency {
+    param(
+        [string]$LockfilePath
+    )
+
+    if (-not (Test-Path $LockfilePath)) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "Missing package-lock.json."
+            Missing = @('package-lock.json')
+        }
+    }
+
+    try {
+        $lock = Get-Content -Path $LockfilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json is not valid JSON: $_"
+            Missing = @('invalid-json')
+        }
+    }
+
+    if ([int]$lock.lockfileVersion -lt 3) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json uses lockfileVersion $($lock.lockfileVersion); expected lockfileVersion 3."
+            Missing = @('lockfileVersion-3')
+        }
+    }
+
+    $packagesProp = $lock.packages
+    if (-not $packagesProp) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json is missing the 'packages' dependency map."
+            Missing = @('packages')
+        }
+    }
+
+    $expectedKeys = @(
+        'node_modules/@tailwindcss/oxide-win32-x64-msvc',
+        'node_modules/@tailwindcss/oxide-win32-arm64-msvc',
+        'node_modules/@tailwindcss/oxide-darwin-arm64',
+        'node_modules/@tauri-apps/cli-win32-x64-msvc',
+        'node_modules/@tauri-apps/cli-win32-arm64-msvc',
+        'node_modules/@tauri-apps/cli-win32-ia32-msvc',
+        'node_modules/@rolldown/binding-win32-x64-msvc',
+        'node_modules/@rolldown/binding-win32-arm64-msvc',
+        'node_modules/@typescript/typescript-win32-x64',
+        'node_modules/lightningcss-win32-x64-msvc',
+        'node_modules/lightningcss-win32-arm64-msvc'
+    )
+
+    $missing = @()
+    foreach ($key in $expectedKeys) {
+        if (-not ($packagesProp.PSObject.Properties.Name -contains $key)) {
+            $missing += $key.Replace('node_modules/', '')
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json omits cross-platform optional dependencies: $($missing -join ', ')"
+            Missing = $missing
+        }
+    }
+
+    return [PSCustomObject]@{
+        Valid   = $true
+        Reason  = "Cross-platform optional dependency entries verified (lockfileVersion $($lock.lockfileVersion))."
+        Missing = @()
+    }
+}
+
+function Test-WindowsBuildPrerequisites {
+    param([switch]$StrictFail)
+
+    $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
+    if (-not $pf86) { $pf86 = [Environment]::GetFolderPath('ProgramFiles') }
+    $vsWhere = if ($pf86) { Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe' } else { '' }
+    $msvcFound = $false
+    $msvcDetail = 'Not detected'
+
+    if ($vsWhere -and (Test-Path $vsWhere)) {
+        $vsOut = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        $vsPath = ($vsOut | Out-String).Trim()
+        if ($vsPath) {
+            $msvcFound = $true
+            $msvcDetail = $vsPath
+        }
+    }
+    if (-not $msvcFound) {
+        $clCmd = Get-Command 'cl.exe' -ErrorAction SilentlyContinue
+        $linkCmd = Get-Command 'link.exe' -ErrorAction SilentlyContinue
+        if ($clCmd -or $linkCmd) {
+            $msvcFound = $true
+            $msvcDetail = if ($clCmd) { $clCmd.Source } else { $linkCmd.Source }
+        }
+    }
+
+    if ($msvcFound) {
+        Write-Ok "Visual Studio C++ Build Tools: $msvcDetail"
+    } elseif ($StrictFail) {
+        Fail-Build -Message "Visual Studio C++ Build Tools (MSVC x64) not found." -Stage 'Toolchain Validation' -Suggestion "Install Visual Studio 2022 Build Tools with 'Desktop development with C++'."
+    } else {
+        Write-Warn "Visual Studio C++ Build Tools not detected via vswhere/PATH."
+    }
+
+    $sdkFound = $false
+    $sdkDetail = 'Not detected'
+    $kitsKey = 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots'
+    if (Test-Path $kitsKey) {
+        try {
+            $kitsRoot = (Get-ItemProperty -Path $kitsKey -Name 'KitsRoot10' -ErrorAction SilentlyContinue).KitsRoot10
+            if ($kitsRoot -and (Test-Path (Join-Path $kitsRoot 'Include'))) {
+                $sdkDirs = @(Get-ChildItem -Path (Join-Path $kitsRoot 'Include') -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+                if ($sdkDirs.Count -gt 0) {
+                    $sdkFound = $true
+                    $sdkDetail = "$kitsRoot ($($sdkDirs[0].Name))"
+                }
+            }
+        } catch {}
+    }
+
+    if ($sdkFound) {
+        Write-Ok "Windows 10/11 SDK: $sdkDetail"
+    } elseif ($StrictFail) {
+        Fail-Build -Message "Windows 10/11 SDK headers/libraries not found." -Stage 'Toolchain Validation' -Suggestion "Install a Windows 10 or Windows 11 SDK component in Visual Studio Installer."
+    } else {
+        Write-Warn "Windows 10/11 SDK not detected in registry."
+    }
+
+    $wv2Found = $false
+    $wv2Version = ''
+    foreach ($regPath in @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )) {
+        if (Test-Path $regPath) {
+            try {
+                $pv = (Get-ItemProperty -Path $regPath -Name 'pv' -ErrorAction SilentlyContinue).pv
+                if ($pv) {
+                    $wv2Found = $true
+                    $wv2Version = $pv
+                    break
+                }
+            } catch {}
+        }
+    }
+
+    if ($wv2Found) {
+        Write-Ok "WebView2 Runtime: v$wv2Version"
+    } else {
+        Write-Warn "WebView2 Runtime registry key not detected (required when running the desktop app on Windows)."
+    }
+}
+
+# Validate parameter combinations
 if ($Release -and $Dev) {
-    Fail-Build "Invalid parameters: -Release and -Dev cannot be combined."
+    Fail-Build -Message "Invalid parameters: -Release and -Dev cannot be combined." -Stage 'Arguments'
+}
+if ($RepairLockfile -and $SkipInstall) {
+    Fail-Build -Message "Invalid parameters: -RepairLockfile cannot be combined with -SkipInstall." -Stage 'Arguments'
 }
 
-$isReleaseBuild = -not $Dev.IsPresent
-if ($Release.IsPresent) {
-    $isReleaseBuild = $true
-}
-$buildModeLabel = if ($isReleaseBuild) { 'Release' } else { 'Debug' }
-
-$repoRoot = Resolve-RepoRoot
-Set-Location $repoRoot
+$script:RepoRoot = Resolve-RepoRoot
+Set-Location $script:RepoRoot
+$script:DistDir = Join-Path $script:RepoRoot 'dist'
 
 $isWindowsHost = Test-IsWindowsHost
 $npmExe = Resolve-NpmExecutable
 $npxExe = Resolve-NpxExecutable
-$tauriConfPath = Join-Path $repoRoot 'src-tauri/tauri.conf.json'
-$cargoTomlPath = Join-Path $repoRoot 'src-tauri/Cargo.toml'
-$packageJsonPath = Join-Path $repoRoot 'package.json'
-$distDir = Join-Path $repoRoot 'dist'
+$tauriConfPath = Join-Path $script:RepoRoot 'src-tauri/tauri.conf.json'
+$cargoTomlPath = Join-Path $script:RepoRoot 'src-tauri/Cargo.toml'
+$packageJsonPath = Join-Path $script:RepoRoot 'package.json'
+$lockfilePath = Join-Path $script:RepoRoot 'package-lock.json'
 
 try {
     $tauriConf = Get-Content -Path $tauriConfPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $packageJson = Get-Content -Path $packageJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
 } catch {
-    Fail-Build "Failed parsing project manifests (package.json or src-tauri/tauri.conf.json): $_"
+    Fail-Build -Message "Failed parsing project manifests (package.json or src-tauri/tauri.conf.json): $_" -Stage 'Manifest Parsing'
 }
 
 $productName = if ($tauriConf.productName) { [string]$tauriConf.productName } else { 'VANTA Download Manager' }
 $appVersion = if ($tauriConf.version) { [string]$tauriConf.version } elseif ($packageJson.version) { [string]$packageJson.version } else { '1.0.0' }
+$isReleaseBuild = -not $Dev.IsPresent
+if ($Release.IsPresent) { $isReleaseBuild = $true }
+$buildModeLabel = if ($RepairLockfile) { 'RepairLockfile' } elseif ($Check) { 'Check (Read-Only)' } elseif ($isReleaseBuild) { 'Release' } else { 'Debug' }
 $cargoProfile = if ($isReleaseBuild) { 'release' } else { 'debug' }
 
-if ($Check) {
+if ($RepairLockfile) {
+    $script:TotalSteps = 4
+} elseif ($Check) {
     $script:TotalSteps = 4
 }
 
@@ -232,36 +650,120 @@ Write-Host ""
 Write-Host "========================================================================" -ForegroundColor White
 Write-Host ("  {0} v{1} — Windows Build Pipeline" -f $productName, $appVersion) -ForegroundColor White
 Write-Host ("  Mode: {0} | Target: {1} | Rust Triple: {2}" -f $buildModeLabel, $Target, $RustTarget) -ForegroundColor Gray
-Write-Host ("  Root: {0}" -f $repoRoot) -ForegroundColor Gray
+Write-Host ("  Root: {0}" -f $script:RepoRoot) -ForegroundColor Gray
 Write-Host "========================================================================" -ForegroundColor White
 
 # ------------------------------------------------------------------------------
-# Step 1: Validate Toolchains, Icons, Capabilities & Resources
+# RepairLockfile Mode (Explicit Only — Never Run Implicitly During Normal Builds)
 # ------------------------------------------------------------------------------
-Write-Stage "Validating toolchains and project resources"
+if ($RepairLockfile) {
+    Write-Stage "Checking Node.js and npm toolchain for lockfile repair"
+    $nodeVer = Get-ToolVersion -CommandName 'node'
+    if (-not $nodeVer -or -not $npmExe) {
+        Fail-Build -Message "Node.js and npm are required to repair package-lock.json." -Stage 'Lockfile Repair'
+    }
+    $npmVer = (& $npmExe --version 2>&1 | Out-String).Trim()
+    Write-Ok "Node.js $nodeVer | npm $npmVer"
+
+    Write-Stage "Inspecting package.json, lockfiles, and npm configuration"
+    foreach ($ambiguousLock in @('bun.lock', 'bun.lockb', 'yarn.lock', 'pnpm-lock.yaml', 'npm-shrinkwrap.json')) {
+        $ambPath = Join-Path $script:RepoRoot $ambiguousLock
+        if (Test-Path $ambPath) {
+            Write-Warn "Found extraneous lockfile '$ambiguousLock' alongside package-lock.json."
+        }
+    }
+
+    $beforeHash = if (Test-Path $lockfilePath) { (Get-FileHash -Algorithm SHA256 -Path $lockfilePath).Hash } else { 'NONE' }
+    $lockAuditBefore = Test-LockfileConsistency -LockfilePath $lockfilePath
+    Write-Info "Pre-repair lockfile status: $($lockAuditBefore.Reason)"
+
+    $backupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vanta-lock-backup-{0}.json" -f [guid]::NewGuid().ToString('N'))
+    $hadLockfile = Test-Path $lockfilePath
+    if ($hadLockfile) {
+        Copy-Item -Path $lockfilePath -Destination $backupPath -Force
+    }
+
+    Write-Stage "Regenerating package-lock.json with full cross-platform optional dependencies"
+    $nodeModulesPath = Join-Path $script:RepoRoot 'node_modules'
+    try {
+        if (Test-Path $nodeModulesPath) {
+            Write-Info "Removing node_modules/ so npm Arborist resolves all OS/CPU optional dependencies cleanly..."
+            Remove-Item -Path $nodeModulesPath -Recurse -Force
+        }
+        if (Test-Path $lockfilePath) {
+            Remove-Item -Path $lockfilePath -Force
+        }
+
+        Invoke-NativeStep -Description "Regenerate cross-platform package-lock.json" -Executable $npmExe -Arguments @('install', '--package-lock-only', '--ignore-scripts', '--include=optional')
+
+        $lockAuditAfter = Test-LockfileConsistency -LockfilePath $lockfilePath
+        if (-not $lockAuditAfter.Valid) {
+            throw "Regenerated lockfile failed validation: $($lockAuditAfter.Reason)"
+        }
+        Write-Ok $lockAuditAfter.Reason
+    } catch {
+        if ($hadLockfile -and (Test-Path $backupPath)) {
+            Copy-Item -Path $backupPath -Destination $lockfilePath -Force
+            Write-Warn "Restored original package-lock.json after repair failure."
+        }
+        Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+        Fail-Build -Message "$_" -Stage 'Lockfile Repair'
+    }
+    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+
+    Write-Stage "Verifying clean installation via npm ci --include=optional"
+    if (Test-Path $nodeModulesPath) {
+        Remove-Item -Path $nodeModulesPath -Recurse -Force
+    }
+    Invoke-NativeStep -Description "Verify clean npm ci --include=optional" -Executable $npmExe -Arguments @('ci', '--include=optional')
+    Invoke-NativeStep -Description "Verify dependency tree (npm ls --depth=0)" -Executable $npmExe -Arguments @('ls', '--depth=0')
+    Invoke-NativeStep -Description "Verify TypeScript check (npm run lint)" -Executable $npmExe -Arguments @('run', 'lint')
+    Invoke-NativeStep -Description "Verify Vite production build (npm run build)" -Executable $npmExe -Arguments @('run', 'build')
+
+    $afterHash = (Get-FileHash -Algorithm SHA256 -Path $lockfilePath).Hash
+    Write-Host ""
+    Write-Ok "package-lock.json SHA256 before: $beforeHash"
+    Write-Ok "package-lock.json SHA256 after : $afterHash"
+
+    $gitCmd = Get-Command 'git' -ErrorAction SilentlyContinue
+    if ($gitCmd -and (Test-Path (Join-Path $script:RepoRoot '.git'))) {
+        Write-Info "Git status after lockfile repair:"
+        & $gitCmd.Source status --short
+    }
+
+    $script:TotalStopwatch.Stop()
+    Write-Host ""
+    Write-Host "========================================================================" -ForegroundColor Green
+    Write-Host ("  LOCKFILE REPAIR & CLEAN VERIFICATION SUCCEEDED in {0:N1}s" -f $script:TotalStopwatch.Elapsed.TotalSeconds) -ForegroundColor Green
+    Write-Host "========================================================================" -ForegroundColor Green
+    exit 0
+}
+
+# ------------------------------------------------------------------------------
+# Step 1: Validate Toolchains, Windows SDK, Lockfile & Project Resources
+# ------------------------------------------------------------------------------
+Write-Stage "Validating toolchains, Windows SDK, lockfile, and resources"
 
 $nodeVer = Get-ToolVersion -CommandName 'node'
 if (-not $nodeVer -or -not $npmExe -or -not $npxExe) {
-    Fail-Build "Node.js / npm is required but not found on PATH. Install Node.js 20+ (24 LTS recommended) from https://nodejs.org/."
+    Fail-Build -Message "Node.js / npm is required but not found on PATH." -Stage 'Toolchain Validation' -Suggestion "Install Node.js 20.19+ (Node 24 LTS recommended) from https://nodejs.org/."
 }
-$npmVer = & $npmExe --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Fail-Build "Unable to query npm version."
-}
+$npmVer = (& $npmExe --version 2>&1 | Out-String).Trim()
 Write-Ok "Node.js $nodeVer | npm $npmVer"
 
-$nodeMajorMatch = [regex]::Match($nodeVer, 'v?(\d+)\.')
-if ($nodeMajorMatch.Success) {
-    $nodeMajor = [int]$nodeMajorMatch.Groups[1].Value
-    if ($nodeMajor -lt 20) {
-        Fail-Build "Node.js $nodeVer is too old. Node.js 20+ (24 LTS recommended) is required."
+$nodeMatch = [regex]::Match($nodeVer, 'v?(\d+)\.(\d+)\.')
+if ($nodeMatch.Success) {
+    $nodeMajor = [int]$nodeMatch.Groups[1].Value
+    $nodeMinor = [int]$nodeMatch.Groups[2].Value
+    if (($nodeMajor -lt 20) -or ($nodeMajor -eq 20 -and $nodeMinor -lt 19)) {
+        Fail-Build -Message "Node.js $nodeVer is below minimum required version 20.19.0." -Stage 'Toolchain Validation' -Suggestion "Upgrade to Node.js 24 LTS or >= 20.19.0."
     }
 }
 
 $rustcVer = Get-ToolVersion -CommandName 'rustc'
 $cargoVer = Get-ToolVersion -CommandName 'cargo'
 if (-not $rustcVer -or -not $cargoVer) {
-    Fail-Build "Rust / Cargo toolchain was not found on PATH. Install Rust via https://rustup.rs/."
+    Fail-Build -Message "Rust / Cargo toolchain was not found on PATH." -Stage 'Toolchain Validation' -Suggestion "Install Rust via https://rustup.rs/."
 }
 Write-Ok "$rustcVer"
 Write-Ok "$cargoVer"
@@ -270,148 +772,184 @@ $rustupCmd = Get-Command 'rustup' -ErrorAction SilentlyContinue
 if ($rustupCmd) {
     $installedTargets = (& $rustupCmd.Source target list --installed 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) {
-        if ($isWindowsHost -and ($installedTargets -notmatch [regex]::Escape($RustTarget))) {
-            Write-Warn "Rust target '$RustTarget' is not installed. Installing via rustup..."
-            Invoke-NativeStep -Description "Install Rust target $RustTarget" -Executable $rustupCmd.Source -Arguments @('target', 'add', $RustTarget)
+        if ($installedTargets -notmatch [regex]::Escape($RustTarget)) {
+            if ($Check) {
+                Fail-Build -Message "Required Rust target '$RustTarget' is not installed." -Stage 'Toolchain Validation' -Suggestion "Run: rustup target add $RustTarget"
+            } elseif ($isWindowsHost) {
+                Write-Warn "Rust target '$RustTarget' is not installed. Adding via rustup..."
+                Invoke-NativeStep -Description "Install Rust target $RustTarget" -Executable $rustupCmd.Source -Arguments @('target', 'add', $RustTarget)
+            } else {
+                Write-Warn "Rust target '$RustTarget' is not installed locally (non-Windows host)."
+            }
         } else {
-            Write-Ok "Rust target list verified (expected: $RustTarget)"
+            Write-Ok "Rust target installed: $RustTarget"
         }
     }
 } else {
-    Write-Warn "rustup not found on PATH; skipping target triple verification."
+    Write-Warn "rustup not found on PATH; cannot verify installed target triples."
 }
 
-# Verify Tauri configuration, icons, capabilities, and binaries
-$capPath = Join-Path $repoRoot 'src-tauri/capabilities/default.json'
-if (-not (Test-Path $capPath)) {
-    Fail-Build "Missing required Tauri capability file: src-tauri/capabilities/default.json"
+if ($isWindowsHost) {
+    Test-WindowsBuildPrerequisites -StrictFail:(-not $Check)
+} else {
+    Write-Warn "Non-Windows host detected; skipping MSVC/Windows SDK/WebView2 registry checks."
 }
-Write-Ok "Tauri capabilities present: src-tauri/capabilities/default.json"
+
+# Lockfile integrity check (never mutates package-lock.json)
+foreach ($dupLock in @('bun.lock', 'bun.lockb', 'yarn.lock', 'pnpm-lock.yaml')) {
+    if (Test-Path (Join-Path $script:RepoRoot $dupLock)) {
+        Fail-Build -Message "Ambiguous duplicate lockfile detected: $dupLock" -Stage 'Lockfile Validation' -Suggestion "Remove $dupLock so package-lock.json is the sole package-manager lockfile."
+    }
+}
+
+$lockCheck = Test-LockfileConsistency -LockfilePath $lockfilePath
+if (-not $lockCheck.Valid) {
+    Fail-Build -Message $lockCheck.Reason -Stage 'Lockfile Validation' -Suggestion "Run '.\build.ps1 -RepairLockfile' to regenerate package-lock.json with full cross-platform optional dependencies."
+}
+Write-Ok $lockCheck.Reason
+
+# Tauri capability, icons, and public assets
+$capPath = Join-Path $script:RepoRoot 'src-tauri/capabilities/default.json'
+if (-not (Test-Path $capPath)) {
+    Fail-Build -Message "Missing Tauri capability file: src-tauri/capabilities/default.json" -Stage 'Asset Validation'
+}
+try {
+    Get-Content -Path $capPath -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null
+} catch {
+    Fail-Build -Message "Invalid JSON in src-tauri/capabilities/default.json: $_" -Stage 'Asset Validation'
+}
+Write-Ok "Tauri capabilities validated: src-tauri/capabilities/default.json"
 
 if ($tauriConf.bundle -and $tauriConf.bundle.icon) {
     foreach ($iconRel in $tauriConf.bundle.icon) {
-        $iconFull = Join-Path $repoRoot (Join-Path 'src-tauri' $iconRel)
+        $iconFull = Join-Path $script:RepoRoot (Join-Path 'src-tauri' $iconRel)
         if (-not (Test-Path $iconFull)) {
-            Fail-Build "Missing configured Tauri bundle icon '$iconRel' (expected at $iconFull)."
+            Fail-Build -Message "Missing configured Tauri bundle icon '$iconRel' at $iconFull." -Stage 'Asset Validation'
         }
     }
-    Write-Ok ("Verified {0} configured icon assets in src-tauri/icons" -f @($tauriConf.bundle.icon).Count)
+    Write-Ok ("Verified {0} configured bundle icon(s) in src-tauri/icons" -f @($tauriConf.bundle.icon).Count)
 }
 
-$publicFavicon = Join-Path $repoRoot 'public/favicon.ico'
-$publicIcon = Join-Path $repoRoot 'public/icon.png'
-if (-not (Test-Path $publicFavicon) -or -not (Test-Path $publicIcon)) {
-    Fail-Build "Missing required web icon assets in public/ (favicon.ico or icon.png)."
+if (-not (Test-Path (Join-Path $script:RepoRoot 'public/favicon.ico')) -or -not (Test-Path (Join-Path $script:RepoRoot 'public/icon.png'))) {
+    Fail-Build -Message "Missing required web icon assets in public/ (favicon.ico or icon.png)." -Stage 'Asset Validation'
 }
-Write-Ok "Frontend public/ icons verified"
+Write-Ok "Frontend public/ icon assets verified"
 
-$tauriBinDir = Join-Path $repoRoot 'src-tauri/bin'
+$tauriBinDir = Join-Path $script:RepoRoot 'src-tauri/bin'
 if (Test-Path $tauriBinDir) {
     $bundledBins = @(Get-ChildItem -Path $tauriBinDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '.gitkeep' })
     if ($bundledBins.Count -gt 0) {
-        Write-Ok ("Found {0} side-by-side engine binary(ies) in src-tauri/bin" -f $bundledBins.Count)
+        Write-Ok ("Found {0} side-by-side binary(ies) in src-tauri/bin" -f $bundledBins.Count)
     } else {
-        Write-Info "Slim installer mode: external engines download and SHA-256 verify to %LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin on first run."
+        Write-Info "Slim installer mode: external engines download and SHA-256 verify on first launch."
     }
 }
 
 if (-not $isWindowsHost -and -not $Check) {
-    Fail-Build "Building native Windows installers (.exe / .msi) requires a Windows host (or run '.\build.ps1 -Check' for diagnostics)."
+    Fail-Build -Message "Building Windows installers (.exe / .msi) requires a Windows host (use -Check for pre-flight validation)." -Stage 'Host Check'
 }
 
 # ------------------------------------------------------------------------------
-# Step 2: Optional Clean
+# Check Mode Remaining Read-Only Steps (No compilation or workspace mutation)
+# ------------------------------------------------------------------------------
+if ($Check) {
+    Write-Stage "Checking npm lockfile synchronization (dry-run)"
+    Invoke-NativeStep -Description "Dry-run npm ci --include=optional" -Executable $npmExe -Arguments @('ci', '--dry-run', '--include=optional')
+
+    Write-Stage "Checking frontend TypeScript & CLI readiness"
+    if (Test-Path (Join-Path $script:RepoRoot 'node_modules')) {
+        Invoke-NativeStep -Description "TypeScript check (npm run lint)" -Executable $npmExe -Arguments @('run', 'lint')
+        $tauriCheck = Invoke-NativeStep -Description "Query Tauri CLI version" -Executable $npxExe -Arguments @('tauri', '--version') -Quiet
+        Write-Ok ("Tauri CLI: {0}" -f (($tauriCheck.Lines -join ' ').Trim()))
+    } else {
+        Write-Warn "node_modules/ is not currently installed; run 'npm ci --include=optional' to populate local workspace dependencies."
+    }
+
+    Write-Stage "Checking Rust crate formatting and manifest"
+    $fmtCheck = Invoke-NativeStep -Description "Cargo format check" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--check') -AllowFailure -Quiet
+    if ($fmtCheck.ExitCode -eq 0) {
+        Write-Ok "cargo fmt --check passed"
+    } else {
+        Write-Warn "cargo fmt --check reported formatting differences or rustfmt is unavailable."
+    }
+    Invoke-NativeStep -Description "Verify Cargo dependency metadata" -Executable 'cargo' -Arguments @('metadata', '--manifest-path', $cargoTomlPath, '--no-deps', '--format-version', '1') -Quiet
+    Write-Ok "Cargo.toml metadata validated"
+
+    $script:TotalStopwatch.Stop()
+    Write-Host ""
+    Write-Host "========================================================================" -ForegroundColor Green
+    Write-Host ("  PRE-FLIGHT CHECK PASSED (READ-ONLY) in {0:N1}s" -f $script:TotalStopwatch.Elapsed.TotalSeconds) -ForegroundColor Green
+    Write-Host "========================================================================" -ForegroundColor Green
+    exit 0
+}
+
+# ------------------------------------------------------------------------------
+# Step 2: Optional Clean (Preserves source, lockfiles, icons & user data)
 # ------------------------------------------------------------------------------
 if ($Clean) {
-    Write-Stage "Cleaning build outputs and Cargo cache"
+    Write-Stage "Cleaning generated build outputs and Cargo cache"
     foreach ($dirToClean in @('dist', 'release_artifacts', 'portable_package')) {
-        $fullCleanPath = Join-Path $repoRoot $dirToClean
+        $fullCleanPath = Join-Path $script:RepoRoot $dirToClean
         if (Test-Path $fullCleanPath) {
             Write-Info "Removing $dirToClean/"
             Remove-Item -Path $fullCleanPath -Recurse -Force
         }
     }
     Invoke-NativeStep -Description "Cargo clean" -Executable 'cargo' -Arguments @('clean', '--manifest-path', $cargoTomlPath)
-} elseif (-not $Check) {
-    Write-Stage "Preparing output staging directory"
-    Write-Info "Incremental build mode (pass -Clean for a full rebuild)"
+} else {
+    Write-Stage "Preparing incremental build workspace"
+    Write-Info "Incremental build mode (pass -Clean to purge dist/ and Cargo target cache)"
 }
 
 # ------------------------------------------------------------------------------
-# Step 3: Install Frontend Dependencies
+# Step 3: Deterministic Dependency Installation
 # ------------------------------------------------------------------------------
-Write-Stage "Checking frontend dependencies"
+Write-Stage "Installing dependencies deterministically (npm ci --include=optional)"
 
-$nodeModulesPath = Join-Path $repoRoot 'node_modules'
-$lockfilePath = Join-Path $repoRoot 'package-lock.json'
+$nodeModulesPath = Join-Path $script:RepoRoot 'node_modules'
 $tauriCliBin = if ($isWindowsHost) {
-    Join-Path $repoRoot 'node_modules/.bin/tauri.cmd'
+    Join-Path $script:RepoRoot 'node_modules/.bin/tauri.cmd'
 } else {
-    Join-Path $repoRoot 'node_modules/.bin/tauri'
+    Join-Path $script:RepoRoot 'node_modules/.bin/tauri'
 }
 
 if ($SkipInstall) {
     if (-not (Test-Path $nodeModulesPath) -or -not (Test-Path $tauriCliBin)) {
-        Fail-Build "-SkipInstall was specified, but node_modules or Tauri CLI is missing. Run without -SkipInstall."
+        Fail-Build -Message "-SkipInstall was requested, but node_modules or Tauri CLI is missing." -Stage 'Dependency Installation' -Suggestion "Re-run without -SkipInstall."
     }
-    Write-Ok "Skipping dependency installation (-SkipInstall)"
+    Write-Ok "Using existing node_modules (-SkipInstall)"
 } else {
-    if (Test-Path $lockfilePath) {
-        Invoke-NativeStep -Description "Install npm dependencies (npm ci)" -Executable $npmExe -Arguments @('ci', '--include=optional')
-    } else {
-        Invoke-NativeStep -Description "Install npm dependencies (npm install)" -Executable $npmExe -Arguments @('install')
-    }
-
-    if ($isWindowsHost) {
-        $rolldownWin = Join-Path $repoRoot 'node_modules/@rolldown/binding-win32-x64-msvc'
-        if (-not (Test-Path $rolldownWin)) {
-            Write-Info "Installing @rolldown/binding-win32-x64-msvc (--no-save)..."
-            Invoke-NativeStep -Description "Install Windows native Rolldown binding" -Executable $npmExe -Arguments @('install', '--no-save', '@rolldown/binding-win32-x64-msvc')
-        }
-    }
+    Invoke-NativeStep -Description "Clean npm dependency install (npm ci --include=optional)" -Executable $npmExe -Arguments @('ci', '--include=optional')
+    Invoke-NativeStep -Description "Verify dependency tree (npm ls --depth=0)" -Executable $npmExe -Arguments @('ls', '--depth=0')
 }
 
-$tauriVerOut = & $npxExe tauri --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Fail-Build "Tauri CLI (@tauri-apps/cli) is not runnable via npx tauri."
-}
-Write-Ok ("Tauri CLI: {0}" -f (($tauriVerOut | Out-String).Trim()))
+$tauriVerRes = Invoke-NativeStep -Description "Verify Tauri CLI" -Executable $npxExe -Arguments @('tauri', '--version') -Quiet
+Write-Ok ("Tauri CLI: {0}" -f (($tauriVerRes.Lines -join ' ').Trim()))
 
 # ------------------------------------------------------------------------------
-# Step 4: Frontend Typecheck & Production Build (and Cargo check if -Check)
+# Step 4: Frontend TypeScript Verification
 # ------------------------------------------------------------------------------
-Write-Stage "Validating frontend and Rust crates"
-
-if (-not $SkipTests -or $Check) {
+Write-Stage "Validating frontend TypeScript sources"
+if (-not $SkipTests) {
     Invoke-NativeStep -Description "TypeScript typecheck (npm run lint)" -Executable $npmExe -Arguments @('run', 'lint')
 } else {
-    Write-Warn "Skipping TypeScript check (-SkipTests)"
-}
-
-if ($Check) {
-    $cargoCheckArgs = @('check', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
-    if ($isWindowsHost) {
-        $cargoCheckArgs += @('--target', $RustTarget)
-    }
-    Invoke-NativeStep -Description "Rust crate verification (cargo check)" -Executable 'cargo' -Arguments $cargoCheckArgs
-    Invoke-NativeStep -Description "Frontend Vite production check (npm run build)" -Executable $npmExe -Arguments @('run', 'build')
-
-    $script:TotalStopwatch.Stop()
-    Write-Host ""
-    Write-Host "========================================================================" -ForegroundColor Green
-    Write-Host ("  DIAGNOSTIC CHECK PASSED in {0:N1}s" -f $script:TotalStopwatch.Elapsed.TotalSeconds) -ForegroundColor Green
-    Write-Host "========================================================================" -ForegroundColor Green
-    exit 0
+    Write-Warn "Skipping TypeScript lint check (-SkipTests)"
 }
 
 # ------------------------------------------------------------------------------
-# Step 5: Rust Backend Unit Tests
+# Step 5: Rust Backend Formatting & Unit Tests
 # ------------------------------------------------------------------------------
-Write-Stage "Running Rust backend tests"
+Write-Stage "Running Rust checks and unit tests"
 if ($SkipTests) {
-    Write-Warn "Skipping Rust unit tests (-SkipTests)"
+    Write-Warn "Skipping Rust tests (-SkipTests)"
 } else {
-    Invoke-NativeStep -Description "Rust unit tests" -Executable 'cargo' -Arguments @('test', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
+    $fmtRes = Invoke-NativeStep -Description "Cargo formatting check" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--check') -AllowFailure -Quiet
+    if ($fmtRes.ExitCode -ne 0) {
+        Write-Warn "cargo fmt --check reported formatting differences (non-blocking)."
+    } else {
+        Write-Ok "cargo fmt --check passed"
+    }
+    Invoke-NativeStep -Description "Rust unit tests (cargo test)" -Executable 'cargo' -Arguments @('test', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
 }
 
 # ------------------------------------------------------------------------------
@@ -419,10 +957,10 @@ if ($SkipTests) {
 # ------------------------------------------------------------------------------
 Write-Stage "Building Tauri desktop application ($buildModeLabel / $Target)"
 
-# Remove any prior packaged installers inside dist/ before Vite writes frontendDist
-if (Test-Path $distDir) {
-    Get-ChildItem -Path $distDir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @('.exe', '.msi', '.zip') -or $_.Name -in @('SHA256SUMS.txt', 'build-report.txt') } |
+# Remove any prior release deliverables in dist/ before Vite generates ../dist for Tauri embedding
+if (Test-Path $script:DistDir) {
+    Get-ChildItem -Path $script:DistDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @('.exe', '.msi', '.zip') -or $_.Name -in @('SHA256SUMS.txt', 'build-report.txt', 'last-build-failure.log') } |
         Remove-Item -Force
 }
 
@@ -432,23 +970,23 @@ if (-not $isReleaseBuild) {
 }
 
 switch ($Target) {
-    'nsis' { $tauriBuildArgs += @('--bundles', 'nsis') }
-    'msi'  { $tauriBuildArgs += @('--bundles', 'msi') }
+    'nsis'     { $tauriBuildArgs += @('--bundles', 'nsis') }
+    'msi'      { $tauriBuildArgs += @('--bundles', 'msi') }
     'portable' { $tauriBuildArgs += '--no-bundle' }
-    'all'  { $tauriBuildArgs += @('--bundles', 'nsis,msi') }
+    'all'      { $tauriBuildArgs += @('--bundles', 'nsis,msi') }
 }
 
 Invoke-NativeStep -Description "Tauri desktop build" -Executable $npxExe -Arguments $tauriBuildArgs
 
 # ------------------------------------------------------------------------------
-# Step 7: Collect Verified Artifacts, Checksums & Build Report into dist/
+# Step 7: Stage & Verify Final Artifacts, Checksums & Build Report in dist/
 # ------------------------------------------------------------------------------
-Write-Stage "Collecting release artifacts and generating build report"
+Write-Stage "Verifying generated artifacts and creating build report"
 
-$targetOutDir = Join-Path $repoRoot ("src-tauri/target/{0}/{1}" -f $RustTarget, $cargoProfile)
+$targetOutDir = Join-Path $script:RepoRoot ("src-tauri/target/{0}/{1}" -f $RustTarget, $cargoProfile)
 $mainExePath = Join-Path $targetOutDir 'vanta.exe'
 if (-not (Test-Path $mainExePath) -or ((Get-Item $mainExePath).Length -eq 0)) {
-    Fail-Build "Missing or empty compiled desktop binary at $mainExePath"
+    Fail-Build -Message "Missing or empty compiled desktop binary at $mainExePath" -Stage 'Artifact Verification'
 }
 
 $expectedNsis = ($Target -eq 'all' -or $Target -eq 'nsis')
@@ -460,7 +998,7 @@ if ($expectedNsis) {
     $nsisDir = Join-Path $targetOutDir 'bundle/nsis'
     $nsisFile = Get-ChildItem -Path $nsisDir -Filter '*.exe' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $nsisFile -or $nsisFile.Length -eq 0) {
-        Fail-Build "Expected NSIS installer was not generated under $nsisDir"
+        Fail-Build -Message "Expected NSIS installer was not generated under $nsisDir" -Stage 'Artifact Verification'
     }
 }
 
@@ -469,43 +1007,41 @@ if ($expectedMsi) {
     $msiDir = Join-Path $targetOutDir 'bundle/msi'
     $msiFile = Get-ChildItem -Path $msiDir -Filter '*.msi' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $msiFile -or $msiFile.Length -eq 0) {
-        Fail-Build "Expected MSI installer was not generated under $msiDir"
+        Fail-Build -Message "Expected MSI installer was not generated under $msiDir" -Stage 'Artifact Verification'
     }
 }
 
-# Clean Vite's intermediate web bundle out of dist/ (already embedded into vanta.exe by Tauri)
-# so dist/ holds exclusively the clean Windows release deliverables and report.
-if (Test-Path $distDir) {
-    Remove-Item -Path $distDir -Recurse -Force
+# Remove intermediate Vite files from dist/ (already embedded into vanta.exe by Tauri)
+# so dist/ contains only verified release deliverables and reports.
+if (Test-Path $script:DistDir) {
+    Remove-Item -Path $script:DistDir -Recurse -Force
 }
-New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+New-Item -ItemType Directory -Path $script:DistDir -Force | Out-Null
 
 $collectedArtifacts = @()
 
 if ($nsisFile) {
-    $nsisDest = Join-Path $distDir $nsisFile.Name
+    $nsisDest = Join-Path $script:DistDir $nsisFile.Name
     Copy-Item -Path $nsisFile.FullName -Destination $nsisDest -Force
     $collectedArtifacts += [PSCustomObject]@{
         Role = 'NSIS Setup Installer'
         Name = $nsisFile.Name
         Path = $nsisDest
-        Source = $nsisFile.FullName
     }
 }
 
 if ($msiFile) {
-    $msiDest = Join-Path $distDir $msiFile.Name
+    $msiDest = Join-Path $script:DistDir $msiFile.Name
     Copy-Item -Path $msiFile.FullName -Destination $msiDest -Force
     $collectedArtifacts += [PSCustomObject]@{
         Role = 'Windows MSI Installer'
         Name = $msiFile.Name
         Path = $msiDest
-        Source = $msiFile.FullName
     }
 }
 
 if ($expectedPortable) {
-    $portableStaging = Join-Path $repoRoot 'portable_package'
+    $portableStaging = Join-Path $script:RepoRoot 'portable_package'
     if (Test-Path $portableStaging) {
         Remove-Item -Path $portableStaging -Recurse -Force
     }
@@ -522,7 +1058,7 @@ if ($expectedPortable) {
 
     $safeProductSlug = ($productName -replace '[^A-Za-z0-9._-]+', '-')
     $portableName = "{0}_{1}_x64-portable.zip" -f $safeProductSlug, $appVersion
-    $portableDest = Join-Path $distDir $portableName
+    $portableDest = Join-Path $script:DistDir $portableName
     Compress-Archive -Path (Join-Path $portableStaging '*') -DestinationPath $portableDest -CompressionLevel Optimal -Force
     Remove-Item -Path $portableStaging -Recurse -Force
 
@@ -530,21 +1066,19 @@ if ($expectedPortable) {
         Role = 'Portable Standalone ZIP'
         Name = $portableName
         Path = $portableDest
-        Source = $mainExePath
     }
 }
 
-# Verify every copied artifact and generate SHA256SUMS.txt
 $checksumLines = @()
 $reportArtifactRows = @()
 
 foreach ($art in $collectedArtifacts) {
     if (-not (Test-Path $art.Path)) {
-        Fail-Build "Artifact verification failed: missing $($art.Path)"
+        Fail-Build -Message "Artifact verification failed: missing $($art.Path)" -Stage 'Artifact Verification'
     }
     $item = Get-Item -Path $art.Path
     if ($item.Length -le 0) {
-        Fail-Build "Artifact verification failed: empty file $($art.Path)"
+        Fail-Build -Message "Artifact verification failed: empty file $($art.Path)" -Stage 'Artifact Verification'
     }
     $hash = (Get-FileHash -Algorithm SHA256 -Path $art.Path).Hash.ToLowerInvariant()
     $mib = [Math]::Round($item.Length / 1MB, 2)
@@ -552,7 +1086,7 @@ foreach ($art in $collectedArtifacts) {
     $reportArtifactRows += ("- {0}: {1} | {2:N0} bytes ({3:N2} MiB) | SHA256: {4}" -f $art.Role, $art.Name, $item.Length, $mib, $hash)
 }
 
-$checksumsPath = Join-Path $distDir 'SHA256SUMS.txt'
+$checksumsPath = Join-Path $script:DistDir 'SHA256SUMS.txt'
 $checksumLines | Out-File -FilePath $checksumsPath -Encoding ascii
 
 $script:TotalStopwatch.Stop()
@@ -562,7 +1096,7 @@ $mainExeMib = [Math]::Round($mainExeItem.Length / 1MB, 2)
 
 $gitCommit = 'N/A'
 $gitCmd = Get-Command 'git' -ErrorAction SilentlyContinue
-if ($gitCmd -and (Test-Path (Join-Path $repoRoot '.git'))) {
+if ($gitCmd -and (Test-Path (Join-Path $script:RepoRoot '.git'))) {
     try {
         $rev = (& $gitCmd.Source rev-parse --short HEAD 2>$null | Out-String).Trim()
         if ($rev) { $gitCommit = $rev }
@@ -571,7 +1105,7 @@ if ($gitCmd -and (Test-Path (Join-Path $repoRoot '.git'))) {
     }
 }
 
-$reportPath = Join-Path $distDir 'build-report.txt'
+$reportPath = Join-Path $script:DistDir 'build-report.txt'
 $reportLines = @(
     "VANTA Download Manager — Windows Build Report"
     "============================================="

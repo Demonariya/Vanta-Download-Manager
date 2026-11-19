@@ -62,9 +62,24 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      - name: Run PowerShell Diagnostic Checks
+        shell: pwsh
+        run: .\build.ps1 -Check
+
       - name: Build Windows Release via build.ps1
         shell: pwsh
         run: .\build.ps1 -Release -Target all
+
+      - name: Publish Failure Log to Job Summary
+        if: failure() && hashFiles('dist/last-build-failure.log') != ''
+        shell: pwsh
+        run: |
+          @(
+            '### Windows Build Failure Diagnostics'
+            '```text'
+            (Get-Content -Path 'dist/last-build-failure.log' -Raw)
+            '```'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Publish Build Report to Job Summary
         if: always() && hashFiles('dist/build-report.txt') != ''
