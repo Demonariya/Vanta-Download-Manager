@@ -12,6 +12,16 @@ export type TaskPriority = 'highest' | 'high' | 'normal' | 'low';
 
 export type EngineType = 'yt-dlp' | 'spotdl' | 'ffmpeg';
 
+export type CookieBrowserOption =
+  | 'auto'
+  | 'chrome'
+  | 'firefox'
+  | 'edge'
+  | 'brave'
+  | 'opera'
+  | 'vivaldi'
+  | 'none';
+
 export interface FormatOption {
   format_id: string;
   ext: string;
@@ -111,6 +121,79 @@ export interface EngineStatusMap {
   python3: EngineInfo;
 }
 
+export interface CookieValidationResult {
+  valid: boolean;
+  recordCount: number;
+  domainCount: number;
+  httpOnlyCount: number;
+  secureCount: number;
+  hasNetscapeHeader: boolean;
+  errors: string[];
+}
+
+export interface DetectedBrowserInfo {
+  id: string;
+  label: string;
+  detected: boolean;
+  profiles: string[];
+  defaultProfile?: string | null;
+  hasCookieStore: boolean;
+}
+
+export interface CookieStatus {
+  activeSource: 'file' | 'browser' | 'auto' | 'none';
+  configuredBrowser: string;
+  configuredProfile?: string | null;
+  resolvedBrowser?: string | null;
+  resolvedProfile?: string | null;
+  fileConfigured: boolean;
+  fileExists: boolean;
+  filePath: string;
+  fileValid: boolean;
+  recordCount: number;
+  domainCount: number;
+  httpOnlyCount: number;
+  secureCount: number;
+  updatedAt?: string | null;
+  error?: string | null;
+  detectedBrowsers: DetectedBrowserInfo[];
+}
+
+export interface CookieTestResult {
+  success: boolean;
+  stage:
+    | 'disabled'
+    | 'file_valid'
+    | 'file_invalid'
+    | 'browser_not_installed'
+    | 'profile_missing'
+    | 'db_locked'
+    | 'extraction_ok'
+    | 'auth_verified'
+    | 'auth_failed'
+    | 'engine_missing';
+  activeSource: string;
+  browser: string;
+  resolvedBrowser?: string | null;
+  resolvedProfile?: string | null;
+  browserDetected: boolean;
+  profileLocated: boolean;
+  databaseAccessible: boolean;
+  extractionSucceeded: boolean;
+  authVerified?: boolean | null;
+  recordCount: number;
+  message: string;
+  nextAction?: string | null;
+}
+
+export interface DiagnosticLogInfo {
+  logDir: string;
+  logPath: string;
+  exists: boolean;
+  fileSizeBytes: number;
+  recentLines: string[];
+}
+
 export interface AppSettings {
   download_dir: string;
   max_concurrent_downloads: number;
@@ -133,11 +216,9 @@ export interface AppSettings {
   theme: 'dark';
   auto_retry_failed: boolean;
   auto_resume_on_startup: boolean;
-  cookies_browser?: 'auto' | 'chrome' | 'firefox' | 'edge' | 'brave' | 'opera' | 'vivaldi' | 'safari' | 'none';
+  cookies_browser?: CookieBrowserOption;
+  cookies_profile?: string;
   cookies_file?: string;
-  cookies_content?: string;
-  enable_adult_sites?: boolean;
-  bypass_age_gate?: boolean;
   user_agent?: string;
 }
 

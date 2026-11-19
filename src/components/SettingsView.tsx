@@ -1,26 +1,42 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  Settings,
   Save,
-  FolderOpen,
   HardDrive,
-  Cpu,
   Gauge,
-  Sliders,
   Check,
   Shield,
   Bell,
-  HelpCircle,
   Cookie,
   RefreshCw,
+  Upload,
+  Trash2,
+  AlertCircle,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
-import { AppSettings } from '../types';
+import {
+  AppSettings,
+  CookieStatus,
+  CookieTestResult,
+  CookieValidationResult,
+} from '../types';
 import { api } from '../services/api';
+import { validateNetscapeCookies } from '../utils/cookie-validator';
+import { describeCookieStatus } from '../utils/cookie-status-ui';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
   onSaveSettings: (settings: Partial<AppSettings>) => void;
 }
+
+const BROWSER_LABELS: Record<string, string> = {
+  chrome: 'Google Chrome',
+  edge: 'Microsoft Edge',
+  firefox: 'Mozilla Firefox',
+  brave: 'Brave Browser',
+  opera: 'Opera',
+  vivaldi: 'Vivaldi',
+};
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
@@ -28,58 +44,159 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const [form, setForm] = useState<AppSettings | null>(settings);
   const [isSaved, setIsSaved] = useState(false);
+
+  const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
   const [testingCookies, setTestingCookies] = useState(false);
-  const [cookieTestResult, setCookieTestResult] = useState<{
-    success: boolean;
-    message: string;
-  } | null>(null);
-  const [cookieText, setCookieText] = useState(settings?.cookies_content || '');
-  const [pastedCookieSaved, setPastedCookieSaved] = useState(false);
+  const [cookieTestUrl, setCookieTestUrl] = useState('');
+  const [cookieTestResult, setCookieTestResult] = useState<CookieTestResult | null>(null);
+
+  const [cookieText, setCookieText] = useState('');
+  const [cookieValidation, setCookieValidation] = useState<CookieValidationResult | null>(null);
+  const [cookieActionError, setCookieActionError] = useState<string | null>(null);
+  const [cookieActionNotice, setCookieActionNotice] = useState<string | null>(null);
+  const [savingCookies, setSavingCookies] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshCookieStatus = async () => {
+    try {
+      const status = await api.getCookieStatus();
+      setCookieStatus(status);
+    } catch {
+      // ignore initial transient errors
+    }
+  };
 
   useEffect(() => {
     if (settings) {
       setForm(settings);
-      if (settings.cookies_content) {
-        setCookieText(settings.cookies_content);
-      }
     }
+    refreshCookieStatus();
   }, [settings]);
 
+  useEffect(() => {
+    if (!cookieText.trim()) {
+      setCookieValidation(null);
+      return;
+    }
+    setCookieValidation(validateNetscapeCookies(cookieText));
+  }, [cookieText]);
+
   if (!form) return null;
+
+  const badge = describeCookieStatus(cookieStatus);
+
+  const badgeToneClass =
+    badge.tone === 'success'
+      ? 'bg-[#238636]/15 text-[#3fb950] border-[#238636]/30'
+      : badge.tone === 'info'
+      ? 'bg-[#1f6feb]/15 text-[#58a6ff] border-[#1f6feb]/30'
+      : badge.tone === 'warning'
+      ? 'bg-[#d29922]/15 text-[#e3b341] border-[#d29922]/30'
+      : badge.tone === 'error'
+      ? 'bg-[#da3633]/15 text-[#f85149] border-[#da3633]/40'
+      : 'bg-[#21262d] text-[#8b949e] border-[#30363d]';
+
+  const selectedBrowserInfo = cookieStatus?.detectedBrowsers.find(
+    (b) => b.id === form.cookies_browser
+  );
 
   const handleTestCookies = async () => {
     setTestingCookies(true);
     setCookieTestResult(null);
+    setCookieActionError(null);
     try {
-      const res = await api.testCookieExtraction(form.cookies_browser || 'auto');
-      setCookieTestResult(res);
-    } catch (err: any) {
-      setCookieTestResult({
-        success: false,
-        message: err.message || 'Failed to extract cookies',
+      // Persist current browser/profile choice first if modified so diagnostics reflects saved settings cleanly
+      await onSaveSettings({
+        cookies_browser: form.cookies_browser || 'auto',
+        cookies_profile: form.cookies_profile?.trim() || undefined,
+        user_agent: form.user_agent,
       });
+      const res = await api.testCookieExtraction(
+        form.cookies_browser || 'auto',
+        form.cookies_profile,
+        cookieTestUrl
+      );
+      setCookieTestResult(res);
+      await refreshCookieStatus();
+    } catch (err: any) {
+      setCookieActionError(err.message || 'Failed to test cookie extraction.');
     } finally {
       setTestingCookies(false);
     }
   };
 
   const handleSaveCookieText = async () => {
-    if (!cookieText.trim()) return;
+    setCookieActionError(null);
+    setCookieActionNotice(null);
+    if (!cookieText.trim()) {
+      setCookieActionError('Paste or upload Netscape cookies.txt content before saving.');
+      return;
+    }
+
+    const validation = validateNetscapeCookies(cookieText);
+    setCookieValidation(validation);
+    if (!validation.valid) {
+      setCookieActionError(validation.errors[0] || 'Invalid Netscape cookies.txt format.');
+      return;
+    }
+
+    setSavingCookies(true);
     try {
-      const res = await api.saveCookies(cookieText);
-      if (res.success) {
-        setPastedCookieSaved(true);
-        setForm((prev) => (prev ? { ...prev, cookies_file: res.path, cookies_content: cookieText } : null));
-        setTimeout(() => setPastedCookieSaved(false), 3000);
-      }
+      const updated = await api.saveCookies(cookieText);
+      setCookieStatus(updated);
+      setCookieText('');
+      setCookieValidation(null);
+      setForm((prev) => (prev ? { ...prev, cookies_file: updated.filePath } : null));
+      setCookieActionNotice(
+        `Saved ${updated.recordCount} validated cookie entries across ${updated.domainCount} domain(s).`
+      );
+      setTimeout(() => setCookieActionNotice(null), 4000);
     } catch (err: any) {
-      alert(err.message || 'Failed to save cookies file');
+      setCookieActionError(err.message || 'Failed to save cookies file.');
+    } finally {
+      setSavingCookies(false);
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleRemoveCookies = async () => {
+    setCookieActionError(null);
+    setCookieActionNotice(null);
+    try {
+      const updated = await api.removeCookies();
+      setCookieStatus(updated);
+      setCookieText('');
+      setCookieValidation(null);
+      setCookieTestResult(null);
+      setForm((prev) => (prev ? { ...prev, cookies_file: undefined } : null));
+      setCookieActionNotice('Imported cookie file removed. Active mode fell back to browser selection.');
+      setTimeout(() => setCookieActionNotice(null), 4000);
+    } catch (err: any) {
+      setCookieActionError(err.message || 'Failed removing imported cookie file.');
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setCookieActionError(null);
+    setCookieActionNotice(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setCookieText(text);
+    } catch (err: any) {
+      setCookieActionError(err.message || 'Failed reading selected file.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveSettings(form);
+    await onSaveSettings({
+      ...form,
+      cookies_profile: form.cookies_profile?.trim() || undefined,
+    });
+    await refreshCookieStatus();
     setIsSaved(true);
     setTimeout(() => setIsSaved(false), 2500);
   };
@@ -91,7 +208,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div>
           <h1 className="text-base font-semibold text-white">System Settings & Preferences</h1>
           <p className="text-xs text-[#8b949e] mt-0.5">
-            Configure concurrency scheduler, engine limits, and output conventions
+            Configure concurrency scheduler, engine limits, and authenticated media access
           </p>
         </div>
 
@@ -320,61 +437,116 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Section 5: Cookies, Authentication & Adult Sites */}
+      {/* Section 5: Cookies & Authenticated Media Access */}
       <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#21262d] pb-3">
           <div className="flex items-center gap-2">
             <Cookie className="w-4 h-4 text-[#3fb950]" />
             <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-              Automatic Cookie Extraction & Adult Sites Access
+              Cookies & Authenticated Media Access
             </h2>
           </div>
-          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#238636]/15 text-[#3fb950] border border-[#238636]/30 self-start sm:self-auto">
-            Age Bypass & Cookies Active
+          <span
+            data-testid="cookie-status-badge"
+            className={`text-[11px] font-mono px-2 py-0.5 rounded border self-start sm:self-auto ${badgeToneClass}`}
+          >
+            {badge.badgeText}
           </span>
         </div>
 
         <p className="text-xs text-[#8b949e]">
-          Automatically fetches active session cookies from your web browser so yt-dlp can authenticate downloads from adult sites (Pornhub, XVideos, etc.), YouTube bot-check protected videos, and age-gated media without login failures.
+          Configure how yt-dlp loads user-authorized session cookies. Imported Netscape <code className="text-[#c9d1d9]">cookies.txt</code> files take precedence over browser extraction; secrets are stored only inside the local cookie file and never logged.
         </p>
 
+        {/* Active Cookie File Metadata Summary */}
+        <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-medium text-white">Active Cookie Source:</span>
+              <span className="font-mono text-[#58a6ff]">{badge.badgeText}</span>
+            </div>
+            <p className="text-[11px] text-[#8b949e]">{badge.detail}</p>
+            {cookieStatus?.fileExists && (
+              <div className="text-[11px] text-[#7d8590] font-mono truncate">
+                {cookieStatus.filePath} · {cookieStatus.recordCount} entries · {cookieStatus.domainCount} domain(s) · {cookieStatus.httpOnlyCount} HttpOnly
+              </div>
+            )}
+          </div>
+
+          {cookieStatus?.fileExists && (
+            <button
+              type="button"
+              onClick={handleRemoveCookies}
+              className="px-2.5 py-1.5 bg-[#da3633]/15 hover:bg-[#da3633]/25 text-[#f85149] border border-[#da3633]/30 rounded-lg text-xs font-medium flex items-center gap-1.5 shrink-0 self-start sm:self-auto"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Remove Cookies</span>
+            </button>
+          )}
+        </div>
+
+        {/* Browser & Profile Selection + Multi-Stage Test */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-[#c9d1d9] block">
               Browser for Cookie Extraction
             </label>
-            <div className="flex gap-2">
-              <select
-                value={form.cookies_browser || 'auto'}
-                onChange={(e) => setForm({ ...form, cookies_browser: e.target.value as any })}
-                className="flex-1 bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 text-[#e6edf3]"
-              >
-                <option value="auto">Auto-Detect Installed Browser</option>
-                <option value="chrome">Google Chrome</option>
-                <option value="firefox">Mozilla Firefox</option>
-                <option value="edge">Microsoft Edge</option>
-                <option value="brave">Brave Browser</option>
-                <option value="opera">Opera</option>
-                <option value="vivaldi">Vivaldi</option>
-                <option value="none">Disabled (No cookies)</option>
-              </select>
-              <button
-                type="button"
-                onClick={handleTestCookies}
-                disabled={testingCookies}
-                className="px-3 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded-lg text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5"
-              >
-                {testingCookies ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-[#3fb950]" />}
-                <span>Test</span>
-              </button>
-            </div>
-            {cookieTestResult && (
-              <p className={`text-[11px] ${cookieTestResult.success ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>
-                {cookieTestResult.message}
-              </p>
-            )}
+            <select
+              value={form.cookies_browser || 'auto'}
+              onChange={(e) => setForm({ ...form, cookies_browser: e.target.value as any })}
+              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 text-[#e6edf3]"
+            >
+              <option value="auto">Auto-Detect Installed Browser</option>
+              {Object.entries(BROWSER_LABELS).map(([id, label]) => {
+                const info = cookieStatus?.detectedBrowsers.find((b) => b.id === id);
+                const suffix = info
+                  ? info.detected
+                    ? info.hasCookieStore
+                      ? ' (Detected)'
+                      : ' (No Cookie DB)'
+                    : ' (Not Detected)'
+                  : '';
+                return (
+                  <option key={id} value={id}>
+                    {label}
+                    {suffix}
+                  </option>
+                );
+              })}
+              <option value="none">Disabled (No cookies)</option>
+            </select>
+            <span className="text-[11px] text-[#7d8590] block">
+              Used when no valid imported cookies.txt file is active
+            </span>
           </div>
 
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-[#c9d1d9] block">
+              Browser Profile (Optional)
+            </label>
+            <input
+              type="text"
+              list="vanta-browser-profiles"
+              value={form.cookies_profile || ''}
+              placeholder={selectedBrowserInfo?.defaultProfile || 'Default'}
+              onChange={(e) => setForm({ ...form, cookies_profile: e.target.value })}
+              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
+            />
+            <datalist id="vanta-browser-profiles">
+              {(selectedBrowserInfo?.profiles || []).map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+            <span className="text-[11px] text-[#7d8590] block">
+              {selectedBrowserInfo && selectedBrowserInfo.profiles.length > 0
+                ? `Detected profiles: ${selectedBrowserInfo.profiles.join(', ')}`
+                : 'Leave blank to use default browser profile'}
+            </span>
+          </div>
+        </div>
+
+        {/* User-Agent & Optional Verification URL */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-[#c9d1d9] block">
               User-Agent Emulation
@@ -386,68 +558,149 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
               className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
             />
-            <span className="text-[11px] text-[#7d8590] block">
-              Spoofs a genuine desktop browser to prevent anti-bot IP blocks
-            </span>
           </div>
-        </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.enable_adult_sites !== false}
-              onChange={(e) => setForm({ ...form, enable_adult_sites: e.target.checked })}
-              className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
-            />
-            <div>
-              <span className="text-xs text-[#c9d1d9] font-medium block">Enable Adult Sites Pipeline</span>
-              <span className="text-[10px] text-[#8b949e] block">Bypasses age limits (--age-limit 99) and unblocks 18+ media</span>
-            </div>
-          </label>
-
-          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.bypass_age_gate !== false}
-              onChange={(e) => setForm({ ...form, bypass_age_gate: e.target.checked })}
-              className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
-            />
-            <div>
-              <span className="text-xs text-[#c9d1d9] font-medium block">Automatic Geo-Bypass</span>
-              <span className="text-[10px] text-[#8b949e] block">Bypasses regional restrictions via simulated forward headers</span>
-            </div>
-          </label>
-        </div>
-
-        {/* Manual Netscape Cookies Textarea Fallback */}
-        <div className="space-y-1.5 pt-2">
-          <div className="flex items-center justify-between">
+          <div className="space-y-1.5">
             <label className="text-xs font-medium text-[#c9d1d9] block">
-              Paste Netscape Cookies (cookies.txt format)
+              Optional Test URL for Authentication Check
             </label>
-            {pastedCookieSaved && (
-              <span className="text-[11px] text-[#3fb950] font-mono flex items-center gap-1">
-                <Check className="w-3 h-3" /> Saved to cookies.txt
-              </span>
-            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={cookieTestUrl}
+                onChange={(e) => setCookieTestUrl(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=..."
+                className="flex-1 bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
+              />
+              <button
+                type="button"
+                onClick={handleTestCookies}
+                disabled={testingCookies}
+                className="px-3 py-1.5 bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5"
+              >
+                {testingCookies ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Check className="w-3.5 h-3.5" />
+                )}
+                <span>{testingCookies ? 'Testing...' : 'Test'}</span>
+              </button>
+            </div>
           </div>
+        </div>
+
+        {/* Multi-Stage Cookie Test Output */}
+        {cookieTestResult && (
+          <div
+            data-testid="cookie-test-result"
+            className={`p-3 rounded-lg border text-xs space-y-2 ${
+              cookieTestResult.success
+                ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
+                : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              {cookieTestResult.success ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <div className="space-y-1">
+                <div className="font-medium">{cookieTestResult.message}</div>
+                <div className="flex flex-wrap gap-2 text-[10px] font-mono text-[#c9d1d9]">
+                  <span>Stage: {cookieTestResult.stage}</span>
+                  <span>· Source: {cookieTestResult.activeSource}</span>
+                  {cookieTestResult.resolvedBrowser && (
+                    <span>· Browser: {cookieTestResult.resolvedBrowser}</span>
+                  )}
+                  {cookieTestResult.resolvedProfile && (
+                    <span>· Profile: {cookieTestResult.resolvedProfile}</span>
+                  )}
+                  <span>· DB Accessible: {cookieTestResult.databaseAccessible ? 'Yes' : 'No'}</span>
+                </div>
+                {cookieTestResult.nextAction && (
+                  <div className="text-[11px] text-[#e6edf3]">
+                    Next action: {cookieTestResult.nextAction}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Import / Upload / Paste Netscape cookies.txt */}
+        <div className="space-y-2 pt-2 border-t border-[#21262d]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <label className="text-xs font-medium text-[#c9d1d9] block">
+              Import or Paste Netscape Cookies (cookies.txt format)
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,text/plain"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded text-xs font-medium flex items-center gap-1.5"
+              >
+                <Upload className="w-3.5 h-3.5 text-[#58a6ff]" />
+                <span>Upload cookies.txt</span>
+              </button>
+            </div>
+          </div>
+
           <textarea
-            rows={3}
+            rows={4}
             value={cookieText}
-            onChange={(e) => setCookieText(e.target.value)}
-            placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1799999999&#9;SID&#9;...&#10;.pornhub.com&#9;TRUE&#9;/&#9;TRUE&#9;1799999999&#9;platform&#9;pc"
+            onChange={(e) => {
+              setCookieText(e.target.value);
+              setCookieActionError(null);
+            }}
+            placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1899999999&#9;SID&#9;..."
             className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2.5 font-mono text-[#e6edf3] placeholder-[#6e7681]"
           />
+
+          {cookieValidation && (
+            <div
+              className={`text-[11px] font-mono ${
+                cookieValidation.valid ? 'text-[#3fb950]' : 'text-[#f85149]'
+              }`}
+            >
+              {cookieValidation.valid
+                ? `Valid Netscape cookie format: ${cookieValidation.recordCount} entries across ${cookieValidation.domainCount} domain(s).`
+                : cookieValidation.errors[0] || 'Invalid Netscape format.'}
+            </div>
+          )}
+
+          {cookieActionError && (
+            <div className="p-2.5 rounded-lg border border-[#da3633]/40 bg-[#da3633]/10 text-xs text-[#f85149] flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{cookieActionError}</span>
+            </div>
+          )}
+
+          {cookieActionNotice && (
+            <div className="p-2.5 rounded-lg border border-[#238636]/40 bg-[#238636]/10 text-xs text-[#3fb950] flex items-center gap-2">
+              <Check className="w-4 h-4 shrink-0" />
+              <span>{cookieActionNotice}</span>
+            </div>
+          )}
+
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-[#7d8590]">
-            <span>Export cookies using "Get cookies.txt LOCALLY" extension if browser cookie database is locked.</span>
+            <span>
+              Use a Netscape-format cookies.txt export when Chrome/Edge database decryption is locked on Windows.
+            </span>
             <button
               type="button"
               onClick={handleSaveCookieText}
-              disabled={!cookieText.trim()}
-              className="px-3 py-1 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded text-xs font-medium transition-colors shrink-0"
+              disabled={savingCookies || !cookieText.trim() || (cookieValidation !== null && !cookieValidation.valid)}
+              className="px-3 py-1.5 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded text-xs font-medium transition-colors shrink-0"
             >
-              Save Cookie File
+              {savingCookies ? 'Validating & Saving...' : 'Save Cookie File'}
             </button>
           </div>
         </div>

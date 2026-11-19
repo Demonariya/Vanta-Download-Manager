@@ -12,12 +12,20 @@ import {
   clearFailedTasks,
   clearAllTasks,
   deleteDownloadedFile,
-  saveCookiesTxt,
   getSettings,
   saveSettings,
   getNotifications,
   clearNotifications,
 } from './server/db';
+import {
+  getCookieStatus,
+  saveCookiesFile,
+  removeCookiesFile,
+  detectInstalledBrowsers,
+  getDiagnosticLogInfo,
+  appendAppLog,
+} from './server/cookies';
+import { validateNetscapeCookies } from './src/utils/cookie-validator';
 import { engineManager } from './server/engineManager';
 import { queueController } from './server/queueController';
 import { DownloadTask } from './src/types';
@@ -291,23 +299,60 @@ async function startServer() {
   });
 
   // Cookies Management
+  app.get('/api/cookies/status', (_req: Request, res: Response) => {
+    res.json(getCookieStatus(getSettings()));
+  });
+
+  app.get('/api/cookies/browsers', (_req: Request, res: Response) => {
+    res.json(detectInstalledBrowsers());
+  });
+
+  app.post('/api/cookies/validate', (req: Request, res: Response) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content : '';
+    res.json(validateNetscapeCookies(content));
+  });
+
   app.post('/api/cookies/test', async (req: Request, res: Response) => {
-    const { browser } = req.body;
+    const { browser, profile, testUrl } = req.body || {};
     try {
-      const result = await engineManager.testCookieExtraction(browser || 'auto');
+      const result = await engineManager.testCookieExtraction(browser, profile, testUrl);
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ success: false, message: err.message || 'Cookie extraction failed' });
+      res.status(500).json({
+        success: false,
+        stage: 'auth_failed',
+        message: err.message || 'Cookie extraction failed',
+      });
     }
   });
 
   app.post('/api/cookies/save', (req: Request, res: Response) => {
-    const { content } = req.body;
-    if (typeof content !== 'string') {
+    const { content } = req.body || {};
+    if (typeof content !== 'string' || !content.trim()) {
       return res.status(400).json({ error: 'Cookie content is required' });
     }
-    const savedPath = saveCookiesTxt(content);
-    res.json({ success: true, path: savedPath });
+    try {
+      const status = saveCookiesFile(content);
+      queueController.broadcast('settings_updated', getSettings());
+      res.json(status);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Invalid Netscape cookies format' });
+    }
+  });
+
+  app.delete('/api/cookies', (_req: Request, res: Response) => {
+    try {
+      const status = removeCookiesFile();
+      queueController.broadcast('settings_updated', getSettings());
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed removing cookie file' });
+    }
+  });
+
+  app.get('/api/diagnostics/logs', (req: Request, res: Response) => {
+    const limit = parseInt(String(req.query.maxLines || '100'), 10) || 100;
+    res.json(getDiagnosticLogInfo(limit));
   });
 
   // Settings

@@ -23,6 +23,11 @@ import {
 } from '../src/utils/engine-parser';
 import { sanitizeLog, classifyDownloadError } from '../src/utils/error-classifier';
 import { getSettings } from './db';
+import {
+  resolveCookieSource,
+  testCookieExtraction as runCookieTest,
+  appendAppLog,
+} from './cookies';
 
 export class EngineManager {
   private activeProcesses: Map<string, ChildProcess> = new Map();
@@ -70,7 +75,10 @@ export class EngineManager {
     }
 
     try {
-      const out = execSync(`which ${name} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+      const out = execSync(`which ${name} 2>/dev/null`, {
+        encoding: 'utf-8',
+        windowsHide: true,
+      }).trim();
       if (out && fs.existsSync(out)) return out;
     } catch {
       // not in PATH
@@ -97,6 +105,7 @@ export class EngineManager {
         const out = execSync(`"${p}" ${verFlag} 2>&1`, {
           encoding: 'utf-8',
           timeout: 10000,
+          windowsHide: true,
         }).trim();
         const firstLine = out.split('\n')[0].replace(/^.*?version\s*/i, '').trim();
         return {
@@ -154,6 +163,7 @@ export class EngineManager {
         const out = execSync(`"${execPath}" ${eng.flag} 2>&1`, {
           encoding: 'utf-8',
           timeout: 5000,
+          windowsHide: true,
         });
         results.push({
           engine: eng.name,
@@ -177,92 +187,50 @@ export class EngineManager {
     return results;
   }
 
-  public getCookieAndAdultArgs(url: string, settings?: AppSettings, overrideBrowser?: string): string[] {
+  public getRequestAndCookieArgs(url: string, settings?: AppSettings, overrideBrowser?: string): string[] {
     const s = settings || getSettings();
     const args: string[] = [];
 
-    // 1. Adult sites & geoblocking bypass
-    if (s.enable_adult_sites !== false) {
-      args.push('--age-limit', '99');
-      args.push('--no-check-certificates');
-    }
-
-    if (s.bypass_age_gate !== false) {
-      args.push('--geo-bypass');
-    }
-
-    // 2. Realistic User-Agent and Emulation Headers
     const ua =
       s.user_agent ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     args.push('--user-agent', ua);
     args.push('--add-header', 'Accept-Language:en-US,en;q=0.9');
-    args.push('--add-header', 'Sec-Fetch-Mode:navigate');
 
-    // 3. Dynamic Referer
     try {
       const parsed = new URL(url);
       args.push('--referer', `${parsed.protocol}//${parsed.hostname}/`);
     } catch {
-      // ignore
+      // ignore invalid URLs here
     }
 
-    // 4. Cookies resolution
-    // Check if user has pasted / configured custom cookies.txt
-    const customCookieFile = s.cookies_file || path.resolve(process.cwd(), '.vanta_data', 'cookies.txt');
-    if (customCookieFile && fs.existsSync(customCookieFile)) {
-      try {
-        const content = fs.readFileSync(customCookieFile, 'utf-8').trim();
-        if (content.length > 0) {
-          args.push('--cookies', customCookieFile);
-          return args;
-        }
-      } catch {
-        // fallback to browser
-      }
+    const ffmpegPath = this.findExecutable('ffmpeg');
+    if (ffmpegPath) {
+      args.push('--ffmpeg-location', path.dirname(ffmpegPath));
     }
 
-    // Automatic browser cookie extraction
-    const browser = overrideBrowser || s.cookies_browser || 'auto';
-    if (browser !== 'none') {
-      const target = browser === 'auto' ? 'chrome' : browser;
-      args.push('--cookies-from-browser', target);
+    const resolved = resolveCookieSource(s, overrideBrowser, s.cookies_profile);
+    if (resolved.error) {
+      throw new Error(resolved.error);
+    }
+
+    if (resolved.source.kind === 'file') {
+      args.push('--cookies', resolved.source.path);
+    } else if (resolved.source.kind === 'browser') {
+      args.push('--cookies-from-browser', resolved.source.spec);
     }
 
     return args;
   }
 
   public async testCookieExtraction(
-    browser: string
-  ): Promise<{ success: boolean; message: string; browser: string }> {
+    browser?: string,
+    profile?: string,
+    testUrl?: string
+  ) {
     const ytdlpPath = this.findExecutable('yt-dlp');
-    if (!ytdlpPath) {
-      return { success: false, message: 'yt-dlp executable not found', browser };
-    }
-    const targetBrowser = browser === 'auto' ? 'chrome' : browser;
-    try {
-      execSync(
-        `"${ytdlpPath}" --cookies-from-browser ${targetBrowser} --dump-single-json --skip-download "https://www.google.com" 2>&1`,
-        {
-          encoding: 'utf-8',
-          timeout: 10000,
-        }
-      );
-      return {
-        success: true,
-        message: `Successfully connected to ${targetBrowser} cookies database.`,
-        browser: targetBrowser,
-      };
-    } catch (err: any) {
-      const errMsg = err.stderr || err.stdout || err.message || '';
-      return {
-        success: false,
-        message: errMsg.includes('Could not find')
-          ? `Could not find cookies database for ${targetBrowser}. Make sure ${targetBrowser} is installed or paste Netscape cookies directly.`
-          : errMsg.slice(0, 300),
-        browser: targetBrowser,
-      };
-    }
+    const settings = getSettings();
+    return runCookieTest(ytdlpPath, settings, browser, profile, testUrl);
   }
 
   public async inspectUrl(url: string, proxy?: string): Promise<MediaMetadata> {
@@ -278,25 +246,29 @@ export class EngineManager {
     }
 
     const settings = getSettings();
-    const cookieAdultArgs = this.getCookieAndAdultArgs(url, settings);
+    const cookieRequestArgs = this.getRequestAndCookieArgs(url, settings);
 
-    const runInspect = (extraArgs: string[]): Promise<MediaMetadata> => {
-      const args = [
-        '--dump-single-json',
-        '--no-warnings',
-        '--flat-playlist',
-        '--skip-download',
-        ...extraArgs,
-      ];
+    const args = [
+      '--dump-single-json',
+      '--no-playlist',
+      '--no-warnings',
+      '--no-call-home',
+      '--no-cache-dir',
+      ...cookieRequestArgs,
+    ];
 
-      if (proxy || settings.proxy_url) {
-        args.push('--proxy', proxy || settings.proxy_url);
-      }
+    if (proxy || settings.proxy_url) {
+      args.push('--proxy', proxy || settings.proxy_url);
+    }
 
-      args.push(url);
+    args.push(url);
 
-      return new Promise((resolve, reject) => {
-        const proc = spawn(ytdlpPath, args);
+    try {
+      return await new Promise<MediaMetadata>((resolve, reject) => {
+        const proc = spawn(ytdlpPath, args, {
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
         let stdout = '';
         let stderr = '';
 
@@ -308,9 +280,13 @@ export class EngineManager {
           stderr += d.toString();
         });
 
+        proc.on('error', (err) => {
+          reject(new Error(`Failed to execute yt-dlp: ${err.message}`));
+        });
+
         proc.on('close', (code) => {
           if (code !== 0) {
-            const rawErr = stderr || stdout || 'Unknown error';
+            const rawErr = stderr.trim() || stdout.trim() || `Process exited with code ${code}`;
             return reject(new Error(rawErr));
           }
 
@@ -365,45 +341,33 @@ export class EngineManager {
           }
         });
       });
-    };
+    } catch (err: any) {
+      const msg = sanitizeLog(err.message || '');
+      const lower = msg.toLowerCase();
+      appendAppLog('ERROR', 'inspect', msg);
 
-    try {
-      // First attempt with full cookie and adult arguments
-      return await runInspect(cookieAdultArgs);
-    } catch (firstErr: any) {
-      const msg = firstErr.message || '';
-
-      // If failed specifically because browser cookie DB was locked or not found on this machine,
-      // retry without --cookies-from-browser so open public media still works seamlessly
       if (
-        msg.includes('Could not find') &&
-        (msg.includes('cookie') || msg.includes('database'))
-      ) {
-        const withoutBrowserCookies = cookieAdultArgs.filter(
-          (a, i, arr) => a !== '--cookies-from-browser' && arr[i - 1] !== '--cookies-from-browser'
-        );
-        try {
-          return await runInspect(withoutBrowserCookies);
-        } catch {
-          // fall through to formatting friendly message below
-        }
-      }
-
-      // Format helpful advice for bot-checks or age/login gates
-      if (
-        msg.includes('Sign in to confirm you') ||
-        msg.includes('bot') ||
-        msg.includes('HTTP Error 410') ||
-        msg.includes('cookies for authentication')
+        lower.includes('could not copy chrome cookie database') ||
+        lower.includes('cookie database') ||
+        lower.includes('dpapi') ||
+        lower.includes('app-bound') ||
+        lower.includes('database is locked')
       ) {
         throw new Error(
-          `Authentication / Bot check required: ${sanitizeLog(
-            msg
-          )}\n\n💡 Tip: Go to Settings > Cookies to select your browser for automatic cookie extraction or paste Netscape cookies to authenticate downloads from this site.`
+          `Browser cookie database access failed: ${msg}\n\nClose the browser, select Firefox, or import a Netscape cookies.txt file in Settings > Cookies.`
         );
       }
 
-      throw new Error(`Extraction failed: ${sanitizeLog(msg)}`);
+      if (
+        lower.includes('sign in to confirm') ||
+        lower.includes('cookies for authentication')
+      ) {
+        throw new Error(
+          `Authentication required: ${msg}\n\nConfigure your browser profile or import a valid cookies.txt file in Settings > Cookies.`
+        );
+      }
+
+      throw new Error(`Extraction failed: ${msg}`);
     }
   }
 
@@ -502,9 +466,12 @@ export class EngineManager {
       '--extractor-retries', '3',
     ];
 
-    // Cookies, Adult Sites, & User-Agent emulation
-    const cookieAdultArgs = this.getCookieAndAdultArgs(task.url, settings);
-    args.push(...cookieAdultArgs);
+    try {
+      const requestArgs = this.getRequestAndCookieArgs(task.url, settings);
+      args.push(...requestArgs);
+    } catch (err: any) {
+      return onError(err.message || 'Invalid cookie configuration');
+    }
 
     // On retries (especially after HTTP 410 or expired signatures), bypass cache and use robust player clients
     if (task.retries > 0) {
@@ -568,7 +535,7 @@ export class EngineManager {
     });
 
     try {
-      const proc = spawn(ytdlpPath, args);
+      const proc = spawn(ytdlpPath, args, { windowsHide: true });
       this.activeProcesses.set(task.id, proc);
 
       let lastOutput = '';
@@ -675,7 +642,7 @@ export class EngineManager {
     });
 
     try {
-      const proc = spawn(spotdlPath, args);
+      const proc = spawn(spotdlPath, args, { windowsHide: true });
       this.activeProcesses.set(task.id, proc);
 
       let lastOutput = '';
@@ -764,6 +731,7 @@ export class EngineManager {
       const jsonStr = execSync(`"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${targetFile}"`, {
         encoding: 'utf-8',
         timeout: 8000,
+        windowsHide: true,
       });
       const data = JSON.parse(jsonStr);
       const audioStream = data?.streams?.find((s: any) => s.codec_type === 'audio') || data?.streams?.[0];
@@ -851,9 +819,14 @@ export class EngineManager {
       try {
         execSync(`curl -L -o "${tempBin}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x "${tempBin}"`, {
           timeout: 60000,
+          windowsHide: true,
         });
 
-        const verOutput = execSync(`"${tempBin}" --version`, { encoding: 'utf-8', timeout: 5000 }).trim();
+        const verOutput = execSync(`"${tempBin}" --version`, {
+          encoding: 'utf-8',
+          timeout: 5000,
+          windowsHide: true,
+        }).trim();
         if (!verOutput) throw new Error('Verification failed: newly downloaded binary returned empty version');
 
         if (fs.existsSync(targetBin)) {
@@ -894,11 +867,16 @@ export class EngineManager {
         execSync(`python3 -m pip install --upgrade --user spotdl`, {
           encoding: 'utf-8',
           timeout: 120000,
+          windowsHide: true,
         });
 
         const spotdlBin = this.findExecutable('spotdl');
         const verOutput = spotdlBin
-          ? execSync(`"${spotdlBin}" --version`, { encoding: 'utf-8', timeout: 5000 }).trim()
+          ? execSync(`"${spotdlBin}" --version`, {
+              encoding: 'utf-8',
+              timeout: 5000,
+              windowsHide: true,
+            }).trim()
           : '';
 
         return {
@@ -1034,7 +1012,11 @@ export class EngineManager {
         }
 
         if (process.platform !== 'win32') fs.chmodSync(tempBin, 0o755);
-        const verOutput = execSync(`"${tempBin}" --version`, { encoding: 'utf-8', timeout: 8000 }).trim();
+        const verOutput = execSync(`"${tempBin}" --version`, {
+          encoding: 'utf-8',
+          timeout: 8000,
+          windowsHide: true,
+        }).trim();
         if (!verOutput) throw new Error('Downloaded binary failed --version check');
 
         if (fs.existsSync(targetBin)) fs.copyFileSync(targetBin, backupBin);

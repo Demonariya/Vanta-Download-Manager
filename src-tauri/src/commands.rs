@@ -1,14 +1,18 @@
+use crate::cookies;
 use crate::engines::EngineManager;
+use crate::logging;
 use crate::models::{
-    AppSettings, CreateTaskPayload, DiagnosticResult, DownloadTask, EngineStatusMap,
+    AppSettings, CookieStatus, CookieTestResult, CookieValidationResult, CreateTaskPayload,
+    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask, EngineStatusMap,
     EngineUpdateResult, ManagedEngineInfo, MediaMetadata, NotificationItem, TaskPriority,
     TaskStatus,
 };
+use crate::process;
 use crate::state::AppState;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 #[tauri::command]
@@ -25,7 +29,10 @@ pub fn create_task(
     let settings = state.get_settings();
     let is_spotify = payload.url.contains("spotify.com");
     let is_audio = payload.is_audio_only.unwrap_or(is_spotify);
-    let requires_ffmpeg = is_audio || settings.embed_thumbnail || settings.embed_metadata || payload.format_id.as_deref().unwrap_or("best") == "best";
+    let requires_ffmpeg = is_audio
+        || settings.embed_thumbnail
+        || settings.embed_metadata
+        || payload.format_id.as_deref().unwrap_or("best") == "best";
 
     EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)?;
 
@@ -97,27 +104,35 @@ pub fn create_task(
     state.upsert_task(&task);
     let _ = app.emit("task_updated", &task);
 
+    logging::info("queue", &format!("Created task '{}' ({})", task.id, task.engine));
     schedule_next(&app, &state);
 
     Ok(task)
 }
 
 #[tauri::command]
-pub fn pause_task(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut procs = state.active_processes.lock().unwrap();
-    if let Some(pid) = procs.remove(&id) {
-        kill_process(pid);
+pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let removed_pid = {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.remove(&id)
+    };
+    if let Some(pid) = removed_pid {
+        process::kill_process_tree(pid);
     }
 
-    let tasks = state.get_tasks();
-    if let Some(mut t) = tasks.into_iter().find(|t| t.id == id) {
+    if let Some(mut t) = state.get_task_by_id(&id) {
         t.status = TaskStatus::Paused;
         t.current_phase = "Paused".to_string();
         t.speed_str = "0 B/s".to_string();
         t.speed_bytes_per_sec = 0.0;
         state.upsert_task(&t);
+        let _ = app.emit("task_updated", &t);
     }
 
+    schedule_next(&app, &state);
     Ok(())
 }
 
@@ -127,8 +142,7 @@ pub fn resume_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let tasks = state.get_tasks();
-    if let Some(mut t) = tasks.into_iter().find(|t| t.id == id) {
+    if let Some(mut t) = state.get_task_by_id(&id) {
         t.status = TaskStatus::Queued;
         t.current_phase = "Queued to resume".to_string();
         state.upsert_task(&t);
@@ -144,13 +158,18 @@ pub fn cancel_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let mut procs = state.active_processes.lock().unwrap();
-    if let Some(pid) = procs.remove(&id) {
-        kill_process(pid);
+    let removed_pid = {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.remove(&id)
+    };
+    if let Some(pid) = removed_pid {
+        process::kill_process_tree(pid);
     }
 
-    let tasks = state.get_tasks();
-    if let Some(mut t) = tasks.into_iter().find(|t| t.id == id) {
+    if let Some(mut t) = state.get_task_by_id(&id) {
         t.status = TaskStatus::Cancelled;
         t.current_phase = "Cancelled".to_string();
         t.speed_str = "0 B/s".to_string();
@@ -169,8 +188,7 @@ pub fn retry_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let tasks = state.get_tasks();
-    if let Some(mut t) = tasks.into_iter().find(|t| t.id == id) {
+    if let Some(mut t) = state.get_task_by_id(&id) {
         t.status = TaskStatus::Queued;
         t.current_phase = "Queued for retry".to_string();
         t.error_message = None;
@@ -189,9 +207,15 @@ pub fn delete_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let mut procs = state.active_processes.lock().unwrap();
-    if let Some(pid) = procs.remove(&id) {
-        kill_process(pid);
+    let removed_pid = {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.remove(&id)
+    };
+    if let Some(pid) = removed_pid {
+        process::kill_process_tree(pid);
     }
     state.delete_task(&id);
     let _ = app.emit("task_deleted", serde_json::json!({ "id": id }));
@@ -200,10 +224,16 @@ pub fn delete_task(
 }
 
 #[tauri::command]
-pub fn pause_all(state: State<'_, AppState>) -> Result<(), String> {
-    let mut procs = state.active_processes.lock().unwrap();
-    for (_id, pid) in procs.drain() {
-        kill_process(pid);
+pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let pids: Vec<u32> = {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.drain().map(|(_id, pid)| pid).collect()
+    };
+    for pid in pids {
+        process::kill_process_tree(pid);
     }
 
     let tasks = state.get_tasks();
@@ -220,6 +250,7 @@ pub fn pause_all(state: State<'_, AppState>) -> Result<(), String> {
             t.speed_str = "0 B/s".to_string();
             t.speed_bytes_per_sec = 0.0;
             state.upsert_task(&t);
+            let _ = app.emit("task_updated", &t);
         }
     }
     Ok(())
@@ -286,8 +317,17 @@ pub fn get_managed_engine_info() -> Result<ManagedEngineInfo, String> {
 }
 
 #[tauri::command]
-pub fn run_diagnostics() -> Result<Vec<DiagnosticResult>, String> {
-    Ok(EngineManager::run_diagnostics())
+pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<DiagnosticResult>, String> {
+    if state.is_running_diagnostics.swap(true, Ordering::SeqCst) {
+        return Err("Diagnostics check is already running.".to_string());
+    }
+
+    let res = tokio::task::spawn_blocking(EngineManager::run_diagnostics)
+        .await
+        .map_err(|e| format!("Diagnostics task failed: {}", e));
+
+    state.is_running_diagnostics.store(false, Ordering::SeqCst);
+    res
 }
 
 #[tauri::command]
@@ -351,24 +391,85 @@ pub async fn update_all_engines(app: AppHandle) -> Result<Vec<EngineUpdateResult
 }
 
 #[tauri::command]
-pub fn inspect_url(state: State<'_, AppState>, url: String) -> Result<MediaMetadata, String> {
+pub async fn inspect_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<MediaMetadata, String> {
     let settings = state.get_settings();
-    EngineManager::inspect_url(&url, &settings)
+    tokio::task::spawn_blocking(move || EngineManager::inspect_url(&url, &settings))
+        .await
+        .map_err(|e| format!("URL inspection task panicked: {}", e))?
 }
 
 #[tauri::command]
-pub fn save_cookies(state: State<'_, AppState>, content: String) -> Result<serde_json::Value, String> {
-    let app_dir = AppState::app_data_dir();
-    fs::create_dir_all(&app_dir).map_err(|e| format!("Failed creating app data dir: {}", e))?;
-    let cookie_path = app_dir.join("cookies.txt");
-    fs::write(&cookie_path, content.trim())
-        .map_err(|e| format!("Failed writing cookies.txt: {}", e))?;
-    let mut settings = state.get_settings();
-    let cookie_path_str = cookie_path.to_string_lossy().to_string();
-    settings.cookies_file = Some(cookie_path_str.clone());
-    settings.cookies_content = Some(content);
-    state.save_settings(&settings);
-    Ok(serde_json::json!({ "success": true, "path": cookie_path_str }))
+pub fn get_cookie_status(state: State<'_, AppState>) -> Result<CookieStatus, String> {
+    let settings = state.get_settings();
+    Ok(cookies::get_cookie_status(&settings))
+}
+
+#[tauri::command]
+pub fn validate_cookies_text(content: String) -> Result<CookieValidationResult, String> {
+    Ok(cookies::validate_netscape_cookies(&content))
+}
+
+#[tauri::command]
+pub fn save_cookies(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    content: String,
+) -> Result<CookieStatus, String> {
+    let status = cookies::save_cookies_file(&state, &content)?;
+    let updated_settings = state.get_settings();
+    let _ = app.emit("settings_updated", &updated_settings);
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn remove_cookies(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CookieStatus, String> {
+    let status = cookies::remove_cookies_file(&state)?;
+    let updated_settings = state.get_settings();
+    let _ = app.emit("settings_updated", &updated_settings);
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn detect_browsers() -> Result<Vec<DetectedBrowserInfo>, String> {
+    Ok(cookies::detect_installed_browsers())
+}
+
+#[tauri::command]
+pub async fn test_cookie_extraction(
+    state: State<'_, AppState>,
+    browser: Option<String>,
+    profile: Option<String>,
+    test_url: Option<String>,
+) -> Result<CookieTestResult, String> {
+    let settings = state.get_settings();
+    tokio::task::spawn_blocking(move || {
+        cookies::test_cookie_extraction(
+            &settings,
+            browser.as_deref(),
+            profile.as_deref(),
+            test_url.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Cookie test failed: {}", e))
+}
+
+#[tauri::command]
+pub fn get_diagnostic_log_info(max_lines: Option<usize>) -> Result<DiagnosticLogInfo, String> {
+    Ok(logging::get_diagnostic_log_info(max_lines.unwrap_or(100)))
+}
+
+#[tauri::command]
+pub fn open_logs_folder() -> Result<(), String> {
+    let dir = logging::logs_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed creating logs folder: {}", e))?;
+    open_file_or_folder(dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -380,15 +481,24 @@ pub fn open_file_or_folder(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("explorer").arg(path).spawn();
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("Failed opening Explorer: {}", e))?;
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg(path).spawn();
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("Failed opening Finder: {}", e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("xdg-open").arg(path).spawn();
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("Failed opening path: {}", e))?;
     }
 
     Ok(())
@@ -425,26 +535,8 @@ pub fn app_safe_shutdown(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-fn kill_process(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
-    }
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
-    }
-}
-
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
-    if state
-        .is_shutting_down
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
+    if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
     }
 
@@ -461,7 +553,9 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
         })
         .count();
 
-    if active_count >= settings.max_concurrent_downloads as usize {
+    let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
+    let available_slots = max_concurrent.saturating_sub(active_count);
+    if available_slots == 0 {
         return;
     }
 
@@ -477,322 +571,489 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
             .then_with(|| a.created_at.cmp(&b.created_at))
     });
 
-    if let Some(next_task) = queued.into_iter().next() {
+    for mut next_task in queued.into_iter().take(available_slots) {
+        // Claim task synchronously as Extracting before spawning background worker
+        // so repeated schedule_next calls never double-dispatch the same task.
+        next_task.status = TaskStatus::Extracting;
+        next_task.current_phase = "Starting engine...".to_string();
+        state.upsert_task(&next_task);
+        let _ = app.emit("task_updated", &next_task);
+
         let app_clone = app.clone();
         let task_id = next_task.id.clone();
         tokio::spawn(async move {
-            run_download_task(&app_clone, task_id).await;
+            run_download_task(app_clone, task_id).await;
         });
     }
 }
 
-async fn run_download_task(app: &AppHandle, task_id: String) {
+async fn run_download_task(app: AppHandle, task_id: String) {
+    let join_res = tokio::task::spawn_blocking(move || {
+        run_download_task_blocking(&app, &task_id);
+        app
+    })
+    .await;
+
+    if let Ok(app) = join_res {
+        let state = app.state::<AppState>();
+        schedule_next(&app, &state);
+    }
+}
+
+fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     let state = app.state::<AppState>();
-    let tasks = state.get_tasks();
-    let mut task = match tasks.into_iter().find(|t| t.id == task_id) {
+    let mut task = match state.get_task_by_id(task_id) {
         Some(t) => t,
         None => return,
     };
 
+    if matches!(task.status, TaskStatus::Paused | TaskStatus::Cancelled)
+        || state.is_shutting_down.load(Ordering::SeqCst)
+    {
+        return;
+    }
+
     let settings = state.get_settings();
+    let is_spotdl = task.engine == "spotdl" || task.url.contains("spotify.com");
     let requires_ffmpeg = task.is_audio_only
+        || is_spotdl
         || settings.embed_thumbnail
         || settings.embed_metadata
         || task.format_id == "best";
 
-    if let Err(err_msg) = EngineManager::ensure_required_engines(requires_ffmpeg, false) {
+    if let Err(err_msg) = EngineManager::ensure_required_engines(requires_ffmpeg, is_spotdl) {
+        logging::error("download", &format!("Task '{}' missing engine: {}", task_id, err_msg));
         task.status = TaskStatus::Failed;
+        task.current_phase = "Failed".to_string();
         task.error_message = Some(err_msg);
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
         return;
     }
 
-    let ytdlp_path = match EngineManager::find_executable("yt-dlp") {
-        Some(p) => p,
-        None => {
-            task.status = TaskStatus::Failed;
-            task.error_message = Some(
-                "yt-dlp executable not found in managed runtime or PATH. Please install engines first."
-                    .to_string(),
-            );
-            state.upsert_task(&task);
-            let _ = app.emit("task_updated", &task);
-            return;
-        }
-    };
-
     let out_dir = PathBuf::from(&task.output_path);
-    let _ = fs::create_dir_all(&out_dir);
-
-    let template = out_dir.join(&settings.filename_template);
-    let template_str = template.to_string_lossy().to_string();
-
-    let mut args = vec![
-        "--newline".to_string(),
-        "--no-colors".to_string(),
-        "--progress-template".to_string(),
-        "%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s".to_string(),
-        "-o".to_string(),
-        template_str,
-        "--retries".to_string(),
-        "10".to_string(),
-        "--fragment-retries".to_string(),
-        "10".to_string(),
-        "--file-access-retries".to_string(),
-        "5".to_string(),
-        "--socket-timeout".to_string(),
-        "30".to_string(),
-    ];
-
-    args.extend(EngineManager::build_ytdlp_cookie_and_adult_args(
-        &task.url, &settings,
-    ));
-
-    if !settings.proxy_url.trim().is_empty() {
-        args.push("--proxy".to_string());
-        args.push(settings.proxy_url.trim().to_string());
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        let msg = format!("Failed creating output directory '{}': {}", out_dir.display(), e);
+        logging::error("download", &msg);
+        task.status = TaskStatus::Failed;
+        task.current_phase = "Failed".to_string();
+        task.error_message = Some(msg);
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        return;
     }
 
-    if settings.global_bandwidth_limit_kbps > 0 {
-        args.push("--limit-rate".to_string());
-        args.push(format!("{}K", settings.global_bandwidth_limit_kbps));
-    } else if settings.per_task_bandwidth_limit_kbps > 0 {
-        args.push("--limit-rate".to_string());
-        args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
-    }
+    let (exec_path, args) = if is_spotdl {
+        let spotdl_path = match EngineManager::find_executable("spotdl") {
+            Some(p) => p,
+            None => {
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some("spotDL executable not found.".to_string());
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+        };
 
-    if settings.fragment_concurrency > 1 {
-        args.push("-N".to_string());
-        args.push(settings.fragment_concurrency.to_string());
-    }
-
-    if task.retries > 0 {
-        args.push("--no-cache-dir".to_string());
-        args.push("--extractor-args".to_string());
-        args.push("youtube:player_client=default,web,android".to_string());
-    }
-
-    if task.is_audio_only {
-        args.push("-x".to_string());
-        let fmt = task
+        let format = task
             .audio_format
             .clone()
-            .unwrap_or_else(|| "mp3".to_string());
-        args.push("--audio-format".to_string());
-        args.push(fmt);
-        if let Some(ref q) = task.audio_bitrate {
-            args.push("--audio-quality".to_string());
-            args.push(q.clone());
-        }
-        if task.audio_sample_rate.is_some() || task.audio_bit_depth.is_some() {
-            let mut pp = "ExtractAudio:".to_string();
-            if let Some(sr) = task.audio_sample_rate {
-                pp.push_str(&format!(" -ar {}", sr));
-            }
-            if let Some(24) = task.audio_bit_depth {
-                pp.push_str(" -sample_fmt s24");
-            }
-            args.push("--postprocessor-args".to_string());
-            args.push(pp);
-        }
-    } else if task.format_id != "best" {
-        args.push("-f".to_string());
-        args.push(task.format_id.clone());
+            .unwrap_or_else(|| settings.default_audio_format.clone());
+        let bitrate = task
+            .audio_bitrate
+            .clone()
+            .unwrap_or_else(|| settings.default_audio_bitrate.clone());
+
+        let args = vec![
+            "download".to_string(),
+            task.url.clone(),
+            "--output".to_string(),
+            out_dir.to_string_lossy().to_string(),
+            "--format".to_string(),
+            format,
+            "--bitrate".to_string(),
+            bitrate,
+            "--log-level".to_string(),
+            "INFO".to_string(),
+        ];
+        (spotdl_path, args)
     } else {
-        args.push("-f".to_string());
-        args.push("bestvideo+bestaudio/best".to_string());
-    }
+        let ytdlp_path = match EngineManager::find_executable("yt-dlp") {
+            Some(p) => p,
+            None => {
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some("yt-dlp executable not found.".to_string());
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+        };
 
-    if settings.embed_thumbnail {
-        args.push("--embed-thumbnail".to_string());
-    }
-    if settings.embed_metadata {
-        args.push("--embed-metadata".to_string());
-    }
+        let template = out_dir.join(&settings.filename_template);
+        let template_str = template.to_string_lossy().to_string();
 
-    args.push(task.url.clone());
+        let mut args = vec![
+            "--newline".to_string(),
+            "--no-colors".to_string(),
+            "--progress-template".to_string(),
+            "%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s".to_string(),
+            "-o".to_string(),
+            template_str,
+            "--retries".to_string(),
+            "10".to_string(),
+            "--fragment-retries".to_string(),
+            "10".to_string(),
+            "--file-access-retries".to_string(),
+            "5".to_string(),
+            "--socket-timeout".to_string(),
+            "30".to_string(),
+        ];
+
+        match EngineManager::build_ytdlp_request_args(&task.url, &settings) {
+            Ok(req_args) => args.extend(req_args),
+            Err(cookie_err) => {
+                logging::error("download", &format!("Task '{}' cookie config error: {}", task_id, cookie_err));
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some(cookie_err);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+        }
+
+        if !settings.proxy_url.trim().is_empty() {
+            args.push("--proxy".to_string());
+            args.push(settings.proxy_url.trim().to_string());
+        }
+
+        if settings.global_bandwidth_limit_kbps > 0 {
+            args.push("--limit-rate".to_string());
+            args.push(format!("{}K", settings.global_bandwidth_limit_kbps));
+        } else if settings.per_task_bandwidth_limit_kbps > 0 {
+            args.push("--limit-rate".to_string());
+            args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
+        }
+
+        if settings.fragment_concurrency > 1 {
+            args.push("-N".to_string());
+            args.push(settings.fragment_concurrency.to_string());
+        }
+
+        if task.retries > 0 {
+            args.push("--no-cache-dir".to_string());
+            args.push("--extractor-args".to_string());
+            args.push("youtube:player_client=default,web,android".to_string());
+        }
+
+        if task.is_audio_only {
+            args.push("-x".to_string());
+            let fmt = task
+                .audio_format
+                .clone()
+                .unwrap_or_else(|| "mp3".to_string());
+            args.push("--audio-format".to_string());
+            args.push(fmt);
+            if let Some(ref q) = task.audio_bitrate {
+                args.push("--audio-quality".to_string());
+                args.push(q.clone());
+            }
+            if task.audio_sample_rate.is_some() || task.audio_bit_depth.is_some() {
+                let mut pp = "ExtractAudio:".to_string();
+                if let Some(sr) = task.audio_sample_rate {
+                    pp.push_str(&format!(" -ar {}", sr));
+                }
+                if let Some(24) = task.audio_bit_depth {
+                    pp.push_str(" -sample_fmt s24");
+                }
+                args.push("--postprocessor-args".to_string());
+                args.push(pp);
+            }
+        } else if task.format_id != "best" {
+            args.push("-f".to_string());
+            args.push(task.format_id.clone());
+        } else {
+            args.push("-f".to_string());
+            args.push("bestvideo+bestaudio/best".to_string());
+        }
+
+        if settings.embed_thumbnail {
+            args.push("--embed-thumbnail".to_string());
+        }
+        if settings.embed_metadata {
+            args.push("--embed-metadata".to_string());
+        }
+
+        args.push(task.url.clone());
+        (ytdlp_path, args)
+    };
 
     task.status = TaskStatus::Extracting;
     task.current_phase = "Initializing engine...".to_string();
     state.upsert_task(&task);
     let _ = app.emit("task_updated", &task);
 
-    let mut cmd = Command::new(&ytdlp_path);
+    let mut cmd = Command::new(&exec_path);
     cmd.args(&args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     EngineManager::apply_engine_env(&mut cmd);
+    process::configure_background_command(&mut cmd);
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            let msg = format!("Failed to spawn engine '{}': {}", exec_path.display(), e);
+            logging::error("download", &msg);
             task.status = TaskStatus::Failed;
-            task.error_message = Some(format!("Failed to spawn engine: {}", e));
+            task.current_phase = "Failed".to_string();
+            task.error_message = Some(msg);
             state.upsert_task(&task);
             let _ = app.emit("task_updated", &task);
-            schedule_next(app, &state);
             return;
         }
     };
 
     let pid = child.id();
-    state
-        .active_processes
-        .lock()
-        .unwrap()
-        .insert(task_id.clone(), pid);
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let app_handle = app.clone();
-    let tid = task_id.clone();
-
-    if let Some(out) = stdout {
-        let reader = BufReader::new(out);
-        for line_res in reader.lines() {
-            if let Ok(line) = line_res {
-                let trimmed = line.trim();
-                if trimmed.contains('|') {
-                    let parts: Vec<&str> = trimmed.split('|').collect();
-                    if parts.len() >= 6 {
-                        let percent_clean = parts[0].trim_end_matches('%').trim();
-                        let percent: f64 = percent_clean.parse().unwrap_or(0.0);
-                        let _downloaded = parts[1].trim();
-                        let _total = parts[2].trim();
-                        let speed = parts[3].trim();
-                        let eta = parts[4].trim();
-                        let phase_raw = parts[5].trim();
-
-                        let current_tasks = state.get_tasks();
-                        if let Some(mut t) = current_tasks.into_iter().find(|t| t.id == tid) {
-                            if t.status == TaskStatus::Paused || t.status == TaskStatus::Cancelled {
-                                break;
-                            }
-                            t.status = TaskStatus::Downloading;
-                            t.progress_percentage = percent;
-                            t.speed_str = if speed.is_empty() {
-                                "0 B/s".to_string()
-                            } else {
-                                speed.to_string()
-                            };
-                            t.eta_str = if eta.is_empty() {
-                                "--:--".to_string()
-                            } else {
-                                eta.to_string()
-                            };
-                            t.current_phase = if phase_raw.is_empty() {
-                                "Downloading".to_string()
-                            } else {
-                                phase_raw.to_string()
-                            };
-
-                            state.upsert_task(&t);
-                            let _ = app_handle.emit("task_updated", &t);
-                        }
-                    }
-                }
-            }
-        }
+    {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.insert(task_id.to_string(), pid);
     }
 
-    let status = child.wait();
-    state.active_processes.lock().unwrap().remove(&task_id);
+    let mut detected_output_path: Option<String> = None;
 
-    let current_tasks = state.get_tasks();
-    if let Some(mut t) = current_tasks.into_iter().find(|t| t.id == task_id) {
-        if t.status == TaskStatus::Cancelled || t.status == TaskStatus::Paused {
-            schedule_next(app, &state);
-            return;
+    let stream_res = process::stream_child_lines(child, |line| {
+        if state.is_shutting_down.load(Ordering::SeqCst) {
+            process::kill_process_tree(pid);
+            return false;
         }
 
-        match status {
-            Ok(s) if s.success() => {
-                t.status = TaskStatus::Completed;
-                t.progress_percentage = 100.0;
-                t.speed_str = "0 B/s".to_string();
-                t.speed_bytes_per_sec = 0.0;
-                t.eta_str = "Finished".to_string();
-                t.current_phase = "Completed".to_string();
-                t.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        let current_opt = state.get_task_by_id(task_id);
+        let mut current = match current_opt {
+            Some(t) => t,
+            None => {
+                // Task was deleted while running
+                process::kill_process_tree(pid);
+                return false;
+            }
+        };
 
-                if t.is_audio_only {
-                    if let Some(verified) = EngineManager::verify_audio_file(&out_dir) {
-                        t.verified_audio_info = Some(verified);
-                    }
+        if matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+            process::kill_process_tree(pid);
+            return false;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+
+        if is_spotdl {
+            if trimmed.contains("Searching for") {
+                current.status = TaskStatus::Extracting;
+                current.current_phase = "Matching audio source...".to_string();
+                current.progress_percentage = 25.0;
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+            } else if trimmed.contains("Downloading") {
+                current.status = TaskStatus::Downloading;
+                current.current_phase = "Downloading audio stream...".to_string();
+                current.progress_percentage = 60.0;
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+            } else if trimmed.contains("Converting") || trimmed.contains("Embedding") {
+                current.status = TaskStatus::Processing;
+                current.current_phase = "Embedding metadata & artwork...".to_string();
+                current.progress_percentage = 85.0;
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+            }
+            return true;
+        }
+
+        if let Some(idx) = trimmed.find("Destination:") {
+            let dest = trimmed[idx + "Destination:".len()..]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'');
+            if !dest.is_empty() {
+                detected_output_path = Some(dest.to_string());
+            }
+        } else if let Some(idx) = trimmed.find("Merging formats into") {
+            let dest = trimmed[idx + "Merging formats into".len()..]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'');
+            if !dest.is_empty() {
+                detected_output_path = Some(dest.to_string());
+            }
+        }
+
+        if trimmed.contains('|') {
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            if parts.len() >= 6 {
+                let percent_clean = parts[0].trim_end_matches('%').trim();
+                let percent: f64 = percent_clean.parse().unwrap_or(current.progress_percentage);
+                let speed = parts[3].trim();
+                let eta = parts[4].trim();
+                let phase_raw = parts[5].trim();
+
+                current.status = if phase_raw.eq_ignore_ascii_case("processing")
+                    || phase_raw.eq_ignore_ascii_case("postprocessing")
+                {
+                    TaskStatus::Processing
+                } else {
+                    TaskStatus::Downloading
+                };
+                current.progress_percentage = percent.clamp(0.0, 100.0);
+                if !speed.is_empty() && !speed.eq_ignore_ascii_case("na") {
+                    current.speed_str = speed.to_string();
+                }
+                if !eta.is_empty() && !eta.eq_ignore_ascii_case("na") {
+                    current.eta_str = eta.to_string();
+                }
+                if !phase_raw.is_empty() && !phase_raw.eq_ignore_ascii_case("na") {
+                    current.current_phase = phase_raw.to_string();
+                } else {
+                    current.current_phase = "Downloading".to_string();
                 }
 
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+            }
+        }
+
+        true
+    });
+
+    {
+        let mut procs = state
+            .active_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        procs.remove(task_id);
+    }
+
+    let mut t = match state.get_task_by_id(task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    if matches!(t.status, TaskStatus::Cancelled | TaskStatus::Paused)
+        || state.is_shutting_down.load(Ordering::SeqCst)
+    {
+        return;
+    }
+
+    match stream_res {
+        Ok((status, _err_log)) if status.success() => {
+            t.status = TaskStatus::Completed;
+            t.progress_percentage = 100.0;
+            t.speed_str = "0 B/s".to_string();
+            t.speed_bytes_per_sec = 0.0;
+            t.eta_str = "Finished".to_string();
+            t.current_phase = "Completed".to_string();
+            t.completed_at = Some(chrono::Utc::now().to_rfc3339());
+            if let Some(out_file) = detected_output_path {
+                t.output_path = out_file;
+            }
+
+            if t.is_audio_only {
+                let verify_target = PathBuf::from(&t.output_path);
+                if let Some(verified) = EngineManager::verify_audio_file(&verify_target) {
+                    t.verified_audio_info = Some(verified);
+                }
+            }
+
+            state.upsert_task(&t);
+            let _ = app.emit("task_updated", &t);
+
+            logging::info("download", &format!("Task '{}' completed.", t.id));
+
+            let notif = NotificationItem {
+                id: format!("notif_{}", chrono::Utc::now().timestamp_millis()),
+                r#type: "success".to_string(),
+                title: "Download Complete".to_string(),
+                message: format!("'{}' downloaded successfully.", t.title),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                task_id: Some(t.id.clone()),
+            };
+            state.add_notification(&notif);
+            let _ = app.emit("notification", &notif);
+        }
+        Ok((status, err_log)) => {
+            let clean_err = logging::redact_secrets(&err_log);
+            logging::error(
+                "download",
+                &format!(
+                    "Task '{}' exited with status {:?}: {}",
+                    t.id,
+                    status.code(),
+                    clean_err.lines().next().unwrap_or("unknown error")
+                ),
+            );
+
+            let is_410 = clean_err.contains("HTTP Error 410")
+                || clean_err.contains("410 Gone")
+                || clean_err.contains("URL expired");
+            let can_retry = t.retries < t.max_retries;
+
+            if is_410 && can_retry {
+                t.retries += 1;
+                t.status = TaskStatus::Queued;
+                t.current_phase = format!(
+                    "HTTP 410 detected. Refreshing tokens (attempt {}/{})...",
+                    t.retries, t.max_retries
+                );
+                state.upsert_task(&t);
+                let _ = app.emit("task_updated", &t);
+            } else if can_retry && settings.auto_retry_failed {
+                t.retries += 1;
+                t.status = TaskStatus::Queued;
+                t.current_phase = format!("Retrying ({}/{})...", t.retries, t.max_retries);
+                state.upsert_task(&t);
+                let _ = app.emit("task_updated", &t);
+            } else {
+                t.status = TaskStatus::Failed;
+                t.current_phase = "Failed".to_string();
+                t.error_message = Some(if clean_err.is_empty() {
+                    format!("Process exited with code {:?}", status.code())
+                } else {
+                    clean_err
+                });
+                t.speed_str = "0 B/s".to_string();
                 state.upsert_task(&t);
                 let _ = app.emit("task_updated", &t);
 
                 let notif = NotificationItem {
                     id: format!("notif_{}", chrono::Utc::now().timestamp_millis()),
-                    r#type: "success".to_string(),
-                    title: "Download Complete".to_string(),
-                    message: format!("'{}' downloaded successfully.", t.title),
+                    r#type: "error".to_string(),
+                    title: "Download Failed".to_string(),
+                    message: format!(
+                        "'{}' failed: {}",
+                        t.title,
+                        t.error_message.as_deref().unwrap_or("Unknown error")
+                    ),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     task_id: Some(t.id.clone()),
                 };
                 state.add_notification(&notif);
                 let _ = app.emit("notification", &notif);
             }
-            _ => {
-                let mut err_log = String::new();
-                if let Some(err_stream) = stderr {
-                    let r = BufReader::new(err_stream);
-                    for l in r.lines().flatten() {
-                        err_log.push_str(&l);
-                        err_log.push('\n');
-                    }
-                }
-
-                let is_410 = err_log.contains("HTTP Error 410")
-                    || err_log.contains("410 Gone")
-                    || err_log.contains("URL expired");
-                let can_retry = t.retries < t.max_retries;
-
-                if is_410 && can_retry {
-                    t.retries += 1;
-                    t.status = TaskStatus::Queued;
-                    t.current_phase = format!(
-                        "HTTP 410 detected. Refreshing tokens (attempt {}/{})...",
-                        t.retries, t.max_retries
-                    );
-                    state.upsert_task(&t);
-                    let _ = app.emit("task_updated", &t);
-                } else if can_retry && settings.auto_retry_failed {
-                    t.retries += 1;
-                    t.status = TaskStatus::Queued;
-                    t.current_phase = format!("Retrying ({}/{})...", t.retries, t.max_retries);
-                    state.upsert_task(&t);
-                    let _ = app.emit("task_updated", &t);
-                } else {
-                    t.status = TaskStatus::Failed;
-                    t.current_phase = "Failed".to_string();
-                    t.error_message = Some(EngineManager::sanitize_log(&err_log));
-                    t.speed_str = "0 B/s".to_string();
-                    state.upsert_task(&t);
-                    let _ = app.emit("task_updated", &t);
-
-                    let notif = NotificationItem {
-                        id: format!("notif_{}", chrono::Utc::now().timestamp_millis()),
-                        r#type: "error".to_string(),
-                        title: "Download Failed".to_string(),
-                        message: format!(
-                            "'{}' failed: {}",
-                            t.title,
-                            t.error_message.as_deref().unwrap_or("Unknown error")
-                        ),
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        task_id: Some(t.id.clone()),
-                    };
-                    state.add_notification(&notif);
-                    let _ = app.emit("notification", &notif);
-                }
-            }
+        }
+        Err(wait_err) => {
+            let clean_err = logging::redact_secrets(&wait_err);
+            logging::error("download", &format!("Task '{}' wait failed: {}", t.id, clean_err));
+            t.status = TaskStatus::Failed;
+            t.current_phase = "Failed".to_string();
+            t.error_message = Some(clean_err);
+            t.speed_str = "0 B/s".to_string();
+            state.upsert_task(&t);
+            let _ = app.emit("task_updated", &t);
         }
     }
-
-    schedule_next(app, &state);
 }

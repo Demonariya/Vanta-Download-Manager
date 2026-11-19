@@ -18,18 +18,25 @@ import {
   Info,
   Trash2,
   Cookie,
-  ShieldCheck,
+  Upload,
 } from 'lucide-react';
-import { MediaMetadata, FormatOption, TaskPriority } from '../types';
+import {
+  CookieStatus,
+  CookieValidationResult,
+  MediaMetadata,
+  TaskPriority,
+} from '../types';
 import { api } from '../services/api';
-import { formatBytes } from '../utils/engine-parser';
 import { isLikelyLossySource } from '../utils/audio-quality';
+import { validateNetscapeCookies } from '../utils/cookie-validator';
+import { describeCookieStatus } from '../utils/cookie-status-ui';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialUrl?: string;
   onTaskCreated: () => void;
+  onOpenCookieSettings?: () => void;
 }
 
 const SAMPLE_URLS = [
@@ -55,6 +62,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   onClose,
   initialUrl = '',
   onTaskCreated,
+  onOpenCookieSettings,
 }) => {
   const [url, setUrl] = useState(initialUrl);
   const [mode, setMode] = useState<'single' | 'batch'>('single');
@@ -63,10 +71,18 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
 
+  // Live cookie status & inline import panel
+  const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
+  const [showInlineCookieImport, setShowInlineCookieImport] = useState(false);
+  const [inlineCookieText, setInlineCookieText] = useState('');
+  const [inlineCookieValidation, setInlineCookieValidation] = useState<CookieValidationResult | null>(null);
+  const [inlineCookieError, setInlineCookieError] = useState<string | null>(null);
+  const [savingInlineCookies, setSavingInlineCookies] = useState(false);
+  const inlineFileInputRef = React.useRef<HTMLInputElement | null>(null);
+
   // Selected download settings
   const [selectedTab, setSelectedTab] = useState<'video' | 'audio' | 'advanced'>('video');
   const [selectedFormatId, setSelectedFormatId] = useState<string>('best');
-  const [selectedResolution, setSelectedResolution] = useState<string>('best');
   const [selectedContainer, setSelectedContainer] = useState<string>('mp4');
   const [selectedAudioFormat, setSelectedAudioFormat] = useState<string>('mp3');
   const [selectedAudioBitrate, setSelectedAudioBitrate] = useState<string>('320k');
@@ -75,6 +91,21 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const refreshCookies = async () => {
+    try {
+      const status = await api.getCookieStatus();
+      setCookieStatus(status);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      refreshCookies();
+    }
+  }, [isOpen]);
+
   useEffect(() => {
     if (initialUrl && initialUrl !== url) {
       setUrl(initialUrl);
@@ -82,7 +113,17 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     }
   }, [initialUrl]);
 
+  useEffect(() => {
+    if (!inlineCookieText.trim()) {
+      setInlineCookieValidation(null);
+      return;
+    }
+    setInlineCookieValidation(validateNetscapeCookies(inlineCookieText));
+  }, [inlineCookieText]);
+
   if (!isOpen) return null;
+
+  const cookieBadge = describeCookieStatus(cookieStatus);
 
   const inspect = async (targetUrl: string) => {
     if (!targetUrl.trim()) return;
@@ -304,15 +345,49 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 ))}
               </div>
 
-              {/* Cookie & Adult Site Pipeline Badge */}
-              <div className="mt-2.5 p-2 bg-[#161b22] border border-[#21262d] rounded-lg flex items-center justify-between text-[11px]">
-                <div className="flex items-center gap-2">
-                  <Cookie className="w-3.5 h-3.5 text-[#3fb950]" />
-                  <span className="text-[#c9d1d9]">Automatic Cookie & Adult Site Pipeline</span>
+              {/* Live Cookie Status Banner */}
+              <div className="mt-2.5 p-2.5 bg-[#161b22] border border-[#21262d] rounded-lg flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Cookie
+                    className={`w-3.5 h-3.5 shrink-0 ${
+                      cookieBadge.tone === 'error'
+                        ? 'text-[#f85149]'
+                        : cookieBadge.tone === 'warning'
+                        ? 'text-[#e3b341]'
+                        : cookieBadge.tone === 'muted'
+                        ? 'text-[#8b949e]'
+                        : 'text-[#3fb950]'
+                    }`}
+                  />
+                  <span className="text-[#c9d1d9] truncate" title={cookieBadge.detail}>
+                    {cookieBadge.label}: <span className="text-[#8b949e]">{cookieBadge.detail}</span>
+                  </span>
                 </div>
-                <span className="text-[10px] font-mono text-[#3fb950] bg-[#238636]/15 border border-[#238636]/30 px-1.5 py-0.5 rounded">
-                  Enabled
-                </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span
+                    data-testid="modal-cookie-badge"
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                      cookieBadge.tone === 'success'
+                        ? 'text-[#3fb950] bg-[#238636]/15 border-[#238636]/30'
+                        : cookieBadge.tone === 'info'
+                        ? 'text-[#58a6ff] bg-[#1f6feb]/15 border-[#1f6feb]/30'
+                        : cookieBadge.tone === 'warning'
+                        ? 'text-[#e3b341] bg-[#d29922]/15 border-[#d29922]/30'
+                        : cookieBadge.tone === 'error'
+                        ? 'text-[#f85149] bg-[#da3633]/15 border-[#da3633]/40'
+                        : 'text-[#8b949e] bg-[#21262d] border-[#30363d]'
+                    }`}
+                  >
+                    {cookieBadge.badgeText}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowInlineCookieImport((v) => !v)}
+                    className="px-2 py-0.5 text-[10px] bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded transition-colors"
+                  >
+                    {showInlineCookieImport ? 'Hide Cookies' : 'Cookies'}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
@@ -330,7 +405,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
           )}
 
-          {/* Extraction Error Notice with Inline Cookie Rescue */}
+          {/* Extraction Error Notice with Inline Cookie Import Trigger */}
           {extractError && (
             <div className="p-3 bg-[#da3633]/15 border border-[#f85149]/40 rounded-lg text-xs text-[#f85149] space-y-2">
               <div className="flex items-start gap-2">
@@ -339,30 +414,148 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               </div>
               <div className="pt-1 border-t border-[#f85149]/30 flex flex-wrap items-center gap-2">
                 <span className="text-[11px] text-[#e6edf3]">
-                  Requires login or bot-check bypass?
+                  Authentication or cookie access issue?
                 </span>
                 <button
                   type="button"
-                  onClick={async () => {
-                    const pasted = prompt(
-                      'Paste your Netscape cookies text (or cookies.txt contents) to authenticate:'
-                    );
-                    if (pasted && pasted.trim()) {
-                      await api.saveCookies(pasted.trim());
-                      inspect(url);
-                    }
-                  }}
+                  onClick={() => setShowInlineCookieImport(true)}
                   className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-white text-[11px] font-medium rounded transition-colors flex items-center gap-1"
                 >
                   <Cookie className="w-3 h-3 text-[#3fb950]" />
-                  <span>Paste Cookies & Retry</span>
+                  <span>Import cookies.txt</span>
                 </button>
+                {onOpenCookieSettings && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenCookieSettings();
+                    }}
+                    className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#58a6ff] text-[11px] font-medium rounded transition-colors"
+                  >
+                    Open Cookie Settings
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => inspect(url)}
                   className="px-2.5 py-1 bg-[#da3633]/25 hover:bg-[#da3633]/40 text-[#ff7b72] text-[11px] font-medium rounded transition-colors"
                 >
                   Retry Analysis
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Inline Validated Cookie Import Panel */}
+          {showInlineCookieImport && (
+            <div className="p-3 rounded-lg border border-[#30363d] bg-[#161b22] space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-white flex items-center gap-1.5">
+                  <Cookie className="w-3.5 h-3.5 text-[#3fb950]" />
+                  <span>Import Netscape cookies.txt</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={inlineFileInputRef}
+                    type="file"
+                    accept=".txt,text/plain"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setInlineCookieText(await file.text());
+                      setInlineCookieError(null);
+                      e.target.value = '';
+                    }}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => inlineFileInputRef.current?.click()}
+                    className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] text-[11px] rounded flex items-center gap-1"
+                  >
+                    <Upload className="w-3 h-3 text-[#58a6ff]" />
+                    <span>Upload File</span>
+                  </button>
+                  {cookieStatus?.fileExists && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const updated = await api.removeCookies();
+                        setCookieStatus(updated);
+                        setInlineCookieText('');
+                        setInlineCookieError(null);
+                      }}
+                      className="px-2 py-1 bg-[#da3633]/15 hover:bg-[#da3633]/25 text-[#f85149] text-[11px] rounded"
+                    >
+                      Remove Existing
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <textarea
+                rows={3}
+                value={inlineCookieText}
+                onChange={(e) => {
+                  setInlineCookieText(e.target.value);
+                  setInlineCookieError(null);
+                }}
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1899999999&#9;SID&#9;..."
+                className="w-full bg-[#0d1117] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-[11px] p-2 font-mono text-[#e6edf3] placeholder-[#6e7681]"
+              />
+
+              {inlineCookieValidation && (
+                <div
+                  className={`text-[11px] font-mono ${
+                    inlineCookieValidation.valid ? 'text-[#3fb950]' : 'text-[#f85149]'
+                  }`}
+                >
+                  {inlineCookieValidation.valid
+                    ? `Valid Netscape cookie format (${inlineCookieValidation.recordCount} entries, ${inlineCookieValidation.domainCount} domains).`
+                    : inlineCookieValidation.errors[0]}
+                </div>
+              )}
+
+              {inlineCookieError && (
+                <div className="text-[11px] text-[#f85149]">{inlineCookieError}</div>
+              )}
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowInlineCookieImport(false)}
+                  className="px-2.5 py-1 text-[11px] text-[#8b949e] hover:text-white"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    savingInlineCookies ||
+                    !inlineCookieText.trim() ||
+                    (inlineCookieValidation !== null && !inlineCookieValidation.valid)
+                  }
+                  onClick={async () => {
+                    setInlineCookieError(null);
+                    setSavingInlineCookies(true);
+                    try {
+                      const updated = await api.saveCookies(inlineCookieText);
+                      setCookieStatus(updated);
+                      setInlineCookieText('');
+                      setShowInlineCookieImport(false);
+                      if (url.trim()) {
+                        inspect(url);
+                      }
+                    } catch (err: any) {
+                      setInlineCookieError(err.message || 'Invalid cookies.txt format.');
+                    } finally {
+                      setSavingInlineCookies(false);
+                    }
+                  }}
+                  className="px-3 py-1 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white text-[11px] font-medium rounded"
+                >
+                  {savingInlineCookies ? 'Saving...' : 'Save Cookies & Retry'}
                 </button>
               </div>
             </div>

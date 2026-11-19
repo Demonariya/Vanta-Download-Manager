@@ -16,8 +16,16 @@ import {
   AlertCircle,
   Shield,
   LifeBuoy,
+  FileText,
+  FolderOpen,
 } from 'lucide-react';
-import { EngineStatusMap, DiagnosticResult, EngineUpdateResult, EngineInstallProgress } from '../types';
+import {
+  EngineStatusMap,
+  DiagnosticResult,
+  EngineUpdateResult,
+  EngineInstallProgress,
+  DiagnosticLogInfo,
+} from '../types';
 import { api } from '../services/api';
 
 interface DiagnosticsViewProps {
@@ -39,6 +47,20 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   const [updatesInfo, setUpdatesInfo] = useState<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }> | null>(null);
   const [updatingEngine, setUpdatingEngine] = useState<string | null>(null);
   const [updateResults, setUpdateResults] = useState<EngineUpdateResult[] | null>(null);
+  const [logInfo, setLogInfo] = useState<DiagnosticLogInfo | null>(null);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+
+  const loadDiagnosticLogs = async () => {
+    setIsLoadingLogs(true);
+    try {
+      const info = await api.getDiagnosticLogInfo(100);
+      setLogInfo(info);
+    } catch (err) {
+      console.error('Failed to load application logs:', err);
+    } finally {
+      setIsLoadingLogs(false);
+    }
+  };
 
   const handleRunDiagnostics = async () => {
     setIsRunning(true);
@@ -105,8 +127,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   };
 
   useEffect(() => {
-    // Initial update check on mount
+    // Initial update check and log fetch on mount
     handleCheckUpdates();
+    loadDiagnosticLogs();
   }, []);
 
   return (
@@ -370,6 +393,48 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Application Logs & Crash Diagnostics */}
+      <div className="p-4 sm:p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div>
+            <h2 className="text-xs font-semibold uppercase font-mono text-[#c9d1d9] flex items-center gap-2">
+              <FileText className="w-4 h-4 text-[#58a6ff]" />
+              <span>Application Logs & Crash Diagnostics</span>
+            </h2>
+            {logInfo && (
+              <p className="text-[11px] font-mono text-[#7d8590] mt-1 break-all">
+                {logInfo.logPath} ({Math.max(1, Math.round(logInfo.fileSizeBytes / 1024))} KiB)
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={loadDiagnosticLogs}
+              disabled={isLoadingLogs}
+              className="px-2.5 py-1.5 bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 text-[#c9d1d9] rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingLogs ? 'animate-spin text-[#58a6ff]' : ''}`} />
+              <span>{isLoadingLogs ? 'Refreshing...' : 'Refresh Logs'}</span>
+            </button>
+            <button
+              onClick={() => api.openLogsFolder()}
+              className="px-2.5 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition-colors"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-[#58a6ff]" />
+              <span>Open Logs Folder</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="p-3 rounded-lg border border-[#30363d] bg-[#0d1117] font-mono text-[11px] text-[#c9d1d9] max-h-64 overflow-auto whitespace-pre-wrap break-words leading-relaxed">
+          {logInfo && logInfo.recentLines.length > 0
+            ? logInfo.recentLines.join('\n')
+            : isLoadingLogs
+            ? 'Loading sanitized diagnostic log...'
+            : 'No application log entries recorded yet.'}
+        </div>
+      </div>
     </div>
   );
 };

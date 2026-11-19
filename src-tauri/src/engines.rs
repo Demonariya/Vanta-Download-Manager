@@ -1,9 +1,11 @@
+use crate::cookies::{self, ResolvedCookieSource};
+use crate::logging;
 use crate::models::{
     AppSettings, DiagnosticResult, EngineInfo, EngineInstallProgress, EngineStatusMap,
     EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata,
 };
+use crate::process;
 use crate::state::AppState;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -201,10 +203,9 @@ impl EngineManager {
                 cmd.arg(ver_flag);
                 Self::apply_engine_env(&mut cmd);
 
-                match cmd.output() {
+                match process::run_captured_command(&mut cmd) {
                     Ok(output) if output.status.success() => {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        let first_line = text.lines().next().unwrap_or("").trim().to_string();
+                        let first_line = output.stdout.lines().next().unwrap_or("").trim().to_string();
                         let clean_version = first_line
                             .trim_start_matches("ffmpeg version")
                             .trim_start_matches("ffprobe version")
@@ -229,7 +230,7 @@ impl EngineManager {
                         }
                     }
                     Ok(output) => {
-                        let err_msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        let err_msg = logging::redact_secrets(output.stderr.trim());
                         EngineInfo {
                             available: false,
                             version: String::new(),
@@ -519,19 +520,19 @@ impl EngineManager {
             }
         }
 
-        let output = cmd
-            .output()
+        let output = process::run_captured_command(&mut cmd)
             .map_err(|e| format!("Failed to execute verification command: {}", e))?;
 
         if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let err = logging::redact_secrets(output.stderr.trim());
             return Err(format!(
                 "Verification command exited with non-zero status: {}",
                 err
             ));
         }
 
-        let version = String::from_utf8_lossy(&output.stdout)
+        let version = output
+            .stdout
             .lines()
             .next()
             .unwrap_or("")
@@ -983,13 +984,13 @@ impl EngineManager {
                     let mut cmd = Command::new(&path);
                     cmd.arg(flag);
                     Self::apply_engine_env(&mut cmd);
-                    let cmd_res = cmd.output();
+                    let cmd_res = process::run_captured_command(&mut cmd);
                     let duration_ms = start.elapsed().as_millis() as u64;
 
                     match cmd_res {
                         Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                            let stdout = output.stdout.trim().to_string();
+                            let stderr = logging::redact_secrets(output.stderr.trim());
                             let combined = if stdout.is_empty() { stderr } else { stdout };
                             let first_line = combined.lines().next().unwrap_or("").to_string();
 
@@ -1031,30 +1032,11 @@ impl EngineManager {
     }
 
     pub fn sanitize_log(text: &str) -> String {
-        let re_bearer = Regex::new(r"(?i)bearer\s+[a-z0-9_\-\.~]+").unwrap();
-        let re_auth = Regex::new(r"(?i)authorization:\s*[^\r\n]+").unwrap();
-        let re_cookie = Regex::new(r#"(?i)["']?cookie["']?\s*:\s*["']?[^"'\r\n]+"#).unwrap();
-        let re_sig = Regex::new(r"(?i)([?&](?:sig|signature|token|session_token|auth|key|secret)=)[^&\s]+").unwrap();
-
-        let s1 = re_bearer.replace_all(text, "Bearer [REDACTED_TOKEN]");
-        let s2 = re_auth.replace_all(&s1, "Authorization: [REDACTED_HEADER]");
-        let s3 = re_cookie.replace_all(&s2, "Cookie: [REDACTED_COOKIE]");
-        let s4 = re_sig.replace_all(&s3, "$1[REDACTED]");
-        s4.to_string()
+        logging::redact_secrets(text)
     }
 
-    pub fn build_ytdlp_cookie_and_adult_args(url: &str, settings: &AppSettings) -> Vec<String> {
+    pub fn build_ytdlp_request_args(url: &str, settings: &AppSettings) -> Result<Vec<String>, String> {
         let mut args = Vec::new();
-
-        if settings.enable_adult_sites != Some(false) {
-            args.push("--age-limit".to_string());
-            args.push("99".to_string());
-            args.push("--no-check-certificates".to_string());
-        }
-
-        if settings.bypass_age_gate != Some(false) {
-            args.push("--geo-bypass".to_string());
-        }
 
         let ua = settings
             .user_agent
@@ -1065,8 +1047,6 @@ impl EngineManager {
         args.push(ua.to_string());
         args.push("--add-header".to_string());
         args.push("Accept-Language:en-US,en;q=0.9".to_string());
-        args.push("--add-header".to_string());
-        args.push("Sec-Fetch-Mode:navigate".to_string());
 
         if let Some(scheme_idx) = url.find("://") {
             let after_scheme = &url[scheme_idx + 3..];
@@ -1084,194 +1064,237 @@ impl EngineManager {
             }
         }
 
-        let default_cookie_file = AppState::app_data_dir().join("cookies.txt");
-        let custom_cookie_path = settings
-            .cookies_file
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or(default_cookie_file);
-
-        if custom_cookie_path.exists() {
-            if let Ok(content) = fs::read_to_string(&custom_cookie_path) {
-                if !content.trim().is_empty() {
-                    args.push("--cookies".to_string());
-                    args.push(custom_cookie_path.to_string_lossy().to_string());
-                    return args;
-                }
+        match cookies::resolve_cookie_source(settings, None, None)? {
+            ResolvedCookieSource::File(cookie_path) => {
+                args.push("--cookies".to_string());
+                args.push(cookie_path.to_string_lossy().to_string());
             }
+            ResolvedCookieSource::Browser { spec, .. } => {
+                args.push("--cookies-from-browser".to_string());
+                args.push(spec);
+            }
+            ResolvedCookieSource::Disabled => {}
         }
 
-        let browser = settings.cookies_browser.as_deref().unwrap_or("auto");
-        if browser != "none" && !browser.is_empty() {
-            let target = if browser == "auto" { "chrome" } else { browser };
-            args.push("--cookies-from-browser".to_string());
-            args.push(target.to_string());
-        }
-
-        args
+        Ok(args)
     }
 
     pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
+        if url.contains("spotify.com") {
+            let track_id = url
+                .split('/')
+                .last()
+                .and_then(|s| s.split('?').next())
+                .unwrap_or("track")
+                .to_string();
+            let is_playlist = url.contains("/playlist/") || url.contains("/album/");
+            return Ok(MediaMetadata {
+                url: url.to_string(),
+                id: track_id,
+                title: if is_playlist {
+                    "Spotify Album / Playlist".to_string()
+                } else {
+                    "Spotify Music Track".to_string()
+                },
+                uploader: Some("Spotify Artist".to_string()),
+                duration: Some(180),
+                duration_string: Some("03:00".to_string()),
+                thumbnail: Some("https://open.spotifycdn.com/cdn/images/favicon.0f31d2ea.ico".to_string()),
+                description: Some("Music track processed via spotDL audio pipeline.".to_string()),
+                formats: vec![
+                    FormatOption {
+                        format_id: "spotdl-best".to_string(),
+                        ext: "mp3".to_string(),
+                        resolution: Some("320kbps Audio".to_string()),
+                        width: None,
+                        height: None,
+                        fps: None,
+                        vcodec: None,
+                        acodec: None,
+                        filesize: None,
+                        filesize_approx: None,
+                        format_note: Some("High-Fidelity MP3 (320 kbps)".to_string()),
+                        is_audio_only: true,
+                        is_video_only: false,
+                    },
+                    FormatOption {
+                        format_id: "spotdl-flac".to_string(),
+                        ext: "flac".to_string(),
+                        resolution: Some("Lossless Audio".to_string()),
+                        width: None,
+                        height: None,
+                        fps: None,
+                        vcodec: None,
+                        acodec: None,
+                        filesize: None,
+                        filesize_approx: None,
+                        format_note: Some("Lossless FLAC audio".to_string()),
+                        is_audio_only: true,
+                        is_video_only: false,
+                    },
+                ],
+                is_playlist,
+                playlist_count: if is_playlist { Some(10) } else { None },
+                extractor: "spotdl".to_string(),
+            });
+        }
+
         Self::ensure_required_engines(false, false)?;
         let ytdlp_path = Self::find_executable("yt-dlp")
             .ok_or_else(|| "yt-dlp executable not found".to_string())?;
 
-        let extra_args = Self::build_ytdlp_cookie_and_adult_args(url, settings);
+        let extra_args = Self::build_ytdlp_request_args(url, settings)?;
 
-        let run_once = |extra: &[String]| -> Result<MediaMetadata, String> {
-            let mut cmd = Command::new(&ytdlp_path);
-            cmd.args([
-                "--dump-single-json",
-                "--no-playlist",
-                "--no-warnings",
-                "--no-call-home",
-                "--no-cache-dir",
-            ]);
-            cmd.args(extra);
-            if !settings.proxy_url.trim().is_empty() {
-                cmd.args(["--proxy", settings.proxy_url.trim()]);
-            }
-            cmd.arg(url);
-            Self::apply_engine_env(&mut cmd);
+        let mut cmd = Command::new(&ytdlp_path);
+        cmd.args([
+            "--dump-single-json",
+            "--no-playlist",
+            "--no-warnings",
+            "--no-call-home",
+            "--no-cache-dir",
+        ]);
+        cmd.args(&extra_args);
+        if !settings.proxy_url.trim().is_empty() {
+            cmd.args(["--proxy", settings.proxy_url.trim()]);
+        }
+        cmd.arg(url);
+        Self::apply_engine_env(&mut cmd);
 
-            let output = cmd
-                .output()
-                .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+        let output = process::run_captured_command(&mut cmd)
+            .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(Self::sanitize_log(&stderr));
-            }
+        if !output.status.success() {
+            let err_clean = Self::sanitize_log(if output.stderr.trim().is_empty() {
+                output.stdout.trim()
+            } else {
+                output.stderr.trim()
+            });
+            let lower = err_clean.to_ascii_lowercase();
 
-            let json_str = String::from_utf8_lossy(&output.stdout);
-            let val: serde_json::Value = serde_json::from_str(&json_str)
-                .map_err(|e| format!("Failed to parse JSON metadata: {}", e))?;
-
-            let mut formats = Vec::new();
-            if let Some(formats_arr) = val.get("formats").and_then(|f| f.as_array()) {
-                for f in formats_arr {
-                    let format_id = f
-                        .get("format_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if format_id.is_empty() {
-                        continue;
-                    }
-                    let ext = f
-                        .get("ext")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("mp4")
-                        .to_string();
-                    let resolution = f
-                        .get("resolution")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let width = f.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    let height = f.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    let fps = f.get("fps").and_then(|v| v.as_f64());
-                    let vcodec = f
-                        .get("vcodec")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let acodec = f
-                        .get("acodec")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let filesize = f.get("filesize").and_then(|v| v.as_u64());
-                    let filesize_approx = f.get("filesize_approx").and_then(|v| v.as_u64());
-                    let format_note = f
-                        .get("format_note")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let is_audio_only =
-                        vcodec.as_deref() == Some("none") && acodec.as_deref() != Some("none");
-                    let is_video_only =
-                        acodec.as_deref() == Some("none") && vcodec.as_deref() != Some("none");
-
-                    formats.push(FormatOption {
-                        format_id,
-                        ext,
-                        resolution,
-                        width,
-                        height,
-                        fps,
-                        vcodec,
-                        acodec,
-                        filesize,
-                        filesize_approx,
-                        format_note,
-                        is_audio_only,
-                        is_video_only,
-                    });
-                }
+            if lower.contains("could not copy chrome cookie database")
+                || lower.contains("cookie database")
+                || lower.contains("dpapi")
+                || lower.contains("app-bound")
+                || lower.contains("database is locked")
+            {
+                return Err(format!(
+                    "Browser cookie database access failed: {}\n\nClose the browser, select Firefox, or import a Netscape cookies.txt file in Settings > Cookies.",
+                    err_clean
+                ));
             }
 
-            Ok(MediaMetadata {
-                url: url.to_string(),
-                id: val
-                    .get("id")
+            if lower.contains("sign in") || lower.contains("cookies for authentication") {
+                return Err(format!(
+                    "Authentication required: {}\n\nConfigure your browser profile or import a valid cookies.txt file in Settings > Cookies.",
+                    err_clean
+                ));
+            }
+
+            return Err(format!("Inspection failed: {}", err_clean));
+        }
+
+        let val: serde_json::Value = serde_json::from_str(&output.stdout)
+            .map_err(|e| format!("Failed to parse JSON metadata: {}", e))?;
+
+        let mut formats = Vec::new();
+        if let Some(formats_arr) = val.get("formats").and_then(|f| f.as_array()) {
+            for f in formats_arr {
+                let format_id = f
+                    .get("format_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
-                    .to_string(),
-                title: val
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Media")
-                    .to_string(),
-                uploader: val
-                    .get("uploader")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                duration: val.get("duration").and_then(|v| v.as_u64()),
-                duration_string: val
-                    .get("duration_string")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                thumbnail: val
-                    .get("thumbnail")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                description: val
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                formats,
-                is_playlist: false,
-                playlist_count: None,
-                extractor: val
-                    .get("extractor")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("yt-dlp")
-                    .to_string(),
-            })
-        };
-
-        match run_once(&extra_args) {
-            Ok(meta) => Ok(meta),
-            Err(first_err)
-                if first_err.contains("Could not find")
-                    && (first_err.contains("cookie") || first_err.contains("database")) =>
-            {
-                let mut stripped = Vec::new();
-                let mut skip_next = false;
-                for arg in extra_args {
-                    if skip_next {
-                        skip_next = false;
-                        continue;
-                    }
-                    if arg == "--cookies-from-browser" {
-                        skip_next = true;
-                        continue;
-                    }
-                    stripped.push(arg);
+                    .to_string();
+                if format_id.is_empty() {
+                    continue;
                 }
-                run_once(&stripped)
+                let ext = f
+                    .get("ext")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("mp4")
+                    .to_string();
+                let resolution = f
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let width = f.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let height = f.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let fps = f.get("fps").and_then(|v| v.as_f64());
+                let vcodec = f
+                    .get("vcodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let acodec = f
+                    .get("acodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let filesize = f.get("filesize").and_then(|v| v.as_u64());
+                let filesize_approx = f.get("filesize_approx").and_then(|v| v.as_u64());
+                let format_note = f
+                    .get("format_note")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let is_audio_only =
+                    vcodec.as_deref() == Some("none") && acodec.as_deref() != Some("none");
+                let is_video_only =
+                    acodec.as_deref() == Some("none") && vcodec.as_deref() != Some("none");
+
+                formats.push(FormatOption {
+                    format_id,
+                    ext,
+                    resolution,
+                    width,
+                    height,
+                    fps,
+                    vcodec,
+                    acodec,
+                    filesize,
+                    filesize_approx,
+                    format_note,
+                    is_audio_only,
+                    is_video_only,
+                });
             }
-            Err(err) => Err(err),
         }
+
+        Ok(MediaMetadata {
+            url: url.to_string(),
+            id: val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: val
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Media")
+                .to_string(),
+            uploader: val
+                .get("uploader")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            duration: val.get("duration").and_then(|v| v.as_u64()),
+            duration_string: val
+                .get("duration_string")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            thumbnail: val
+                .get("thumbnail")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            description: val
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            formats,
+            is_playlist: false,
+            playlist_count: None,
+            extractor: val
+                .get("extractor")
+                .and_then(|v| v.as_str())
+                .unwrap_or("yt-dlp")
+                .to_string(),
+        })
     }
 
     pub fn verify_audio_file(file_path: &Path) -> Option<String> {
@@ -1312,13 +1335,12 @@ impl EngineManager {
         ]);
         Self::apply_engine_env(&mut cmd);
 
-        let output = cmd.output().ok()?;
+        let output = process::run_captured_command(&mut cmd).ok()?;
         if !output.status.success() {
             return None;
         }
 
-        let json_str = String::from_utf8_lossy(&output.stdout);
-        let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+        let val: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
         let stream = val
             .get("streams")
             .and_then(|s| s.as_array())?
@@ -1428,5 +1450,46 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert!(!clean.contains("secret123"));
         assert!(!clean.contains("session=abc"));
         assert!(!clean.contains("token=xyz"));
+    }
+
+    #[test]
+    fn test_build_ytdlp_request_args_precedence_and_no_bypass_flags() {
+        let dir = env::temp_dir().join(format!("vanta_eng_args_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let cookie_file = dir.join("cookies.txt");
+        fs::write(
+            &cookie_file,
+            "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t1893456000\tsid\tabc123\n",
+        )
+        .unwrap();
+
+        let mut settings = AppSettings::default();
+        settings.cookies_browser = Some("firefox".to_string());
+        settings.cookies_file = Some(cookie_file.to_string_lossy().to_string());
+
+        let args = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
+            .expect("should build request args");
+
+        assert!(args.windows(2).any(|w| w[0] == "--cookies" && w[1] == cookie_file.to_string_lossy()));
+        assert!(!args.iter().any(|a| a == "--cookies-from-browser"));
+        assert!(!args.iter().any(|a| a == "--age-limit" || a == "--geo-bypass" || a == "--no-check-certificates"));
+
+        settings.cookies_file = None;
+        let _ = fs::remove_dir_all(&dir);
+
+        // When imported file is cleared, explicit browser is used (if managed default file isn't present)
+        if !crate::cookies::managed_cookies_path().exists() {
+            settings.cookies_profile = Some("default-release".to_string());
+            let args_browser = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
+                .expect("should build browser args");
+            assert!(args_browser
+                .windows(2)
+                .any(|w| w[0] == "--cookies-from-browser" && w[1] == "firefox:default-release"));
+
+            settings.cookies_browser = Some("none".to_string());
+            let args_disabled = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
+                .expect("should build args when cookies disabled");
+            assert!(!args_disabled.iter().any(|a| a == "--cookies" || a == "--cookies-from-browser"));
+        }
     }
 }

@@ -1,7 +1,10 @@
-pub mod models;
-pub mod state;
-pub mod engines;
 pub mod commands;
+pub mod cookies;
+pub mod engines;
+pub mod logging;
+pub mod models;
+pub mod process;
+pub mod state;
 
 pub use state::AppState;
 
@@ -17,13 +20,28 @@ pub fn sanitize_filename(name: &str) -> String {
 pub fn parse_bytes(s: &str) -> u64 {
     let s = s.trim().to_uppercase();
     if s.ends_with("GIB") || s.ends_with("GB") {
-        let num: f64 = s.trim_end_matches("GIB").trim_end_matches("GB").trim().parse().unwrap_or(0.0);
+        let num: f64 = s
+            .trim_end_matches("GIB")
+            .trim_end_matches("GB")
+            .trim()
+            .parse()
+            .unwrap_or(0.0);
         (num * 1024.0 * 1024.0 * 1024.0) as u64
     } else if s.ends_with("MIB") || s.ends_with("MB") {
-        let num: f64 = s.trim_end_matches("MIB").trim_end_matches("MB").trim().parse().unwrap_or(0.0);
+        let num: f64 = s
+            .trim_end_matches("MIB")
+            .trim_end_matches("MB")
+            .trim()
+            .parse()
+            .unwrap_or(0.0);
         (num * 1024.0 * 1024.0) as u64
     } else if s.ends_with("KIB") || s.ends_with("KB") {
-        let num: f64 = s.trim_end_matches("KIB").trim_end_matches("KB").trim().parse().unwrap_or(0.0);
+        let num: f64 = s
+            .trim_end_matches("KIB")
+            .trim_end_matches("KB")
+            .trim()
+            .parse()
+            .unwrap_or(0.0);
         (num * 1024.0) as u64
     } else if s.ends_with('B') {
         s.trim_end_matches('B').trim().parse().unwrap_or(0)

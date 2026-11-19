@@ -401,6 +401,10 @@ export default function App() {
         onTaskCreated={() => {
           setActiveTab('queue');
         }}
+        onOpenCookieSettings={() => {
+          setIsNewDownloadOpen(false);
+          setActiveTab('settings');
+        }}
       />
 
       {/* Notification Center Flyout */}

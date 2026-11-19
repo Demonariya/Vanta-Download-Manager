@@ -8,6 +8,11 @@ import {
   EngineUpdateResult,
   EngineInstallProgress,
   ManagedEngineInfo,
+  CookieStatus,
+  CookieTestResult,
+  CookieValidationResult,
+  DetectedBrowserInfo,
+  DiagnosticLogInfo,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
@@ -220,27 +225,108 @@ export class ApiService {
     });
   }
 
-  public async testCookieExtraction(
-    browser: string
-  ): Promise<{ success: boolean; message: string; browser: string }> {
-    const res = await fetch('/api/cookies/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ browser }),
-    });
+  public async getCookieStatus(): Promise<CookieStatus> {
+    if (this.isTauri()) {
+      return invoke<CookieStatus>('get_cookie_status');
+    }
+    const res = await fetch('/api/cookies/status');
+    if (!res.ok) throw new Error('Failed to fetch cookie status');
     return res.json();
   }
 
-  public async saveCookies(content: string): Promise<{ success: boolean; path: string }> {
+  public async detectBrowsers(): Promise<DetectedBrowserInfo[]> {
     if (this.isTauri()) {
-      return invoke<{ success: boolean; path: string }>('save_cookies', { content });
+      return invoke<DetectedBrowserInfo[]>('detect_browsers');
+    }
+    const res = await fetch('/api/cookies/browsers');
+    if (!res.ok) throw new Error('Failed to detect installed browsers');
+    return res.json();
+  }
+
+  public async validateCookiesText(content: string): Promise<CookieValidationResult> {
+    if (this.isTauri()) {
+      return invoke<CookieValidationResult>('validate_cookies_text', { content });
+    }
+    const res = await fetch('/api/cookies/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!res.ok) throw new Error('Failed validating cookie text');
+    return res.json();
+  }
+
+  public async testCookieExtraction(
+    browser?: string,
+    profile?: string,
+    testUrl?: string
+  ): Promise<CookieTestResult> {
+    if (this.isTauri()) {
+      return invoke<CookieTestResult>('test_cookie_extraction', {
+        browser: browser || null,
+        profile: profile?.trim() || null,
+        testUrl: testUrl?.trim() || null,
+      });
+    }
+    const res = await fetch('/api/cookies/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        browser: browser || undefined,
+        profile: profile?.trim() || undefined,
+        testUrl: testUrl?.trim() || undefined,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok && !data) {
+      throw new Error('Failed testing cookie extraction');
+    }
+    return data;
+  }
+
+  public async saveCookies(content: string): Promise<CookieStatus> {
+    if (this.isTauri()) {
+      return invoke<CookieStatus>('save_cookies', { content });
     }
     const res = await fetch('/api/cookies/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to save Netscape cookie file');
+    }
+    return data;
+  }
+
+  public async removeCookies(): Promise<CookieStatus> {
+    if (this.isTauri()) {
+      return invoke<CookieStatus>('remove_cookies');
+    }
+    const res = await fetch('/api/cookies', { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed removing cookie file');
+    }
+    return data;
+  }
+
+  public async getDiagnosticLogInfo(maxLines = 100): Promise<DiagnosticLogInfo> {
+    if (this.isTauri()) {
+      return invoke<DiagnosticLogInfo>('get_diagnostic_log_info', { maxLines });
+    }
+    const res = await fetch(`/api/diagnostics/logs?maxLines=${encodeURIComponent(String(maxLines))}`);
+    if (!res.ok) throw new Error('Failed reading diagnostic logs');
     return res.json();
+  }
+
+  public async openLogsFolder(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('open_logs_folder');
+    }
+    const info = await this.getDiagnosticLogInfo(10);
+    console.info('Diagnostic log directory:', info.logDir);
   }
 
   public async getSettings(): Promise<AppSettings> {

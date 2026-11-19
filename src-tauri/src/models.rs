@@ -249,6 +249,79 @@ pub struct DiagnosticResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticLogInfo {
+    pub log_dir: String,
+    pub log_path: String,
+    pub exists: bool,
+    pub file_size_bytes: u64,
+    pub recent_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieValidationResult {
+    pub valid: bool,
+    pub record_count: usize,
+    pub domain_count: usize,
+    pub http_only_count: usize,
+    pub secure_count: usize,
+    pub has_netscape_header: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedBrowserInfo {
+    pub id: String,
+    pub label: String,
+    pub detected: bool,
+    pub profiles: Vec<String>,
+    pub default_profile: Option<String>,
+    pub has_cookie_store: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieStatus {
+    pub active_source: String, // "file" | "browser" | "auto" | "none"
+    pub configured_browser: String,
+    pub configured_profile: Option<String>,
+    pub resolved_browser: Option<String>,
+    pub resolved_profile: Option<String>,
+    pub file_configured: bool,
+    pub file_exists: bool,
+    pub file_path: String,
+    pub file_valid: bool,
+    pub record_count: usize,
+    pub domain_count: usize,
+    pub http_only_count: usize,
+    pub secure_count: usize,
+    pub updated_at: Option<String>,
+    pub error: Option<String>,
+    pub detected_browsers: Vec<DetectedBrowserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieTestResult {
+    pub success: bool,
+    pub stage: String, // "disabled" | "file_valid" | "file_invalid" | "browser_not_installed" | "profile_missing" | "db_locked" | "extraction_ok" | "auth_verified" | "auth_failed" | "engine_missing"
+    pub active_source: String,
+    pub browser: String,
+    pub resolved_browser: Option<String>,
+    pub resolved_profile: Option<String>,
+    pub browser_detected: bool,
+    pub profile_located: bool,
+    pub database_accessible: bool,
+    pub extraction_succeeded: bool,
+    pub auth_verified: Option<bool>,
+    pub record_count: usize,
+    pub message: String,
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationItem {
     pub id: String,
     pub r#type: String,
@@ -283,10 +356,8 @@ pub struct AppSettings {
     pub auto_retry_failed: bool,
     pub auto_resume_on_startup: bool,
     pub cookies_browser: Option<String>,
+    pub cookies_profile: Option<String>,
     pub cookies_file: Option<String>,
-    pub cookies_content: Option<String>,
-    pub enable_adult_sites: Option<bool>,
-    pub bypass_age_gate: Option<bool>,
     pub user_agent: Option<String>,
 }
 
@@ -319,10 +390,8 @@ impl Default for AppSettings {
             auto_retry_failed: true,
             auto_resume_on_startup: true,
             cookies_browser: Some("auto".to_string()),
+            cookies_profile: None,
             cookies_file: None,
-            cookies_content: None,
-            enable_adult_sites: Some(true),
-            bypass_age_gate: Some(true),
             user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string()),
         }
     }

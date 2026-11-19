@@ -1,6 +1,8 @@
+use crate::logging;
 use crate::models::{
     AppSettings, DownloadTask, NotificationItem, TaskPriority, TaskStatus,
 };
+use crate::process;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::fs;
@@ -12,6 +14,7 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub active_processes: Arc<Mutex<HashMap<String, u32>>>,
     pub is_shutting_down: AtomicBool,
+    pub is_running_diagnostics: AtomicBool,
 }
 
 impl AppState {
@@ -51,16 +54,20 @@ impl AppState {
         PathBuf::from(".vanta_data")
     }
 
-    pub fn init() -> Self {
+    pub fn init() -> Result<Self, String> {
         let db_dir = Self::app_data_dir();
-        let _ = fs::create_dir_all(&db_dir);
+        fs::create_dir_all(&db_dir)
+            .map_err(|e| format!("Failed to create app data directory '{}': {}", db_dir.display(), e))?;
         let db_path = db_dir.join("vanta_native.db");
 
-        let conn = Connection::open(&db_path).expect("Failed to open SQLite database");
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("Failed to open SQLite database '{}': {}", db_path.display(), e))?;
 
-        // Schema initialization
         conn.execute_batch(
             "
+            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
+
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
@@ -128,79 +135,114 @@ impl AppState {
             );
             ",
         )
-        .expect("Failed to initialize database tables");
+        .map_err(|e| format!("Failed to initialize SQLite tables: {}", e))?;
 
-        // Restore interrupted downloads to queued/paused on startup
+        // Scrub any legacy plaintext cookies_content row from SQLite settings
         let _ = conn.execute(
-            "UPDATE tasks SET status = 'queued', current_phase = 'Restored to queue' WHERE status IN ('downloading', 'extracting', 'processing')",
+            "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
             [],
         );
 
-        Self {
+        // Restore interrupted downloads cleanly on startup
+        let _ = conn.execute(
+            "UPDATE tasks SET status = 'queued', current_phase = 'Restored to queue', speed_str = '0 B/s', speed_bytes_per_sec = 0 WHERE status IN ('downloading', 'extracting', 'processing')",
+            [],
+        );
+
+        logging::info(
+            "state",
+            &format!("Initialized SQLite state at '{}'", db_path.display()),
+        );
+
+        Ok(Self {
             db: Mutex::new(conn),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
             is_shutting_down: AtomicBool::new(false),
-        }
+            is_running_diagnostics: AtomicBool::new(false),
+        })
+    }
+
+    fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
+        let status_str: String = row.get(8)?;
+        let priority_str: String = row.get(29)?;
+        let is_audio_only_int: i32 = row.get(19)?;
+        let is_lossy_int: Option<i32> = row.get(25)?;
+
+        Ok(DownloadTask {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            title: row.get(2)?,
+            uploader: row.get(3)?,
+            duration: row.get(4)?,
+            duration_string: row.get(5)?,
+            thumbnail: row.get(6)?,
+            engine: row.get(7)?,
+            status: TaskStatus::from_str(&status_str),
+            progress_percentage: row.get(9)?,
+            speed_str: row.get(10)?,
+            speed_bytes_per_sec: row.get(11)?,
+            downloaded_bytes: row.get(12)?,
+            total_bytes: row.get(13)?,
+            eta_str: row.get(14)?,
+            current_phase: row.get(15)?,
+            format_id: row.get(16)?,
+            format_note: row.get(17)?,
+            ext: row.get(18)?,
+            is_audio_only: is_audio_only_int == 1,
+            audio_format: row.get(20)?,
+            audio_bitrate: row.get(21)?,
+            audio_sample_rate: row.get(22)?,
+            audio_bit_depth: row.get(23)?,
+            audio_channels: row.get(24)?,
+            is_lossy_source: is_lossy_int.map(|v| v == 1),
+            verified_audio_info: row.get(26)?,
+            output_path: row.get(27)?,
+            error_message: row.get(28)?,
+            priority: TaskPriority::from_str(&priority_str),
+            created_at: row.get(30)?,
+            completed_at: row.get(31)?,
+            retries: row.get(32)?,
+            max_retries: row.get(33)?,
+        })
     }
 
     pub fn get_tasks(&self) -> Vec<DownloadTask> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT * FROM tasks ORDER BY created_at DESC")
-            .unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare("SELECT * FROM tasks ORDER BY created_at DESC") {
+            Ok(s) => s,
+            Err(e) => {
+                logging::error("state", &format!("Failed preparing get_tasks query: {}", e));
+                return Vec::new();
+            }
+        };
 
-        let rows = stmt
-            .query_map([], |row| {
-                let status_str: String = row.get(8)?;
-                let priority_str: String = row.get(29)?;
-                let is_audio_only_int: i32 = row.get(19)?;
-                let is_lossy_int: Option<i32> = row.get(25)?;
-
-                Ok(DownloadTask {
-                    id: row.get(0)?,
-                    url: row.get(1)?,
-                    title: row.get(2)?,
-                    uploader: row.get(3)?,
-                    duration: row.get(4)?,
-                    duration_string: row.get(5)?,
-                    thumbnail: row.get(6)?,
-                    engine: row.get(7)?,
-                    status: TaskStatus::from_str(&status_str),
-                    progress_percentage: row.get(9)?,
-                    speed_str: row.get(10)?,
-                    speed_bytes_per_sec: row.get(11)?,
-                    downloaded_bytes: row.get(12)?,
-                    total_bytes: row.get(13)?,
-                    eta_str: row.get(14)?,
-                    current_phase: row.get(15)?,
-                    format_id: row.get(16)?,
-                    format_note: row.get(17)?,
-                    ext: row.get(18)?,
-                    is_audio_only: is_audio_only_int == 1,
-                    audio_format: row.get(20)?,
-                    audio_bitrate: row.get(21)?,
-                    audio_sample_rate: row.get(22)?,
-                    audio_bit_depth: row.get(23)?,
-                    audio_channels: row.get(24)?,
-                    is_lossy_source: is_lossy_int.map(|v| v == 1),
-                    verified_audio_info: row.get(26)?,
-                    output_path: row.get(27)?,
-                    error_message: row.get(28)?,
-                    priority: TaskPriority::from_str(&priority_str),
-                    created_at: row.get(30)?,
-                    completed_at: row.get(31)?,
-                    retries: row.get(32)?,
-                    max_retries: row.get(33)?,
-                })
-            })
-            .unwrap();
+        let rows = match stmt.query_map([], Self::map_task_row) {
+            Ok(r) => r,
+            Err(e) => {
+                logging::error("state", &format!("Failed executing get_tasks query: {}", e));
+                return Vec::new();
+            }
+        };
 
         rows.flatten().collect()
     }
 
+    pub fn get_task_by_id(&self, id: &str) -> Option<DownloadTask> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare("SELECT * FROM tasks WHERE id = ?1") {
+            Ok(s) => s,
+            Err(e) => {
+                logging::error("state", &format!("Failed preparing get_task_by_id query: {}", e));
+                return None;
+            }
+        };
+
+        stmt.query_row(params![id], Self::map_task_row).ok()
+    }
+
     pub fn upsert_task(&self, task: &DownloadTask) {
-        let conn = self.db.lock().unwrap();
-        let _ = conn.execute(
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO tasks (
                 id, url, title, uploader, duration, duration_string, thumbnail, engine, status,
                 progress_percentage, speed_str, speed_bytes_per_sec, downloaded_bytes, total_bytes,
@@ -252,16 +294,18 @@ impl AppState {
                 task.retries,
                 task.max_retries,
             ],
-        );
+        ) {
+            logging::error("state", &format!("Failed upserting task '{}': {}", task.id, e));
+        }
     }
 
     pub fn delete_task(&self, id: &str) {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id]);
     }
 
     pub fn clear_completed_tasks(&self) {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
             "DELETE FROM tasks WHERE status IN ('completed', 'cancelled', 'failed')",
             [],
@@ -269,18 +313,32 @@ impl AppState {
     }
 
     pub fn get_settings(&self) -> AppSettings {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT key, value FROM settings").unwrap();
-        let rows = stmt.query_map([], |row| {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare("SELECT key, value FROM settings") {
+            Ok(s) => s,
+            Err(e) => {
+                logging::error("state", &format!("Failed reading settings: {}", e));
+                return AppSettings::default();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
             let k: String = row.get(0)?;
             let v: String = row.get(1)?;
             Ok((k, v))
-        }).unwrap();
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                logging::error("state", &format!("Failed mapping settings: {}", e));
+                return AppSettings::default();
+            }
+        };
 
         let mut map = serde_json::Map::new();
-
         for item in rows.flatten() {
             let (k, v) = item;
+            if k == "cookies_content" || k == "enable_adult_sites" || k == "bypass_age_gate" {
+                continue;
+            }
             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&v) {
                 map.insert(k, json_val);
             } else {
@@ -292,12 +350,16 @@ impl AppState {
     }
 
     pub fn save_settings(&self, settings: &AppSettings) {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
+            [],
+        );
         if let Ok(val) = serde_json::to_value(settings) {
             if let Some(obj) = val.as_object() {
                 for (k, v) in obj {
-                    let str_val = if v.is_string() {
-                        v.as_str().unwrap().to_string()
+                    let str_val = if let Some(s) = v.as_str() {
+                        s.to_string()
                     } else {
                         v.to_string()
                     };
@@ -311,29 +373,36 @@ impl AppState {
     }
 
     pub fn get_notifications(&self) -> Vec<NotificationItem> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, type, title, message, timestamp, task_id FROM notifications ORDER BY timestamp DESC LIMIT 50")
-            .unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT id, type, title, message, timestamp, task_id FROM notifications ORDER BY timestamp DESC LIMIT 50",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                logging::error("state", &format!("Failed querying notifications: {}", e));
+                return Vec::new();
+            }
+        };
 
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(NotificationItem {
-                    id: row.get(0)?,
-                    r#type: row.get(1)?,
-                    title: row.get(2)?,
-                    message: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    task_id: row.get(5)?,
-                })
+        let rows = match stmt.query_map([], |row| {
+            Ok(NotificationItem {
+                id: row.get(0)?,
+                r#type: row.get(1)?,
+                title: row.get(2)?,
+                message: row.get(3)?,
+                timestamp: row.get(4)?,
+                task_id: row.get(5)?,
             })
-            .unwrap();
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
 
         rows.flatten().collect()
     }
 
     pub fn add_notification(&self, item: &NotificationItem) {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
             "INSERT OR REPLACE INTO notifications (id, type, title, message, timestamp, task_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![item.id, item.r#type, item.title, item.message, item.timestamp, item.task_id],
@@ -341,26 +410,32 @@ impl AppState {
     }
 
     pub fn clear_notifications(&self) {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute("DELETE FROM notifications", []);
     }
 
     pub fn safe_shutdown(&self) {
-        self.is_shutting_down.store(true, Ordering::SeqCst);
-        let procs = self.active_processes.lock().unwrap();
-        for (_task_id, pid) in procs.iter() {
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .output();
-            }
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output();
-            }
+        if self.is_shutting_down.swap(true, Ordering::SeqCst) {
+            // Already triggered, still ensure any remaining tracked PIDs are killed
+        }
+
+        let pids: Vec<u32> = {
+            let mut procs = self
+                .active_processes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            procs.drain().map(|(_id, pid)| pid).collect()
+        };
+
+        if !pids.is_empty() {
+            logging::info(
+                "shutdown",
+                &format!("Terminating {} active child process tree(s).", pids.len()),
+            );
+        }
+
+        for pid in pids {
+            process::kill_process_tree(pid);
         }
     }
 }

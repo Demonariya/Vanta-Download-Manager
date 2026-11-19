@@ -67,6 +67,11 @@ try { db.exec('ALTER TABLE tasks ADD COLUMN audio_channels INTEGER'); } catch {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT'); } catch {}
 
+// Remove legacy plaintext cookie/circumvention settings from DB
+try {
+  db.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
+} catch {}
+
 const DEFAULT_SETTINGS: AppSettings = {
   download_dir: path.resolve(process.cwd(), 'downloads'),
   max_concurrent_downloads: 3,
@@ -88,9 +93,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   auto_retry_failed: true,
   auto_resume_on_startup: true,
   cookies_browser: 'auto',
-  cookies_file: path.resolve(dataDir, 'cookies.txt'),
-  enable_adult_sites: true,
-  bypass_age_gate: true,
+  cookies_profile: undefined,
+  cookies_file: undefined,
   user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 };
 
@@ -105,8 +109,22 @@ export function getSettings(): AppSettings {
   const settings: any = { ...DEFAULT_SETTINGS };
 
   for (const row of rows) {
+    if (
+      row.key === 'cookies_content' ||
+      row.key === 'enable_adult_sites' ||
+      row.key === 'bypass_age_gate'
+    ) {
+      continue;
+    }
     try {
-      settings[row.key] = JSON.parse(row.value);
+      const parsed = JSON.parse(row.value);
+      if (row.key === 'cookies_file' && parsed && typeof parsed === 'string' && !fs.existsSync(parsed)) {
+        // Ignore stale path if unimported default never existed
+        if (parsed === path.resolve(dataDir, 'cookies.txt')) {
+          continue;
+        }
+      }
+      settings[row.key] = parsed;
     } catch {
       settings[row.key] = row.value;
     }
@@ -117,14 +135,29 @@ export function getSettings(): AppSettings {
 
 export function saveSettings(settings: Partial<AppSettings>): AppSettings {
   const current = getSettings();
-  const updated = { ...current, ...settings };
+  const sanitizedPatch: Record<string, any> = { ...settings };
+  delete sanitizedPatch.cookies_content;
+  delete sanitizedPatch.enable_adult_sites;
+  delete sanitizedPatch.bypass_age_gate;
 
+  const updated: any = { ...current, ...sanitizedPatch };
+  delete updated.cookies_content;
+  delete updated.enable_adult_sites;
+  delete updated.bypass_age_gate;
+
+  db.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
   const insert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  const remove = db.prepare('DELETE FROM settings WHERE key = ?');
+
   for (const [key, val] of Object.entries(updated)) {
-    insert.run(key, JSON.stringify(val));
+    if (val === undefined) {
+      remove.run(key);
+    } else {
+      insert.run(key, JSON.stringify(val));
+    }
   }
 
-  return updated;
+  return updated as AppSettings;
 }
 
 export function getAllTasks(): DownloadTask[] {
@@ -304,12 +337,7 @@ export function clearAllTasks(deleteFiles = false): void {
   stmt.run();
 }
 
-export function saveCookiesTxt(content: string): string {
-  const cookiePath = path.resolve(dataDir, 'cookies.txt');
-  fs.writeFileSync(cookiePath, content.trim(), { encoding: 'utf-8', mode: 0o600 });
-  saveSettings({ cookies_file: cookiePath, cookies_content: content });
-  return cookiePath;
-}
+
 
 export function addNotification(notification: NotificationItem): void {
   const stmt = db.prepare(`

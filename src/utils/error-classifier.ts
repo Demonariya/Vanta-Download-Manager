@@ -40,6 +40,11 @@ export function sanitizeLog(text: string): string {
     .replace(/([?&](?:sig|signature|token|session_token|auth|key|secret)=)[^&\s]+/gi, '$1[REDACTED]')
     // Redact password parameters
     .replace(/([?&](?:password|passwd)=)[^&\s]+/gi, '$1[REDACTED]')
+    // Redact 7-column Netscape cookie values
+    .replace(
+      /^([^\t\r\n]+\t(?:TRUE|FALSE)\t[^\t\r\n]+\t(?:TRUE|FALSE)\t\d+\t[^\t\r\n]+\t)([^\r\n]+)$/gm,
+      '$1[REDACTED_VALUE]'
+    )
     // Redact IPv6/internal paths if present in temp traces
     .replace(/\/tmp\/_MEI[A-Za-z0-9]+/g, '/tmp/[TEMP_BUILD]');
 }

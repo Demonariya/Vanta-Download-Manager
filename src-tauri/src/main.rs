@@ -1,14 +1,34 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::{Manager, RunEvent, WindowEvent};
 use vanta_lib::commands::*;
+use vanta_lib::logging;
 use vanta_lib::AppState;
 
 fn main() {
-    let state = AppState::init();
+    logging::install_panic_hook();
+    logging::info("startup", "Starting VANTA Download Manager desktop runtime.");
 
-    tauri::Builder::default()
+    let state = match AppState::init() {
+        Ok(s) => s,
+        Err(err) => {
+            logging::error("startup", &format!("Fatal initialization failure: {}", err));
+            eprintln!("VANTA startup error: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    let app = match tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(state)
+        .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed) {
+                let app_handle = window.app_handle();
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.safe_shutdown();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_tasks,
             create_task,
@@ -33,7 +53,14 @@ fn main() {
             update_engine,
             update_all_engines,
             inspect_url,
+            get_cookie_status,
+            validate_cookies_text,
             save_cookies,
+            remove_cookies,
+            detect_browsers,
+            test_cookie_extraction,
+            get_diagnostic_log_info,
+            open_logs_folder,
             open_file_or_folder,
             select_directory,
             window_minimize,
@@ -41,6 +68,21 @@ fn main() {
             window_close,
             app_safe_shutdown
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running VANTA Download Manager application");
+        .build(tauri::generate_context!())
+    {
+        Ok(a) => a,
+        Err(err) => {
+            logging::error("startup", &format!("Failed building Tauri runtime: {}", err));
+            eprintln!("Failed to build Tauri runtime: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                state.safe_shutdown();
+            }
+        }
+    });
 }
