@@ -62,115 +62,20 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Install Node Dependencies (Reproducible + Native Rolldown)
+      - name: Build Windows Release via build.ps1
+        shell: pwsh
+        run: .\build.ps1 -Release -Target all
+
+      - name: Publish Build Report to Job Summary
+        if: always() && hashFiles('dist/build-report.txt') != ''
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "Installing npm dependencies reproducibly from package-lock.json..."
-          npm ci --include=optional
-
-          if (-not (Test-Path "node_modules/@rolldown/binding-win32-x64-msvc")) {
-            Write-Host "Installing Windows native Rolldown binding (--no-save)..."
-            npm install --no-save @rolldown/binding-win32-x64-msvc
-          }
-
-      - name: Typecheck & Lint Frontend
-        run: npm run lint
-
-      - name: Build Web Application
-        run: npm run build
-
-      - name: Run Rust Backend Unit Tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features desktop
-
-      - name: Build Tauri Desktop App (NSIS Installer & MSI)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "Building Tauri Windows x64 App with MSVC..."
-          npx tauri build --features desktop --target x86_64-pc-windows-msvc
-
-      - name: Collect, Package, Checksum & Report Release Sizes
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path "release_artifacts/setup" | Out-Null
-          New-Item -ItemType Directory -Force -Path "release_artifacts/msi" | Out-Null
-          New-Item -ItemType Directory -Force -Path "release_artifacts/portable" | Out-Null
-          New-Item -ItemType Directory -Force -Path "release_artifacts/all" | Out-Null
-
-          $nsisInstaller = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $msiInstaller = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $mainExe = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "vanta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-
-          if (-not $nsisInstaller) {
-            Write-Error "Missing expected NSIS setup installer under bundle/nsis."
-            exit 1
-          }
-          if (-not $msiInstaller) {
-            Write-Error "Missing expected MSI installer under bundle/msi."
-            exit 1
-          }
-          if (-not $mainExe) {
-            Write-Error "Missing expected vanta.exe binary under target/x86_64-pc-windows-msvc/release."
-            exit 1
-          }
-
-          $setupDest = "release_artifacts/all/VANTA-Download-Manager-Setup-x64.exe"
-          $msiDest = "release_artifacts/all/VANTA-Download-Manager-x64.msi"
-          $portableDest = "release_artifacts/all/VANTA-Download-Manager-Portable-x64.zip"
-
-          Copy-Item -Path $nsisInstaller.FullName -Destination $setupDest -Force
-          Copy-Item -Path $msiInstaller.FullName -Destination $msiDest -Force
-
-          # Package standalone portable executable (external engines are installed & SHA-256 verified into %LOCALAPPDATA% on first launch, or loaded from side-by-side bin/)
-          if (Test-Path "portable_package") { Remove-Item -Recurse -Force "portable_package" }
-          New-Item -ItemType Directory -Force -Path "portable_package/bin" | Out-Null
-          Copy-Item -Path $mainExe.FullName -Destination "portable_package/VANTA.exe" -Force
-          Compress-Archive -Path "portable_package/*" -DestinationPath $portableDest -CompressionLevel Optimal -Force
-
-          foreach ($artifact in @($setupDest, $msiDest, $portableDest)) {
-            if (-not (Test-Path $artifact) -or ((Get-Item $artifact).Length -eq 0)) {
-              Write-Error "Expected artifact '$artifact' is missing or empty."
-              exit 1
-            }
-          }
-
-          # Populate dedicated artifact staging folders + per-artifact SHA-256 checksums
-          Copy-Item -Path $setupDest -Destination "release_artifacts/setup/" -Force
-          Copy-Item -Path $msiDest -Destination "release_artifacts/msi/" -Force
-          Copy-Item -Path $portableDest -Destination "release_artifacts/portable/" -Force
-
-          $setupHash = (Get-FileHash -Algorithm SHA256 $setupDest).Hash.ToLower()
-          $msiHash = (Get-FileHash -Algorithm SHA256 $msiDest).Hash.ToLower()
-          $portableHash = (Get-FileHash -Algorithm SHA256 $portableDest).Hash.ToLower()
-
-          "$setupHash  VANTA-Download-Manager-Setup-x64.exe" | Out-File -FilePath "release_artifacts/setup/VANTA-Download-Manager-Setup-x64.exe.sha256" -Encoding ascii
-          "$msiHash  VANTA-Download-Manager-x64.msi" | Out-File -FilePath "release_artifacts/msi/VANTA-Download-Manager-x64.msi.sha256" -Encoding ascii
-          "$portableHash  VANTA-Download-Manager-Portable-x64.zip" | Out-File -FilePath "release_artifacts/portable/VANTA-Download-Manager-Portable-x64.zip.sha256" -Encoding ascii
-
           @(
-            "$setupHash  VANTA-Download-Manager-Setup-x64.exe"
-            "$msiHash  VANTA-Download-Manager-x64.msi"
-            "$portableHash  VANTA-Download-Manager-Portable-x64.zip"
-          ) | Out-File -FilePath "release_artifacts/all/SHA256SUMS.txt" -Encoding ascii
-
-          Write-Host ""
-          Write-Host "=== Windows x64 Binary & Artifact Size Report ==="
-          $reportItems = @(
-            @{ Name = "vanta.exe (unpacked)"; Path = $mainExe.FullName },
-            @{ Name = "VANTA-Download-Manager-Setup-x64.exe (NSIS)"; Path = $setupDest },
-            @{ Name = "VANTA-Download-Manager-x64.msi (MSI)"; Path = $msiDest },
-            @{ Name = "VANTA-Download-Manager-Portable-x64.zip"; Path = $portableDest }
-          )
-          foreach ($item in $reportItems) {
-            $bytes = (Get-Item $item.Path).Length
-            $mib = [Math]::Round($bytes / 1MB, 2)
-            Write-Host ("{0,-46} : {1,10:N0} bytes ({2,6:N2} MiB)" -f $item.Name, $bytes, $mib)
-          }
-          Write-Host ""
-          Write-Host "=== SHA256SUMS.txt ==="
-          Get-Content "release_artifacts/all/SHA256SUMS.txt"
+            '### Windows x64 Release Build Report'
+            '```text'
+            (Get-Content -Path 'dist/build-report.txt' -Raw)
+            '```'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Prune Previous Workflow Artifacts in Repository
         if: github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts
@@ -225,7 +130,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-Setup-x64
-          path: release_artifacts/setup/*
+          path: |
+            dist/*-setup.exe
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
           if-no-files-found: error
           retention-days: 5
 
@@ -236,7 +144,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-MSI-x64
-          path: release_artifacts/msi/*
+          path: |
+            dist/*.msi
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
           if-no-files-found: error
           retention-days: 5
 
@@ -247,7 +158,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: VANTA-Windows-Portable-x64
-          path: release_artifacts/portable/*
+          path: |
+            dist/*-portable.zip
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
           if-no-files-found: error
           retention-days: 5
 
@@ -255,12 +169,11 @@ jobs:
         if: steps.upload_setup.outcome == 'failure' || steps.upload_msi.outcome == 'failure' || steps.upload_portable.outcome == 'failure'
         shell: pwsh
         run: |
-          Write-Warning "GitHub Actions account artifact storage quota is full (typically 500 MB across all repositories under this account). Proceeding with GitHub Release upload, which does not count against Actions artifact quota."
+          Write-Warning "GitHub Actions account artifact storage quota is full. Proceeding with GitHub Release upload, which does not count against Actions artifact quota."
           @(
             '### GitHub Actions Artifact Storage Quota Full'
-            '- Actions artifact upload was skipped because account-wide Actions/Packages storage hit its quota across one or more repositories under this owner.'
-            '- Check **GitHub Settings -> Billing & plans -> Actions** (or delete old workflow artifacts in other repositories such as Android builds).'
-            '- Installers and SHA256SUMS.txt are still attached to the GitHub Release when release creation is enabled.'
+            '- Actions artifact upload was skipped because account-wide Actions/Packages storage hit its quota across repositories under this owner.'
+            '- Installers, SHA256SUMS.txt, and build-report.txt remain attached to the GitHub Release when release creation is enabled.'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Create or Update GitHub Release
@@ -276,20 +189,21 @@ jobs:
 
             High-concurrency desktop video & music workstation powered by **Rust / Tauri 2**, **yt-dlp**, **spotDL**, and **FFmpeg**.
 
-            ### Included Release Assets:
-            - **`VANTA-Download-Manager-Setup-x64.exe`**: Recommended Windows NSIS Installer (Windows 10 & 11 x64).
-            - **`VANTA-Download-Manager-x64.msi`**: Windows Enterprise MSI Installer.
-            - **`VANTA-Download-Manager-Portable-x64.zip`**: Lightweight portable standalone package.
+            ### Included Release Assets
+            - **NSIS Setup (`*-setup.exe`)**: Recommended Windows installer (Windows 10 & 11 x64).
+            - **Enterprise MSI (`*.msi`)**: Windows Installer package for managed deployments.
+            - **Portable ZIP (`*-portable.zip`)**: Standalone executable archive.
             - **`SHA256SUMS.txt`**: Cryptographic SHA-256 verification checksums.
+            - **`build-report.txt`**: Toolchain, version, and artifact size manifest.
 
-            ### Managed Runtime Architecture:
-            - Installers exclude bulky 300+ MiB external CLI binaries to keep downloads small and fast.
-            - On first launch (or in **Diagnostics**), VANTA downloads and **SHA-256 verifies** `yt-dlp`, compact `FFmpeg` / `FFprobe`, and `spotDL` atomically into `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin` (or side-by-side `bin/` in portable mode).
-            - Rust release builds enable full LTO, single codegen unit, size optimization, and symbol stripping.
+            ### Managed Runtime Architecture
+            - Slim installers exclude bulky external CLI binaries (~300+ MiB).
+            - On first launch (or from **Diagnostics**), VANTA downloads and **SHA-256 verifies** `yt-dlp`, `FFmpeg`/`FFprobe`, and `spotDL` into `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin` (or loads side-by-side `bin/` binaries in portable mode).
           files: |
-            release_artifacts/all/VANTA-Download-Manager-Setup-x64.exe
-            release_artifacts/all/VANTA-Download-Manager-x64.msi
-            release_artifacts/all/VANTA-Download-Manager-Portable-x64.zip
-            release_artifacts/all/SHA256SUMS.txt
+            dist/*-setup.exe
+            dist/*.msi
+            dist/*-portable.zip
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
           draft: false
           prerelease: false

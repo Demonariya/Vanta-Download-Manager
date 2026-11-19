@@ -1,14 +1,30 @@
+# Node & Frontend Build
 node_modules/
-build/
 dist/
+build/
 coverage/
-.DS_Store
-*.log
-.env*
-!.env.example
+
+# Rust & Tauri Build
 src-tauri/target/
+release_artifacts/
+portable_package/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Logs, Backups & Temporary Files
+*.log
+*.tmp
+*.bak
 .vanta_data/
+.playwright-cli/
 downloads/*
 !downloads/.gitkeep
-.playwright-cli/
+!src-tauri/bin/.gitkeep
 
+# OS & Editor Metadata
+.DS_Store
+Thumbs.db
+desktop.ini

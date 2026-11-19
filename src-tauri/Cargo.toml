@@ -35,9 +35,6 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 
-[dev-dependencies]
-tokio-test = "0.4"
-
 [profile.release]
 panic = "abort"
 codegen-units = 1
