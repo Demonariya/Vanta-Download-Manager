@@ -1,5 +1,6 @@
+import fs from 'node:fs';
 import { Response } from 'express';
-import { DownloadTask, AppSettings, NotificationItem } from '../src/types';
+import { AppSettings, DownloadTask, NotificationItem } from '../src/types';
 import {
   getAllTasks,
   getTaskById,
@@ -8,13 +9,16 @@ import {
   addNotification,
 } from './db';
 import { engineManager } from './engineManager';
-import { sortQueue, getActiveDownloadCount, shouldAutoRetry } from '../src/utils/queue-logic';
-import { classifyDownloadError, sanitizeLog } from '../src/utils/error-classifier';
+import { sortQueue, getActiveDownloadCount } from '../src/utils/queue-logic';
+import { canTransitionTask, isActiveTaskStatus, buildIdleMetricsPatch } from '../src/utils/download-core';
+import { isWithinSchedulerWindow } from '../src/utils/scheduler';
+import { classifyDownloadError } from '../src/utils/error-classifier';
 
 export class QueueController {
   private sseClients: Set<Response> = new Set();
   private schedulerTimer: NodeJS.Timeout | null = null;
   private isProcessing = false;
+  private schedulerPausedActive = false;
 
   constructor() {
     this.cleanStartupTasks();
@@ -26,7 +30,7 @@ export class QueueController {
       const settings = getSettings();
       const tasks = getAllTasks();
       for (const t of tasks) {
-        if (t.status === 'downloading' || t.status === 'extracting' || t.status === 'processing') {
+        if (isActiveTaskStatus(t.status)) {
           if (settings.auto_resume_on_startup) {
             t.status = 'queued';
             t.current_phase = 'Queued for auto-resume';
@@ -34,8 +38,7 @@ export class QueueController {
             t.status = 'paused';
             t.current_phase = 'Paused after restart';
           }
-          t.speed_str = '0 B/s';
-          t.speed_bytes_per_sec = 0;
+          Object.assign(t, buildIdleMetricsPatch(t));
           upsertTask(t);
         }
       }
@@ -50,7 +53,6 @@ export class QueueController {
       this.sseClients.delete(res);
     });
 
-    // Send initial snapshot
     const tasks = getAllTasks();
     const settings = getSettings();
     this.sendEventTo(res, 'init', { tasks, settings });
@@ -88,6 +90,25 @@ export class QueueController {
 
     try {
       const settings = getSettings();
+      const windowOpen = isWithinSchedulerWindow(settings.scheduler);
+
+      if (!windowOpen) {
+        if (settings.scheduler?.pause_on_stop && !this.schedulerPausedActive) {
+          this.schedulerPausedActive = true;
+          const tasks = getAllTasks();
+          for (const t of tasks) {
+            if (isActiveTaskStatus(t.status)) {
+              this.pauseTask(t.id);
+            }
+          }
+        }
+        return;
+      }
+
+      if (this.schedulerPausedActive && windowOpen) {
+        this.schedulerPausedActive = false;
+      }
+
       const allTasks = getAllTasks();
       const activeCount = getActiveDownloadCount(allTasks);
 
@@ -96,7 +117,6 @@ export class QueueController {
         return;
       }
 
-      // Find queued tasks sorted by priority
       const queuedTasks = sortQueue(allTasks.filter((t) => t.status === 'queued'));
       const toStart = queuedTasks.slice(0, availableSlots);
 
@@ -111,11 +131,16 @@ export class QueueController {
   public async startTask(taskId: string): Promise<void> {
     const task = getTaskById(taskId);
     if (!task) return;
+    if (!canTransitionTask(task.status, 'connecting')) return;
 
     const settings = getSettings();
-
-    task.status = 'extracting';
+    task.status = 'connecting';
     task.current_phase = 'Starting download engine...';
+    task.started_at = task.started_at || new Date().toISOString();
+    task.logs = [
+      ...(task.logs || []),
+      { timestamp: new Date().toISOString(), level: 'info' as const, message: `Starting ${task.engine} download` },
+    ].slice(-100);
     upsertTask(task);
     this.broadcast('task_updated', task);
 
@@ -125,8 +150,12 @@ export class QueueController {
       (update) => {
         const current = getTaskById(taskId);
         if (!current) return;
-        // Don't update if cancelled or paused in the meantime
-        if (current.status === 'paused' || current.status === 'cancelled') return;
+        if (current.status === 'paused' || current.status === 'cancelled' || current.status === 'completed') {
+          return;
+        }
+        if (update.status && !canTransitionTask(current.status, update.status)) {
+          return;
+        }
 
         const merged: DownloadTask = {
           ...current,
@@ -135,31 +164,68 @@ export class QueueController {
         upsertTask(merged);
         this.broadcast('task_updated', merged);
       },
-      (outputPath) => {
+      (outputPath, extra) => {
         const current = getTaskById(taskId);
         if (!current) return;
+        if (current.status === 'paused' || current.status === 'cancelled') return;
 
+        let validFile = false;
+        let fileSize = 0;
+        try {
+          const st = fs.statSync(outputPath);
+          validFile = st.isFile() && st.size > 0;
+          fileSize = st.size;
+        } catch {
+          validFile = false;
+        }
+
+        if (!validFile) {
+          current.status = 'failed';
+          current.current_phase = 'Verification failed';
+          current.error_message = 'Completed without a non-empty output file on disk.';
+          Object.assign(current, buildIdleMetricsPatch(current));
+          upsertTask(current);
+          this.broadcast('task_updated', current);
+          return;
+        }
+
+        Object.assign(current, extra || {});
         current.status = 'completed';
         current.current_phase = 'Completed';
         current.progress_percentage = 100;
+        current.percentage_known = true;
         current.completed_at = new Date().toISOString();
         current.output_path = outputPath;
+        current.total_bytes = fileSize;
+        current.downloaded_bytes = fileSize;
+        current.remaining_bytes = 0;
         current.speed_str = '0 B/s';
         current.speed_bytes_per_sec = 0;
+        current.active_connections = 0;
+        current.eta_seconds = 0;
         current.eta_str = 'Finished';
 
-        if (current.is_audio_only || current.audio_format) {
+        if ((current.is_audio_only || current.audio_format) && !current.verified_audio_info) {
           const verified = engineManager.verifyAudioFile(outputPath);
           if (verified) {
             current.verified_audio_info = verified;
           }
         }
 
+        current.logs = [
+          ...(current.logs || []),
+          {
+            timestamp: new Date().toISOString(),
+            level: 'info' as const,
+            message: `Completed & verified on disk (${fileSize} bytes)`,
+          },
+        ].slice(-100);
+
         upsertTask(current);
         this.broadcast('task_updated', current);
 
         const notif: NotificationItem = {
-          id: String(Date.now()),
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'success',
           title: 'Download Completed',
           message: `"${current.title}" finished downloading successfully.`,
@@ -173,59 +239,62 @@ export class QueueController {
       (errorMessage) => {
         const current = getTaskById(taskId);
         if (!current) return;
+        if (current.status === 'paused' || current.status === 'cancelled') return;
 
         const classified = classifyDownloadError(errorMessage, current.retries);
         const canRetry = current.retries < current.max_retries;
 
-        // 1. Recoverable via Re-Extraction (HTTP 410 Gone / Expired Media URL)
         if (classified.suggestedAction === 're_extract' && canRetry) {
           current.retries += 1;
           current.status = 'queued';
-          current.current_phase = `Expired URL detected (HTTP 410). Purging cache & re-extracting tokens... (${current.retries}/${current.max_retries})`;
+          current.current_phase = `Expired URL detected (HTTP 410). Re-extracting tokens... (${current.retries}/${current.max_retries})`;
           current.error_message = classified.userMessage;
+          Object.assign(current, buildIdleMetricsPatch(current));
+          current.logs = [
+            ...(current.logs || []),
+            { timestamp: new Date().toISOString(), level: 'warn' as const, message: current.current_phase },
+          ].slice(-100);
           upsertTask(current);
           this.broadcast('task_updated', current);
 
           const notif: NotificationItem = {
-            id: String(Date.now()),
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             type: 'warning',
             title: 'HTTP 410 Recovery',
-            message: `Stream expired for "${current.title}". Re-extracting fresh tokens and retrying...`,
+            message: `Stream expired for "${current.title}". Re-extracting fresh tokens...`,
             timestamp: new Date().toISOString(),
             taskId: current.id,
           };
           addNotification(notif);
           this.broadcast('notification', notif);
-
           setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 1500);
           return;
         }
 
-        // 2. Recoverable via Format Fallback
         if (classified.suggestedAction === 'fallback_format' && canRetry) {
           current.retries += 1;
           current.format_id = 'best';
           current.status = 'queued';
-          current.current_phase = `Format unavailable. Falling back to universal stream... (${current.retries}/${current.max_retries})`;
+          current.current_phase = `Format unavailable. Falling back to best stream... (${current.retries}/${current.max_retries})`;
           current.error_message = classified.userMessage;
+          Object.assign(current, buildIdleMetricsPatch(current));
           upsertTask(current);
           this.broadcast('task_updated', current);
-
           setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 1000);
           return;
         }
 
-        // 3. Recoverable via Exponential Backoff (Rate limits, Network timeouts)
         if (classified.suggestedAction === 'backoff' && canRetry && settings.auto_retry_failed) {
           current.retries += 1;
           current.status = 'queued';
           current.current_phase = `Retry ${current.retries}/${current.max_retries} scheduled: ${classified.userMessage}`;
           current.error_message = classified.userMessage;
+          Object.assign(current, buildIdleMetricsPatch(current));
           upsertTask(current);
           this.broadcast('task_updated', current);
 
           const notif: NotificationItem = {
-            id: String(Date.now()),
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             type: 'warning',
             title: 'Retrying Download',
             message: `"${current.title}": ${classified.userMessage}`,
@@ -234,22 +303,23 @@ export class QueueController {
           };
           addNotification(notif);
           this.broadcast('notification', notif);
-
           setTimeout(() => this.scheduleNext(), classified.backoffDelayMs || 3000);
           return;
         }
 
-        // 4. Non-recoverable (DRM, Private, Removed, or retries exhausted)
         current.status = 'failed';
         current.current_phase = 'Failed';
         current.error_message = classified.userMessage;
-        current.speed_str = '0 B/s';
-        current.speed_bytes_per_sec = 0;
+        Object.assign(current, buildIdleMetricsPatch(current));
+        current.logs = [
+          ...(current.logs || []),
+          { timestamp: new Date().toISOString(), level: 'error' as const, message: classified.userMessage },
+        ].slice(-100);
         upsertTask(current);
         this.broadcast('task_updated', current);
 
         const notif: NotificationItem = {
-          id: String(Date.now()),
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'error',
           title: 'Download Failed',
           message: `"${current.title}": ${classified.userMessage}`,
@@ -266,12 +336,16 @@ export class QueueController {
   public pauseTask(taskId: string): boolean {
     const task = getTaskById(taskId);
     if (!task) return false;
+    if (!canTransitionTask(task.status, 'paused')) return false;
 
-    engineManager.cancelOrPauseProcess(taskId);
+    engineManager.cancelOrPauseProcess(taskId, 'paused');
     task.status = 'paused';
     task.current_phase = 'Paused by user';
-    task.speed_str = '0 B/s';
-    task.speed_bytes_per_sec = 0;
+    Object.assign(task, buildIdleMetricsPatch(task));
+    task.logs = [
+      ...(task.logs || []),
+      { timestamp: new Date().toISOString(), level: 'info' as const, message: 'Paused by user' },
+    ].slice(-100);
     upsertTask(task);
     this.broadcast('task_updated', task);
     this.scheduleNext();
@@ -281,6 +355,7 @@ export class QueueController {
   public resumeTask(taskId: string): boolean {
     const task = getTaskById(taskId);
     if (!task) return false;
+    if (!canTransitionTask(task.status, 'queued')) return false;
 
     task.status = 'queued';
     task.current_phase = 'Queued for resume';
@@ -294,13 +369,14 @@ export class QueueController {
     const task = getTaskById(taskId);
     if (!task) return false;
 
-    engineManager.cancelOrPauseProcess(taskId);
-    task.status = 'cancelled';
-    task.current_phase = 'Cancelled by user';
-    task.speed_str = '0 B/s';
-    task.speed_bytes_per_sec = 0;
-    upsertTask(task);
-    this.broadcast('task_updated', task);
+    engineManager.cancelOrPauseProcess(taskId, 'cancelled');
+    if (canTransitionTask(task.status, 'cancelled')) {
+      task.status = 'cancelled';
+      task.current_phase = 'Cancelled by user';
+      Object.assign(task, buildIdleMetricsPatch(task));
+      upsertTask(task);
+      this.broadcast('task_updated', task);
+    }
     this.scheduleNext();
     return true;
   }
@@ -314,6 +390,7 @@ export class QueueController {
     task.current_phase = 'Queued for retry';
     task.error_message = undefined;
     task.retries = 0;
+    Object.assign(task, buildIdleMetricsPatch(task));
     upsertTask(task);
     this.broadcast('task_updated', task);
     this.scheduleNext();
@@ -323,7 +400,7 @@ export class QueueController {
   public pauseAll(): void {
     const all = getAllTasks();
     for (const t of all) {
-      if (t.status === 'downloading' || t.status === 'extracting' || t.status === 'queued') {
+      if (isActiveTaskStatus(t.status) || t.status === 'queued') {
         this.pauseTask(t.id);
       }
     }

@@ -1,11 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Save,
-  HardDrive,
-  Gauge,
   Check,
-  Shield,
-  Bell,
   Cookie,
   RefreshCw,
   Upload,
@@ -13,21 +9,44 @@ import {
   AlertCircle,
   CheckCircle2,
   XCircle,
+  FolderOpen,
+  Plus,
+  Sun,
+  Moon,
+  Monitor,
 } from 'lucide-react';
 import {
   AppSettings,
+  CategoryItem,
+  ConflictStrategy,
   CookieStatus,
   CookieTestResult,
   CookieValidationResult,
+  ThemeMode,
 } from '../types';
 import { api } from '../services/api';
 import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
+import { normalizeExtensionsList } from '../utils/categories';
+import { DEFAULT_SCHEDULER_SETTINGS } from '../utils/scheduler';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
-  onSaveSettings: (settings: Partial<AppSettings>) => void;
+  categories: CategoryItem[];
+  onSaveSettings: (settings: Partial<AppSettings>) => Promise<void> | void;
+  onCategoriesChanged: () => void;
 }
+
+type SettingsSection =
+  | 'general'
+  | 'downloads'
+  | 'connection'
+  | 'scheduler'
+  | 'media'
+  | 'categories'
+  | 'cookies'
+  | 'about';
 
 const BROWSER_LABELS: Record<string, string> = {
   chrome: 'Google Chrome',
@@ -38,18 +57,30 @@ const BROWSER_LABELS: Record<string, string> = {
   vivaldi: 'Vivaldi',
 };
 
+const DAYS_OF_WEEK = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
+  categories,
   onSaveSettings,
+  onCategoriesChanged,
 }) => {
+  const [section, setSection] = useState<SettingsSection>('general');
   const [form, setForm] = useState<AppSettings | null>(settings);
   const [isSaved, setIsSaved] = useState(false);
 
+  // Category editor state
+  const [newCatName, setNewCatName] = useState('');
+  const [newCatExts, setNewCatExts] = useState('');
+  const [newCatDir, setNewCatDir] = useState('');
+  const [catError, setCatError] = useState<string | null>(null);
+  const [deleteCatTarget, setDeleteCatTarget] = useState<CategoryItem | null>(null);
+
+  // Cookie state
   const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
   const [testingCookies, setTestingCookies] = useState(false);
   const [cookieTestUrl, setCookieTestUrl] = useState('');
   const [cookieTestResult, setCookieTestResult] = useState<CookieTestResult | null>(null);
-
   const [cookieText, setCookieText] = useState('');
   const [cookieValidation, setCookieValidation] = useState<CookieValidationResult | null>(null);
   const [cookieActionError, setCookieActionError] = useState<string | null>(null);
@@ -62,13 +93,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const status = await api.getCookieStatus();
       setCookieStatus(status);
     } catch {
-      // ignore initial transient errors
+      // ignore transient error
     }
   };
 
   useEffect(() => {
     if (settings) {
-      setForm(settings);
+      setForm({
+        ...settings,
+        scheduler: settings.scheduler || DEFAULT_SCHEDULER_SETTINGS,
+      });
     }
     refreshCookieStatus();
   }, [settings]);
@@ -81,31 +115,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setCookieValidation(validateNetscapeCookies(cookieText));
   }, [cookieText]);
 
-  if (!form) return null;
+  if (!form) {
+    return (
+      <div className="p-6 text-xs text-[var(--vanta-muted)]">Loading application settings...</div>
+    );
+  }
 
   const badge = describeCookieStatus(cookieStatus);
-
-  const badgeToneClass =
-    badge.tone === 'success'
-      ? 'bg-[#238636]/15 text-[#3fb950] border-[#238636]/30'
-      : badge.tone === 'info'
-      ? 'bg-[#1f6feb]/15 text-[#58a6ff] border-[#1f6feb]/30'
-      : badge.tone === 'warning'
-      ? 'bg-[#d29922]/15 text-[#e3b341] border-[#d29922]/30'
-      : badge.tone === 'error'
-      ? 'bg-[#da3633]/15 text-[#f85149] border-[#da3633]/40'
-      : 'bg-[#21262d] text-[#8b949e] border-[#30363d]';
-
   const selectedBrowserInfo = cookieStatus?.detectedBrowsers.find(
     (b) => b.id === form.cookies_browser
   );
+  const scheduler = form.scheduler || DEFAULT_SCHEDULER_SETTINGS;
+
+  const handleBrowseFolder = async () => {
+    const dir = await api.selectDirectory();
+    if (dir) {
+      setForm({ ...form, download_dir: dir });
+    }
+  };
 
   const handleTestCookies = async () => {
     setTestingCookies(true);
     setCookieTestResult(null);
     setCookieActionError(null);
     try {
-      // Persist current browser/profile choice first if modified so diagnostics reflects saved settings cleanly
       await onSaveSettings({
         cookies_browser: form.cookies_browser || 'auto',
         cookies_profile: form.cookies_profile?.trim() || undefined,
@@ -132,7 +165,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setCookieActionError('Paste or upload Netscape cookies.txt content before saving.');
       return;
     }
-
     const validation = validateNetscapeCookies(cookieText);
     setCookieValidation(validation);
     if (!validation.valid) {
@@ -168,7 +200,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setCookieValidation(null);
       setCookieTestResult(null);
       setForm((prev) => (prev ? { ...prev, cookies_file: undefined } : null));
-      setCookieActionNotice('Imported cookie file removed. Active mode fell back to browser selection.');
+      setCookieActionNotice('Imported cookie file removed.');
       setTimeout(() => setCookieActionNotice(null), 4000);
     } catch (err: any) {
       setCookieActionError(err.message || 'Failed removing imported cookie file.');
@@ -177,16 +209,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setCookieActionError(null);
-    setCookieActionNotice(null);
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const text = await file.text();
-      setCookieText(text);
+      setCookieText(await file.text());
     } catch (err: any) {
-      setCookieActionError(err.message || 'Failed reading selected file.');
+      setCookieActionError(err.message || 'Failed reading file.');
     } finally {
       e.target.value = '';
+    }
+  };
+
+  const handleCreateCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCatError(null);
+    if (!newCatName.trim()) {
+      setCatError('Category name is required.');
+      return;
+    }
+    try {
+      await api.saveCategory({
+        name: newCatName.trim(),
+        extensions: normalizeExtensionsList(newCatExts),
+        destination_dir: newCatDir.trim() || undefined,
+      });
+      setNewCatName('');
+      setNewCatExts('');
+      setNewCatDir('');
+      onCategoriesChanged();
+    } catch (err: any) {
+      setCatError(err?.message || 'Failed saving category.');
     }
   };
 
@@ -198,513 +250,862 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     });
     await refreshCookieStatus();
     setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2500);
+    setTimeout(() => setIsSaved(false), 2200);
   };
 
+  const sectionTabs: Array<{ id: SettingsSection; label: string }> = [
+    { id: 'general', label: 'General & Theme' },
+    { id: 'downloads', label: 'Downloads & Files' },
+    { id: 'connection', label: 'Connection & Limits' },
+    { id: 'scheduler', label: 'Queue & Scheduler' },
+    { id: 'media', label: 'Audio & Video' },
+    { id: 'categories', label: 'Categories' },
+    { id: 'cookies', label: 'Cookies & Auth' },
+    { id: 'about', label: 'About' },
+  ];
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 max-w-4xl">
+    <form onSubmit={handleSubmit} className="space-y-4 max-w-5xl">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[#21262d] bg-[#12151a]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
-          <h1 className="text-base font-semibold text-white">System Settings & Preferences</h1>
-          <p className="text-xs text-[#8b949e] mt-0.5">
-            Configure concurrency scheduler, engine limits, and authenticated media access
+          <h1 className="text-base font-semibold text-[var(--vanta-text)]">
+            Settings &amp; Preferences
+          </h1>
+          <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
+            Appearance, storage, connection limits, scheduler windows, categories, and authentication
           </p>
         </div>
 
         <button
           type="submit"
-          className="w-full sm:w-auto px-4 py-2 bg-[#238636] hover:bg-[#2ea043] text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
         >
           {isSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-          <span>{isSaved ? 'Settings Saved' : 'Save Changes'}</span>
+          <span>{isSaved ? 'Saved' : 'Save Changes'}</span>
         </button>
       </div>
 
-      {/* Section 1: Performance & Concurrency */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
-        <div className="flex items-center gap-2 border-b border-[#21262d] pb-3">
-          <Gauge className="w-4 h-4 text-[#58a6ff]" />
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-            Concurrency & Performance
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Max Simultaneous Downloads: {form.max_concurrent_downloads}
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={form.max_concurrent_downloads}
-              onChange={(e) =>
-                setForm({ ...form, max_concurrent_downloads: parseInt(e.target.value, 10) })
-              }
-              className="w-full accent-[#1f6feb] cursor-pointer"
-            />
-            <span className="text-[11px] text-[#7d8590] block">
-              Controls global active task queue slots
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Fragment Concurrency (yt-dlp -N): {form.fragment_concurrency}
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="16"
-              value={form.fragment_concurrency}
-              onChange={(e) =>
-                setForm({ ...form, fragment_concurrency: parseInt(e.target.value, 10) })
-              }
-              className="w-full accent-[#1f6feb] cursor-pointer"
-            />
-            <span className="text-[11px] text-[#7d8590] block">
-              Multi-fragment download concurrency per video stream
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Global Bandwidth Limit (KB/s)
-            </label>
-            <input
-              type="number"
-              min="0"
-              placeholder="0 = unlimited"
-              value={form.global_bandwidth_limit_kbps}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  global_bandwidth_limit_kbps: parseInt(e.target.value, 10) || 0,
-                })
-              }
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 text-[#e6edf3]"
-            />
-            <span className="text-[11px] text-[#7d8590] block">
-              0 for unrestricted network throughput
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Max Retries on Failure
-            </label>
-            <input
-              type="number"
-              min="0"
-              max="10"
-              value={form.max_retries}
-              onChange={(e) =>
-                setForm({ ...form, max_retries: parseInt(e.target.value, 10) || 0 })
-              }
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 text-[#e6edf3]"
-            />
-            <span className="text-[11px] text-[#7d8590] block">
-              Automatic retry attempts for recoverable network errors
-            </span>
-          </div>
-        </div>
+      {/* Section Navigation */}
+      <div className="flex items-center gap-1 overflow-x-auto p-1 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+        {sectionTabs.map((tab) => {
+          const active = section === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setSection(tab.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                active
+                  ? 'bg-[var(--vanta-accent)] text-white'
+                  : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'
+              }`}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Section 2: Storage & Naming Templates */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
-        <div className="flex items-center gap-2 border-b border-[#21262d] pb-3">
-          <HardDrive className="w-4 h-4 text-[#3fb950]" />
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-            Storage & Naming Conventions
-          </h2>
-        </div>
-
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Target Download Folder
-            </label>
-            <input
-              type="text"
-              value={form.download_dir}
-              onChange={(e) => setForm({ ...form, download_dir: e.target.value })}
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Filename Template
-            </label>
-            <input
-              type="text"
-              value={form.filename_template}
-              onChange={(e) => setForm({ ...form, filename_template: e.target.value })}
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
-            />
-            <div className="text-[11px] text-[#7d8590] flex items-center gap-1.5 flex-wrap">
-              <span>Variables:</span>
-              <code className="text-[#58a6ff] bg-[#161b22] px-1 py-0.5 rounded">%(title)s</code>
-              <code className="text-[#58a6ff] bg-[#161b22] px-1 py-0.5 rounded">%(id)s</code>
-              <code className="text-[#58a6ff] bg-[#161b22] px-1 py-0.5 rounded">%(uploader)s</code>
-              <code className="text-[#58a6ff] bg-[#161b22] px-1 py-0.5 rounded">%(ext)s</code>
+      {/* Section 1: General & Theme */}
+      {section === 'general' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)] mb-1">Appearance</h2>
+            <p className="text-[var(--vanta-muted)] mb-3">
+              Choose how VANTA Download Manager renders on your desktop.
+            </p>
+            <div className="grid grid-cols-3 gap-2.5 max-w-md">
+              {(
+                [
+                  { id: 'dark', label: 'Dark', icon: Moon },
+                  { id: 'light', label: 'Light', icon: Sun },
+                  { id: 'system', label: 'System', icon: Monitor },
+                ] as const
+              ).map(({ id, label, icon: Icon }) => {
+                const selected = form.theme === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      const nextTheme = id as ThemeMode;
+                      setForm({ ...form, theme: nextTheme });
+                      onSaveSettings({ theme: nextTheme });
+                    }}
+                    className={`p-3 rounded-lg border flex items-center justify-center gap-2 font-medium transition-colors ${
+                      selected
+                        ? 'border-[var(--vanta-accent)] bg-[var(--vanta-accent)]/12 text-[var(--vanta-accent)]'
+                        : 'border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-            <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
+          <div className="border-t border-[var(--vanta-border)] pt-4 space-y-2.5">
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Desktop Behavior</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.clipboard_monitoring)}
+                  onChange={(e) => setForm({ ...form, clipboard_monitoring: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Prompt when supported URL is copied to clipboard
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.floating_notifications_enabled}
+                  onChange={(e) =>
+                    setForm({ ...form, floating_notifications_enabled: e.target.checked })
+                  }
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Show floating active transfers dock
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.tray_minimize_on_close)}
+                  onChange={(e) => setForm({ ...form, tray_minimize_on_close: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Minimize to background tray when closing with active transfers
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.verify_media_on_complete !== false}
+                  onChange={(e) => setForm({ ...form, verify_media_on_complete: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Verify completed files &amp; codecs with FFprobe
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Section 2: Downloads & Storage */}
+      {section === 'downloads' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+          <div className="space-y-1.5">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">
+              Download Destination Folder
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={form.download_dir}
+                onChange={(e) => setForm({ ...form, download_dir: e.target.value })}
+                className="flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+              {api.isTauri() && (
+                <button
+                  type="button"
+                  onClick={handleBrowseFolder}
+                  className="px-3 py-2 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-text)] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  <span>Browse</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Filename Template (yt-dlp)
+              </label>
+              <input
+                type="text"
+                value={form.filename_template}
+                onChange={(e) => setForm({ ...form, filename_template: e.target.value })}
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+              <p className="text-[11px] text-[var(--vanta-muted)]">
+                Variables: %(title)s, %(id)s, %(uploader)s, %(ext)s
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                File Conflict Strategy
+              </label>
+              <select
+                value={form.conflict_strategy || 'rename'}
+                onChange={(e) =>
+                  setForm({ ...form, conflict_strategy: e.target.value as ConflictStrategy })
+                }
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+              >
+                <option value="rename">Auto-rename (e.g. file (1).ext)</option>
+                <option value="overwrite">Overwrite existing file</option>
+                <option value="skip">Skip if destination already exists</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
+            <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
               <input
                 type="checkbox"
                 checked={form.embed_thumbnail}
                 onChange={(e) => setForm({ ...form, embed_thumbnail: e.target.checked })}
-                className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
+                className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
               />
-              <span className="text-xs text-[#c9d1d9]">Embed Cover Artwork / Thumbnail</span>
+              <span className="text-[var(--vanta-text-secondary)]">Embed Cover Artwork / Thumbnail</span>
             </label>
-
-            <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
+            <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
               <input
                 type="checkbox"
                 checked={form.embed_metadata}
                 onChange={(e) => setForm({ ...form, embed_metadata: e.target.checked })}
-                className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
+                className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
               />
-              <span className="text-xs text-[#c9d1d9]">Embed Media Tags & ID3 Metadata</span>
+              <span className="text-[var(--vanta-text-secondary)]">Embed Media Tags &amp; Metadata</span>
             </label>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Section 3: Network & Proxy */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
-        <div className="flex items-center gap-2 border-b border-[#21262d] pb-3">
-          <Shield className="w-4 h-4 text-[#d29922]" />
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-            Network & Proxy Routing
-          </h2>
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-[#c9d1d9] block">
-            Proxy URL (Optional)
-          </label>
-          <input
-            type="text"
-            placeholder="http://127.0.0.1:8080 or socks5://127.0.0.1:1080"
-            value={form.proxy_url}
-            onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
-            className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
-          />
-          <span className="text-[11px] text-[#7d8590] block">
-            Passed safely as --proxy to yt-dlp and network requests
-          </span>
-        </div>
-      </div>
-
-      {/* Section 4: Notifications & UI */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
-        <div className="flex items-center gap-2 border-b border-[#21262d] pb-3">
-          <Bell className="w-4 h-4 text-[#a371f7]" />
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-            Notifications & Floating Surfaces
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.floating_notifications_enabled}
-              onChange={(e) =>
-                setForm({ ...form, floating_notifications_enabled: e.target.checked })
-              }
-              className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
-            />
-            <span className="text-xs text-[#c9d1d9]">Enable Floating Progress Popups</span>
-          </label>
-
-          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[#21262d] bg-[#161b22] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.auto_retry_failed}
-              onChange={(e) => setForm({ ...form, auto_retry_failed: e.target.checked })}
-              className="w-4 h-4 rounded text-[#1f6feb] accent-[#1f6feb]"
-            />
-            <span className="text-xs text-[#c9d1d9]">Auto-retry recoverable failures</span>
-          </label>
-        </div>
-      </div>
-
-      {/* Section 5: Cookies & Authenticated Media Access */}
-      <div className="p-5 rounded-xl border border-[#21262d] bg-[#12151a] space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#21262d] pb-3">
-          <div className="flex items-center gap-2">
-            <Cookie className="w-4 h-4 text-[#3fb950]" />
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-white font-mono">
-              Cookies & Authenticated Media Access
-            </h2>
-          </div>
-          <span
-            data-testid="cookie-status-badge"
-            className={`text-[11px] font-mono px-2 py-0.5 rounded border self-start sm:self-auto ${badgeToneClass}`}
-          >
-            {badge.badgeText}
-          </span>
-        </div>
-
-        <p className="text-xs text-[#8b949e]">
-          Configure how yt-dlp loads user-authorized session cookies. Imported Netscape <code className="text-[#c9d1d9]">cookies.txt</code> files take precedence over browser extraction; secrets are stored only inside the local cookie file and never logged.
-        </p>
-
-        {/* Active Cookie File Metadata Summary */}
-        <div className="p-3 rounded-lg border border-[#21262d] bg-[#161b22] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-1 min-w-0">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="font-medium text-white">Active Cookie Source:</span>
-              <span className="font-mono text-[#58a6ff]">{badge.badgeText}</span>
+      {/* Section 3: Connection & Limits */}
+      {section === 'connection' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Fragment Concurrency (yt-dlp -N): {form.fragment_concurrency}
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="16"
+                value={form.fragment_concurrency}
+                onChange={(e) =>
+                  setForm({ ...form, fragment_concurrency: parseInt(e.target.value, 10) })
+                }
+                className="w-full accent-[var(--vanta-accent)] cursor-pointer"
+              />
             </div>
-            <p className="text-[11px] text-[#8b949e]">{badge.detail}</p>
-            {cookieStatus?.fileExists && (
-              <div className="text-[11px] text-[#7d8590] font-mono truncate">
-                {cookieStatus.filePath} · {cookieStatus.recordCount} entries · {cookieStatus.domainCount} domain(s) · {cookieStatus.httpOnlyCount} HttpOnly
+
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Max Retries per Transfer
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="10"
+                value={form.max_retries}
+                onChange={(e) =>
+                  setForm({ ...form, max_retries: parseInt(e.target.value, 10) || 0 })
+                }
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono tabular-nums text-[var(--vanta-text)]"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Global Bandwidth Cap (KB/s, 0 = unlimited)
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={form.global_bandwidth_limit_kbps}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    global_bandwidth_limit_kbps: parseInt(e.target.value, 10) || 0,
+                  })
+                }
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono tabular-nums text-[var(--vanta-text)]"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Per-Task Bandwidth Cap (KB/s, 0 = unlimited)
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={form.per_task_bandwidth_limit_kbps}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    per_task_bandwidth_limit_kbps: parseInt(e.target.value, 10) || 0,
+                  })
+                }
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono tabular-nums text-[var(--vanta-text)]"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5 pt-2">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">
+              HTTP / SOCKS5 Proxy URL (Optional)
+            </label>
+            <input
+              type="text"
+              placeholder="http://127.0.0.1:8080 or socks5://127.0.0.1:1080"
+              value={form.proxy_url}
+              onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Section 4: Queue & Scheduler */}
+      {section === 'scheduler' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Max Simultaneous Downloads: {form.max_concurrent_downloads}
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="10"
+                value={form.max_concurrent_downloads}
+                onChange={(e) =>
+                  setForm({ ...form, max_concurrent_downloads: parseInt(e.target.value, 10) })
+                }
+                className="w-full accent-[var(--vanta-accent)] cursor-pointer"
+              />
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <label className="flex items-center gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.auto_retry_failed}
+                  onChange={(e) => setForm({ ...form, auto_retry_failed: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Auto-retry transient network failures
+                </span>
+              </label>
+              <label className="flex items-center gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.auto_resume_on_startup}
+                  onChange={(e) => setForm({ ...form, auto_resume_on_startup: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">
+                  Resume unfinished queue items on startup
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
+            <label className="flex items-center gap-2.5 font-medium text-[var(--vanta-text)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={scheduler.enabled}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    scheduler: { ...scheduler, enabled: e.target.checked },
+                  })
+                }
+                className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+              />
+              <span>Enable Scheduled Download Window (Quiet Hours / Off-Peak)</span>
+            </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] text-[var(--vanta-muted)] block">Start Time</label>
+                <input
+                  type="time"
+                  value={scheduler.start_time}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      scheduler: { ...scheduler, start_time: e.target.value },
+                    })
+                  }
+                  className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+                />
               </div>
+              <div className="space-y-1">
+                <label className="text-[11px] text-[var(--vanta-muted)] block">Stop Time</label>
+                <input
+                  type="time"
+                  value={scheduler.stop_time}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      scheduler: { ...scheduler, stop_time: e.target.value },
+                    })
+                  }
+                  className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+                />
+              </div>
+              <label className="flex items-center gap-2 pt-5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={scheduler.pause_on_stop}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      scheduler: { ...scheduler, pause_on_stop: e.target.checked },
+                    })
+                  }
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Pause active outside window</span>
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              {DAYS_OF_WEEK.map((dayLabel, idx) => {
+                const active = scheduler.days.includes(idx);
+                return (
+                  <button
+                    key={dayLabel}
+                    type="button"
+                    onClick={() => {
+                      const nextDays = active
+                        ? scheduler.days.filter((d) => d !== idx)
+                        : [...scheduler.days, idx].sort((a, b) => a - b);
+                      setForm({
+                        ...form,
+                        scheduler: { ...scheduler, days: nextDays },
+                      });
+                    }}
+                    className={`px-2.5 py-1 rounded border text-[11px] font-medium transition-colors ${
+                      active
+                        ? 'bg-[var(--vanta-accent)] border-[var(--vanta-accent)] text-white'
+                        : 'bg-[var(--vanta-surface-2)] border-[var(--vanta-border)] text-[var(--vanta-muted)]'
+                    }`}
+                  >
+                    {dayLabel}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Section 5: Audio & Video Defaults */}
+      {section === 'media' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+          <div className="space-y-1.5">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">
+              Default Video Container
+            </label>
+            <select
+              value={form.default_video_format}
+              onChange={(e) => setForm({ ...form, default_video_format: e.target.value })}
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+            >
+              <option value="mp4">MP4</option>
+              <option value="mkv">MKV</option>
+              <option value="webm">WebM</option>
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">
+              Default Audio Format
+            </label>
+            <select
+              value={form.default_audio_format}
+              onChange={(e) => setForm({ ...form, default_audio_format: e.target.value })}
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+            >
+              <option value="mp3">MP3</option>
+              <option value="m4a">M4A</option>
+              <option value="opus">OPUS</option>
+              <option value="flac">FLAC</option>
+              <option value="wav">WAV</option>
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">
+              Default Audio Bitrate
+            </label>
+            <select
+              value={form.default_audio_bitrate}
+              onChange={(e) => setForm({ ...form, default_audio_bitrate: e.target.value })}
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+            >
+              <option value="320k">320 kbps</option>
+              <option value="256k">256 kbps</option>
+              <option value="192k">192 kbps</option>
+              <option value="128k">128 kbps</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* Section 6: Categories CRUD */}
+      {section === 'categories' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Download Categories</h2>
+            <p className="text-[var(--vanta-muted)] mt-0.5">
+              Automatically classify new downloads by file extension and route them to custom subfolders.
+            </p>
+          </div>
+
+          <div className="divide-y divide-[var(--vanta-border)] rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+            {categories.map((cat) => (
+              <div key={cat.id} className="p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-[var(--vanta-text)]">{cat.name}</p>
+                  <p className="font-mono text-[11px] text-[var(--vanta-muted)] truncate">
+                    Extensions: {cat.extensions.join(', ') || 'None'}
+                    {cat.destination_dir ? ` · Folder: ${cat.destination_dir}` : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeleteCatTarget(cat)}
+                  className="p-1.5 text-[var(--vanta-muted)] hover:text-red-600 dark:hover:text-[#f85149] rounded transition-colors shrink-0"
+                  title="Delete category"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
+            <h3 className="font-semibold text-[var(--vanta-text)]">Add Category</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <input
+                type="text"
+                placeholder="Category name (e.g. ISOs)"
+                value={newCatName}
+                onChange={(e) => setNewCatName(e.target.value)}
+                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+              />
+              <input
+                type="text"
+                placeholder="Extensions (e.g. iso, img, bin)"
+                value={newCatExts}
+                onChange={(e) => setNewCatExts(e.target.value)}
+                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+              <input
+                type="text"
+                placeholder="Custom folder (optional)"
+                value={newCatDir}
+                onChange={(e) => setNewCatDir(e.target.value)}
+                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+            </div>
+            {catError && <p className="text-red-600 dark:text-[#f85149]">{catError}</p>}
+            <button
+              type="button"
+              onClick={handleCreateCategory}
+              className="px-3.5 py-1.5 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white font-medium inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Category</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Section 7: Cookies & Auth */}
+      {section === 'cookies' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[var(--vanta-border)]">
+            <div className="flex items-center gap-2">
+              <Cookie className="w-4 h-4 text-emerald-600 dark:text-[#3fb950]" />
+              <h2 className="text-sm font-semibold text-[var(--vanta-text)]">
+                Cookies &amp; Authenticated Media Access
+              </h2>
+            </div>
+            <span data-testid="cookie-status-badge" className="font-mono text-[11px] text-[var(--vanta-accent)]">
+              {badge.badgeText}
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <p className="font-medium text-[var(--vanta-text)]">
+                Active Source: <span className="font-mono">{badge.badgeText}</span>
+              </p>
+              <p className="text-[11px] text-[var(--vanta-muted)]">{badge.detail}</p>
+              {cookieStatus?.fileExists && (
+                <p className="text-[11px] text-[var(--vanta-muted)] font-mono truncate">
+                  {cookieStatus.filePath} · {cookieStatus.recordCount} entries · {cookieStatus.domainCount} domains
+                </p>
+              )}
+            </div>
+            {cookieStatus?.fileExists && (
+              <button
+                type="button"
+                onClick={handleRemoveCookies}
+                className="px-2.5 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-[#f85149] rounded-lg font-medium flex items-center gap-1.5 shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Remove File</span>
+              </button>
             )}
           </div>
 
-          {cookieStatus?.fileExists && (
-            <button
-              type="button"
-              onClick={handleRemoveCookies}
-              className="px-2.5 py-1.5 bg-[#da3633]/15 hover:bg-[#da3633]/25 text-[#f85149] border border-[#da3633]/30 rounded-lg text-xs font-medium flex items-center gap-1.5 shrink-0 self-start sm:self-auto"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Remove Cookies</span>
-            </button>
-          )}
-        </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Browser for Cookie Extraction
+              </label>
+              <select
+                value={form.cookies_browser || 'auto'}
+                onChange={(e) => setForm({ ...form, cookies_browser: e.target.value as any })}
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
+              >
+                <option value="auto">Auto-Detect Installed Browser</option>
+                {Object.entries(BROWSER_LABELS).map(([id, label]) => {
+                  const info = cookieStatus?.detectedBrowsers.find((b) => b.id === id);
+                  const suffix = info
+                    ? info.detected
+                      ? info.hasCookieStore
+                        ? ' (Detected)'
+                        : ' (No Cookie DB)'
+                      : ' (Not Detected)'
+                    : '';
+                  return (
+                    <option key={id} value={id}>
+                      {label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+                <option value="none">Disabled</option>
+              </select>
+            </div>
 
-        {/* Browser & Profile Selection + Multi-Stage Test */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Browser for Cookie Extraction
-            </label>
-            <select
-              value={form.cookies_browser || 'auto'}
-              onChange={(e) => setForm({ ...form, cookies_browser: e.target.value as any })}
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 text-[#e6edf3]"
-            >
-              <option value="auto">Auto-Detect Installed Browser</option>
-              {Object.entries(BROWSER_LABELS).map(([id, label]) => {
-                const info = cookieStatus?.detectedBrowsers.find((b) => b.id === id);
-                const suffix = info
-                  ? info.detected
-                    ? info.hasCookieStore
-                      ? ' (Detected)'
-                      : ' (No Cookie DB)'
-                    : ' (Not Detected)'
-                  : '';
-                return (
-                  <option key={id} value={id}>
-                    {label}
-                    {suffix}
-                  </option>
-                );
-              })}
-              <option value="none">Disabled (No cookies)</option>
-            </select>
-            <span className="text-[11px] text-[#7d8590] block">
-              Used when no valid imported cookies.txt file is active
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Browser Profile (Optional)
-            </label>
-            <input
-              type="text"
-              list="vanta-browser-profiles"
-              value={form.cookies_profile || ''}
-              placeholder={selectedBrowserInfo?.defaultProfile || 'Default'}
-              onChange={(e) => setForm({ ...form, cookies_profile: e.target.value })}
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
-            />
-            <datalist id="vanta-browser-profiles">
-              {(selectedBrowserInfo?.profiles || []).map((p) => (
-                <option key={p} value={p} />
-              ))}
-            </datalist>
-            <span className="text-[11px] text-[#7d8590] block">
-              {selectedBrowserInfo && selectedBrowserInfo.profiles.length > 0
-                ? `Detected profiles: ${selectedBrowserInfo.profiles.join(', ')}`
-                : 'Leave blank to use default browser profile'}
-            </span>
-          </div>
-        </div>
-
-        {/* User-Agent & Optional Verification URL */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              User-Agent Emulation
-            </label>
-            <input
-              type="text"
-              value={form.user_agent || ''}
-              placeholder="Mozilla/5.0 (Windows NT 10.0; Win64; x64)..."
-              onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
-              className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Optional Test URL for Authentication Check
-            </label>
-            <div className="flex gap-2">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Browser Profile (Optional)
+              </label>
               <input
                 type="text"
-                value={cookieTestUrl}
-                onChange={(e) => setCookieTestUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=..."
-                className="flex-1 bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2 font-mono text-[#e6edf3]"
+                list="vanta-browser-profiles"
+                value={form.cookies_profile || ''}
+                placeholder={selectedBrowserInfo?.defaultProfile || 'Default'}
+                onChange={(e) => setForm({ ...form, cookies_profile: e.target.value })}
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
               />
-              <button
-                type="button"
-                onClick={handleTestCookies}
-                disabled={testingCookies}
-                className="px-3 py-1.5 bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5"
-              >
-                {testingCookies ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Check className="w-3.5 h-3.5" />
-                )}
-                <span>{testingCookies ? 'Testing...' : 'Test'}</span>
-              </button>
+              <datalist id="vanta-browser-profiles">
+                {(selectedBrowserInfo?.profiles || []).map((p) => (
+                  <option key={p} value={p} />
+                ))}
+              </datalist>
             </div>
           </div>
-        </div>
 
-        {/* Multi-Stage Cookie Test Output */}
-        {cookieTestResult && (
-          <div
-            data-testid="cookie-test-result"
-            className={`p-3 rounded-lg border text-xs space-y-2 ${
-              cookieTestResult.success
-                ? 'bg-[#238636]/10 border-[#238636]/30 text-[#3fb950]'
-                : 'bg-[#da3633]/10 border-[#da3633]/30 text-[#f85149]'
-            }`}
-          >
-            <div className="flex items-start gap-2">
-              {cookieTestResult.success ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-              ) : (
-                <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              )}
-              <div className="space-y-1">
-                <div className="font-medium">{cookieTestResult.message}</div>
-                <div className="flex flex-wrap gap-2 text-[10px] font-mono text-[#c9d1d9]">
-                  <span>Stage: {cookieTestResult.stage}</span>
-                  <span>· Source: {cookieTestResult.activeSource}</span>
-                  {cookieTestResult.resolvedBrowser && (
-                    <span>· Browser: {cookieTestResult.resolvedBrowser}</span>
-                  )}
-                  {cookieTestResult.resolvedProfile && (
-                    <span>· Profile: {cookieTestResult.resolvedProfile}</span>
-                  )}
-                  <span>· DB Accessible: {cookieTestResult.databaseAccessible ? 'Yes' : 'No'}</span>
-                </div>
-                {cookieTestResult.nextAction && (
-                  <div className="text-[11px] text-[#e6edf3]">
-                    Next action: {cookieTestResult.nextAction}
-                  </div>
-                )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                User-Agent Override (Optional)
+              </label>
+              <input
+                type="text"
+                value={form.user_agent || ''}
+                placeholder="Mozilla/5.0..."
+                onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
+                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-medium text-[var(--vanta-text-secondary)] block">
+                Verification Test URL (Optional)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={cookieTestUrl}
+                  onChange={(e) => setCookieTestUrl(e.target.value)}
+                  placeholder="https://..."
+                  className="flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+                />
+                <button
+                  type="button"
+                  onClick={handleTestCookies}
+                  disabled={testingCookies}
+                  className="px-3 py-1.5 bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] disabled:opacity-50 text-white rounded-lg font-medium flex items-center gap-1.5 shrink-0"
+                >
+                  {testingCookies ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  <span>{testingCookies ? 'Testing...' : 'Test'}</span>
+                </button>
               </div>
             </div>
           </div>
-        )}
 
-        {/* Import / Upload / Paste Netscape cookies.txt */}
-        <div className="space-y-2 pt-2 border-t border-[#21262d]">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <label className="text-xs font-medium text-[#c9d1d9] block">
-              Import or Paste Netscape Cookies (cookies.txt format)
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".txt,text/plain"
-                onChange={handleFileUpload}
-                className="hidden"
-              />
+          {cookieTestResult && (
+            <div
+              data-testid="cookie-test-result"
+              className={`p-3 rounded-lg border space-y-1 ${
+                cookieTestResult.success
+                  ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-700 dark:text-[#3fb950]'
+                  : 'bg-red-500/10 border-red-500/35 text-red-600 dark:text-[#f85149]'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {cookieTestResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1">
+                  <p className="font-medium">{cookieTestResult.message}</p>
+                  <p className="text-[11px] font-mono text-[var(--vanta-text-secondary)]">
+                    Stage: {cookieTestResult.stage} · Source: {cookieTestResult.activeSource}
+                  </p>
+                  {cookieTestResult.nextAction && (
+                    <p className="text-[11px] text-[var(--vanta-text)]">
+                      Next action: {cookieTestResult.nextAction}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2 pt-3 border-t border-[var(--vanta-border)]">
+            <div className="flex items-center justify-between gap-2">
+              <label className="font-medium text-[var(--vanta-text-secondary)]">
+                Import or Paste Netscape Cookies (cookies.txt)
+              </label>
+              <div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".txt,text/plain"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-2.5 py-1 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] rounded flex items-center gap-1.5"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Upload cookies.txt</span>
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              rows={4}
+              value={cookieText}
+              onChange={(e) => {
+                setCookieText(e.target.value);
+                setCookieActionError(null);
+              }}
+              placeholder="# Netscape HTTP Cookie File"
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2.5 font-mono text-[var(--vanta-text)]"
+            />
+
+            {cookieValidation && (
+              <p
+                className={`text-[11px] font-mono ${
+                  cookieValidation.valid
+                    ? 'text-emerald-700 dark:text-[#3fb950]'
+                    : 'text-red-600 dark:text-[#f85149]'
+                }`}
+              >
+                {cookieValidation.valid
+                  ? `Valid Netscape format: ${cookieValidation.recordCount} entries across ${cookieValidation.domainCount} domain(s).`
+                  : cookieValidation.errors[0]}
+              </p>
+            )}
+
+            {cookieActionError && (
+              <div className="p-2.5 rounded-lg border border-red-500/35 bg-red-500/10 text-red-600 dark:text-[#f85149] flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{cookieActionError}</span>
+              </div>
+            )}
+            {cookieActionNotice && (
+              <div className="p-2.5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-[#3fb950] flex items-center gap-2">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{cookieActionNotice}</span>
+              </div>
+            )}
+
+            <div className="flex justify-end">
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-2.5 py-1 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded text-xs font-medium flex items-center gap-1.5"
+                onClick={handleSaveCookieText}
+                disabled={
+                  savingCookies ||
+                  !cookieText.trim() ||
+                  (cookieValidation !== null && !cookieValidation.valid)
+                }
+                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-medium"
               >
-                <Upload className="w-3.5 h-3.5 text-[#58a6ff]" />
-                <span>Upload cookies.txt</span>
+                {savingCookies ? 'Saving...' : 'Save Cookie File'}
               </button>
             </div>
           </div>
-
-          <textarea
-            rows={4}
-            value={cookieText}
-            onChange={(e) => {
-              setCookieText(e.target.value);
-              setCookieActionError(null);
-            }}
-            placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1899999999&#9;SID&#9;..."
-            className="w-full bg-[#161b22] border border-[#30363d] focus:border-[#58a6ff] rounded-lg text-xs p-2.5 font-mono text-[#e6edf3] placeholder-[#6e7681]"
-          />
-
-          {cookieValidation && (
-            <div
-              className={`text-[11px] font-mono ${
-                cookieValidation.valid ? 'text-[#3fb950]' : 'text-[#f85149]'
-              }`}
-            >
-              {cookieValidation.valid
-                ? `Valid Netscape cookie format: ${cookieValidation.recordCount} entries across ${cookieValidation.domainCount} domain(s).`
-                : cookieValidation.errors[0] || 'Invalid Netscape format.'}
-            </div>
-          )}
-
-          {cookieActionError && (
-            <div className="p-2.5 rounded-lg border border-[#da3633]/40 bg-[#da3633]/10 text-xs text-[#f85149] flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{cookieActionError}</span>
-            </div>
-          )}
-
-          {cookieActionNotice && (
-            <div className="p-2.5 rounded-lg border border-[#238636]/40 bg-[#238636]/10 text-xs text-[#3fb950] flex items-center gap-2">
-              <Check className="w-4 h-4 shrink-0" />
-              <span>{cookieActionNotice}</span>
-            </div>
-          )}
-
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-[#7d8590]">
-            <span>
-              Use a Netscape-format cookies.txt export when Chrome/Edge database decryption is locked on Windows.
-            </span>
-            <button
-              type="button"
-              onClick={handleSaveCookieText}
-              disabled={savingCookies || !cookieText.trim() || (cookieValidation !== null && !cookieValidation.valid)}
-              className="px-3 py-1.5 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded text-xs font-medium transition-colors shrink-0"
-            >
-              {savingCookies ? 'Validating & Saving...' : 'Save Cookie File'}
-            </button>
-          </div>
         </div>
-      </div>
+      )}
+
+      {/* Section 8: About */}
+      {section === 'about' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-2 text-xs">
+          <h2 className="text-sm font-semibold text-[var(--vanta-text)]">
+            VANTA Download Manager
+          </h2>
+          <p className="text-[var(--vanta-muted)] leading-relaxed">
+            Workstation download manager supporting direct HTTP/HTTPS byte-range resume &amp; SHA-256 verification, yt-dlp video/playlist extraction with FFmpeg muxing, and spotDL music workflows.
+          </p>
+          <p className="font-mono text-[11px] text-[var(--vanta-muted)] pt-2">
+            Keyboard shortcuts: Ctrl/Cmd + N (New Download) · Esc (Close inspector/modal)
+          </p>
+        </div>
+      )}
+
+      <ConfirmDialog
+        isOpen={Boolean(deleteCatTarget)}
+        title="Delete Category"
+        message={`Delete category "${deleteCatTarget?.name}"? Existing transfers will remain in your queue as uncategorized.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={async () => {
+          if (deleteCatTarget) {
+            await api.deleteCategory(deleteCatTarget.id);
+            setDeleteCatTarget(null);
+            onCategoriesChanged();
+          }
+        }}
+        onCancel={() => setDeleteCatTarget(null)}
+      />
     </form>
   );
 };

@@ -359,7 +359,8 @@ describe('Regression: zero fabricated Spotify placeholders remain in UI or engin
       'server/spotify.ts',
       'src/components/NewDownloadModal.tsx',
       'src/components/MusicLibraryView.tsx',
-      'src/components/QueueView.tsx',
+      'src/components/DownloadCenterView.tsx',
+      'src/components/DownloadDetailsDrawer.tsx',
       'src/utils/spotify.ts',
       'src-tauri/src/engines.rs',
     ];

@@ -1,4 +1,6 @@
 import express, { Request, Response } from 'express';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -12,6 +14,12 @@ import {
   clearFailedTasks,
   clearAllTasks,
   deleteDownloadedFile,
+  moveTaskOrderInDb,
+  renameTaskFileInDb,
+  verifyTaskChecksumInDb,
+  getCategories,
+  saveCategory,
+  deleteCategory,
   getSettings,
   saveSettings,
   getNotifications,
@@ -23,7 +31,6 @@ import {
   removeCookiesFile,
   detectInstalledBrowsers,
   getDiagnosticLogInfo,
-  appendAppLog,
 } from './server/cookies';
 import { validateNetscapeCookies } from './src/utils/cookie-validator';
 import { engineManager } from './server/engineManager';
@@ -31,11 +38,40 @@ import { spotifyMetadataService } from './server/spotify';
 import { queueController } from './server/queueController';
 import { DownloadTask } from './src/types';
 import { determineEngineForUrl } from './src/utils/engine-parser';
+import { matchCategoryForTask } from './src/utils/categories';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function openPathWithOs(targetPath: string, revealParent = false): void {
+  const resolved = revealParent
+    ? fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()
+      ? targetPath
+      : path.dirname(targetPath)
+    : targetPath;
+
+  if (!resolved || !fs.existsSync(resolved)) {
+    throw new Error('Target path does not exist on disk.');
+  }
+
+  if (process.platform === 'win32') {
+    if (revealParent && fs.statSync(targetPath).isFile()) {
+      execFile('explorer.exe', ['/select,', targetPath], { windowsHide: true });
+    } else {
+      execFile('cmd.exe', ['/c', 'start', '', resolved], { windowsHide: true });
+    }
+  } else if (process.platform === 'darwin') {
+    execFile('open', revealParent && fs.statSync(targetPath).isFile() ? ['-R', targetPath] : [resolved]);
+  } else {
+    execFile('xdg-open', [resolved], (err) => {
+      if (err) {
+        console.info('xdg-open unavailable in headless container:', err.message);
+      }
+    });
+  }
+}
 
 async function startServer() {
   const app = express();
@@ -64,7 +100,6 @@ async function startServer() {
     }
   });
 
-  // Managed engine summary
   app.get('/api/engines/managed', async (_req: Request, res: Response) => {
     try {
       res.json(await engineManager.getManagedEngineInfo());
@@ -73,7 +108,6 @@ async function startServer() {
     }
   });
 
-  // Install single managed engine
   app.post('/api/engines/install/:name', async (req: Request, res: Response) => {
     try {
       const result = await engineManager.installEngine(
@@ -87,7 +121,6 @@ async function startServer() {
     }
   });
 
-  // Install all managed engines
   app.post('/api/engines/install', async (req: Request, res: Response) => {
     try {
       const results = await engineManager.installAllEngines(
@@ -101,8 +134,16 @@ async function startServer() {
     }
   });
 
-  // Diagnostics test
-  app.post('/api/engines/diagnostics', async (req: Request, res: Response) => {
+  app.post('/api/engines/remove/:name', async (req: Request, res: Response) => {
+    try {
+      const result = engineManager.removeManagedEngine(req.params.name);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to remove engine' });
+    }
+  });
+
+  app.post('/api/engines/diagnostics', async (_req: Request, res: Response) => {
     try {
       const results = await engineManager.runDiagnostics();
       res.json({ success: true, results });
@@ -111,8 +152,7 @@ async function startServer() {
     }
   });
 
-  // Engine updates
-  app.get('/api/engines/updates', async (req: Request, res: Response) => {
+  app.get('/api/engines/updates', async (_req: Request, res: Response) => {
     try {
       const updates = await engineManager.checkEngineUpdates();
       res.json(updates);
@@ -130,7 +170,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/engines/update-all', async (req: Request, res: Response) => {
+  app.post('/api/engines/update-all', async (_req: Request, res: Response) => {
     try {
       const results = await engineManager.updateAllEngines();
       res.json({ success: true, results });
@@ -141,7 +181,7 @@ async function startServer() {
 
   // Inspect URL
   app.post('/api/inspect', async (req: Request, res: Response) => {
-    const { url, requestId } = req.body || {};
+    const { url, requestId, includePlaylist } = req.body || {};
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'URL is required' });
     }
@@ -156,7 +196,9 @@ async function startServer() {
 
     try {
       const settings = getSettings();
-      const metadata = await engineManager.inspectUrl(url.trim(), settings.proxy_url, reqIdStr);
+      const metadata = await engineManager.inspectUrl(url.trim(), settings.proxy_url, reqIdStr, {
+        includePlaylist: typeof includePlaylist === 'boolean' ? includePlaylist : undefined,
+      });
       res.json(metadata);
     } catch (err: any) {
       const msg = err.message || 'Inspection failed';
@@ -192,10 +234,34 @@ async function startServer() {
     res.json({ cancelled });
   });
 
+  // Categories API
+  app.get('/api/categories', (_req: Request, res: Response) => {
+    res.json(getCategories());
+  });
+
+  app.post('/api/categories', (req: Request, res: Response) => {
+    const { id, name, color, extensions, destination_dir } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Category name is required' });
+    }
+    const saved = saveCategory({
+      id,
+      name: name.trim(),
+      color: typeof color === 'string' ? color : '#58a6ff',
+      extensions: Array.isArray(extensions) ? extensions : [],
+      destination_dir: typeof destination_dir === 'string' ? destination_dir : undefined,
+    });
+    res.json(saved);
+  });
+
+  app.delete('/api/categories/:id', (req: Request, res: Response) => {
+    deleteCategory(req.params.id);
+    res.json({ success: true });
+  });
+
   // Tasks API
-  app.get('/api/tasks', (req: Request, res: Response) => {
-    const tasks = getAllTasks();
-    res.json(tasks);
+  app.get('/api/tasks', (_req: Request, res: Response) => {
+    res.json(getAllTasks());
   });
 
   app.post('/api/tasks', async (req: Request, res: Response) => {
@@ -220,6 +286,11 @@ async function startServer() {
       audio_bit_depth,
       audio_channels,
       is_lossy_source,
+      custom_filename,
+      category_id,
+      playlist_mode,
+      expected_sha256,
+      total_bytes,
     } = req.body;
 
     if (!url || typeof url !== 'string' || !url.trim()) {
@@ -228,6 +299,7 @@ async function startServer() {
 
     const trimmedUrl = url.trim();
     const settings = getSettings();
+    const categories = getCategories();
     const engine = determineEngineForUrl(trimmedUrl);
 
     let resolvedUrl = trimmedUrl;
@@ -274,6 +346,16 @@ async function startServer() {
       }
     }
 
+    const resolvedExt = ext || (is_audio_only || engine === 'spotdl' ? 'mp3' : 'mp4');
+    const resolvedIsAudio = Boolean(is_audio_only || engine === 'spotdl');
+    const matchedCat =
+      (category_id ? categories.find((c) => c.id === category_id) : null) ||
+      matchCategoryForTask(resolvedExt, resolvedIsAudio, categories);
+
+    const existingTasks = getAllTasks();
+    const maxOrder = existingTasks.reduce((max, t) => Math.max(max, t.queue_order || 0), 0);
+    const knownTotal = Number(total_bytes || 0);
+
     const task: DownloadTask = {
       id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       url: resolvedUrl,
@@ -283,28 +365,46 @@ async function startServer() {
       duration_string: resolvedDurationStr,
       thumbnail: resolvedThumbnail,
       album: resolvedAlbum,
-      content_type: resolvedContentType,
+      content_type: resolvedContentType as any,
       engine,
       status: 'queued',
       progress_percentage: 0,
+      percentage_known: knownTotal > 0 || engine !== 'spotdl',
       speed_str: '0 B/s',
       speed_bytes_per_sec: 0,
+      avg_speed_bytes_per_sec: 0,
       downloaded_bytes: 0,
-      total_bytes: 0,
-      eta_str: '--:--',
+      total_bytes: knownTotal,
+      remaining_bytes: knownTotal,
+      eta_str: '--',
+      eta_seconds: null,
+      elapsed_seconds: 0,
+      active_connections: 0,
       current_phase: 'Queued',
       format_id: format_id || 'best',
       format_note: format_note || undefined,
-      ext: ext || (is_audio_only || engine === 'spotdl' ? 'mp3' : 'mp4'),
-      is_audio_only: Boolean(is_audio_only || engine === 'spotdl'),
+      ext: resolvedExt,
+      is_audio_only: resolvedIsAudio,
       audio_format: audio_format || settings.default_audio_format,
       audio_bitrate: audio_bitrate || settings.default_audio_bitrate,
       audio_sample_rate: audio_sample_rate ? parseInt(audio_sample_rate, 10) : settings.default_audio_sample_rate,
       audio_bit_depth: audio_bit_depth ? parseInt(audio_bit_depth, 10) : settings.default_audio_bit_depth,
       audio_channels: audio_channels ? parseInt(audio_channels, 10) : undefined,
       is_lossy_source: is_lossy_source !== undefined ? Boolean(is_lossy_source) : engine === 'spotdl',
-      output_path: output_path || settings.download_dir,
+      output_path: output_path || matchedCat?.destination_dir || settings.download_dir,
+      custom_filename: typeof custom_filename === 'string' && custom_filename.trim() ? custom_filename.trim() : null,
+      category_id: matchedCat?.id || null,
+      playlist_mode: playlist_mode === 'playlist' ? 'playlist' : 'single',
+      expected_sha256: typeof expected_sha256 === 'string' && expected_sha256.trim() ? expected_sha256.trim().toLowerCase() : null,
+      logs: [
+        {
+          timestamp: new Date().toISOString(),
+          level: 'info',
+          message: `Task queued via ${engine}`,
+        },
+      ],
       priority: priority || 'normal',
+      queue_order: maxOrder + 1,
       created_at: new Date().toISOString(),
       retries: 0,
       max_retries: settings.max_retries,
@@ -317,16 +417,106 @@ async function startServer() {
     res.status(201).json(task);
   });
 
+  app.patch('/api/tasks/:id', (req: Request, res: Response) => {
+    const task = getTaskById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const { priority, category_id, custom_filename } = req.body || {};
+    if (priority) task.priority = priority;
+    if (category_id !== undefined) task.category_id = category_id || null;
+    if (custom_filename !== undefined) task.custom_filename = custom_filename || null;
+
+    upsertTask(task);
+    queueController.broadcast('task_updated', task);
+    res.json(task);
+  });
+
+  app.post('/api/tasks/:id/move', (req: Request, res: Response) => {
+    const direction = req.body?.direction === 'down' ? 'down' : 'up';
+    const updated = moveTaskOrderInDb(req.params.id, direction);
+    queueController.broadcast('tasks_cleared', updated);
+    res.json(updated);
+  });
+
+  app.post('/api/tasks/:id/rename', (req: Request, res: Response) => {
+    try {
+      const newFilename = typeof req.body?.filename === 'string' ? req.body.filename : '';
+      const updated = renameTaskFileInDb(req.params.id, newFilename);
+      if (!updated) return res.status(404).json({ error: 'Task not found' });
+      queueController.broadcast('task_updated', updated);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Rename failed' });
+    }
+  });
+
+  app.post('/api/tasks/:id/verify-checksum', async (req: Request, res: Response) => {
+    try {
+      const expected = typeof req.body?.expectedSha256 === 'string' ? req.body.expectedSha256 : undefined;
+      const result = await verifyTaskChecksumInDb(req.params.id, expected);
+      queueController.broadcast('task_updated', result.task);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Checksum verification failed' });
+    }
+  });
+
+  app.post('/api/tasks/:id/open-file', (req: Request, res: Response) => {
+    const task = getTaskById(req.params.id);
+    if (!task || !task.output_path) {
+      return res.status(404).json({ error: 'Task file not found' });
+    }
+    try {
+      openPathWithOs(task.output_path, false);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tasks/:id/open-folder', (req: Request, res: Response) => {
+    const task = getTaskById(req.params.id);
+    if (!task || !task.output_path) {
+      return res.status(404).json({ error: 'Task folder not found' });
+    }
+    try {
+      openPathWithOs(task.output_path, true);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tasks/bulk', (req: Request, res: Response) => {
+    const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const action: string = String(req.body?.action || '');
+    const deleteFiles = Boolean(req.body?.deleteFiles);
+
+    for (const id of ids) {
+      if (action === 'pause') queueController.pauseTask(id);
+      else if (action === 'resume') queueController.resumeTask(id);
+      else if (action === 'retry') queueController.retryTask(id);
+      else if (action === 'cancel') queueController.cancelTask(id);
+      else if (action === 'delete') {
+        queueController.cancelTask(id);
+        deleteTask(id, deleteFiles);
+        queueController.broadcast('task_deleted', { id });
+      }
+    }
+
+    res.json({ success: true, count: ids.length });
+  });
+
   // Task actions
   app.post('/api/tasks/:id/pause', (req: Request, res: Response) => {
     const ok = queueController.pauseTask(req.params.id);
-    if (!ok) return res.status(404).json({ error: 'Task not found' });
+    if (!ok) return res.status(404).json({ error: 'Task not found or cannot pause' });
     res.json({ success: true });
   });
 
   app.post('/api/tasks/:id/resume', (req: Request, res: Response) => {
     const ok = queueController.resumeTask(req.params.id);
-    if (!ok) return res.status(404).json({ error: 'Task not found' });
+    if (!ok) return res.status(404).json({ error: 'Task not found or cannot resume' });
     res.json({ success: true });
   });
 
@@ -361,12 +551,12 @@ async function startServer() {
     res.json({ success: true, removed });
   });
 
-  app.post('/api/tasks/pause-all', (req: Request, res: Response) => {
+  app.post('/api/tasks/pause-all', (_req: Request, res: Response) => {
     queueController.pauseAll();
     res.json({ success: true });
   });
 
-  app.post('/api/tasks/resume-all', (req: Request, res: Response) => {
+  app.post('/api/tasks/resume-all', (_req: Request, res: Response) => {
     queueController.resumeAll();
     res.json({ success: true });
   });
@@ -379,7 +569,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post('/api/tasks/clear-failed', (req: Request, res: Response) => {
+  app.post('/api/tasks/clear-failed', (_req: Request, res: Response) => {
     clearFailedTasks();
     const updated = getAllTasks();
     queueController.broadcast('tasks_cleared', updated);
@@ -452,7 +642,7 @@ async function startServer() {
   });
 
   // Settings
-  app.get('/api/settings', (req: Request, res: Response) => {
+  app.get('/api/settings', (_req: Request, res: Response) => {
     res.json(getSettings());
   });
 
@@ -463,11 +653,11 @@ async function startServer() {
   });
 
   // Notifications
-  app.get('/api/notifications', (req: Request, res: Response) => {
+  app.get('/api/notifications', (_req: Request, res: Response) => {
     res.json(getNotifications());
   });
 
-  app.delete('/api/notifications', (req: Request, res: Response) => {
+  app.delete('/api/notifications', (_req: Request, res: Response) => {
     clearNotifications();
     res.json({ success: true });
   });
@@ -482,7 +672,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (req: Request, res: Response) => {
+    app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }

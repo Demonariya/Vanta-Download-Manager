@@ -4,11 +4,18 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Queued,
-    Extracting,
+    Inspecting,
+    Ready,
+    #[serde(alias = "extracting")]
+    Connecting,
     Downloading,
-    Processing,
-    Completed,
+    Pausing,
     Paused,
+    Resuming,
+    Processing,
+    Muxing,
+    Verifying,
+    Completed,
     Failed,
     Cancelled,
 }
@@ -17,11 +24,17 @@ impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskStatus::Queued => "queued",
-            TaskStatus::Extracting => "extracting",
+            TaskStatus::Inspecting => "inspecting",
+            TaskStatus::Ready => "ready",
+            TaskStatus::Connecting => "connecting",
             TaskStatus::Downloading => "downloading",
-            TaskStatus::Processing => "processing",
-            TaskStatus::Completed => "completed",
+            TaskStatus::Pausing => "pausing",
             TaskStatus::Paused => "paused",
+            TaskStatus::Resuming => "resuming",
+            TaskStatus::Processing => "processing",
+            TaskStatus::Muxing => "muxing",
+            TaskStatus::Verifying => "verifying",
+            TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Cancelled => "cancelled",
         }
@@ -29,15 +42,35 @@ impl TaskStatus {
 
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "extracting" => TaskStatus::Extracting,
+            "inspecting" => TaskStatus::Inspecting,
+            "ready" => TaskStatus::Ready,
+            "connecting" | "extracting" => TaskStatus::Connecting,
             "downloading" => TaskStatus::Downloading,
-            "processing" => TaskStatus::Processing,
-            "completed" => TaskStatus::Completed,
+            "pausing" => TaskStatus::Pausing,
             "paused" => TaskStatus::Paused,
+            "resuming" => TaskStatus::Resuming,
+            "processing" => TaskStatus::Processing,
+            "muxing" => TaskStatus::Muxing,
+            "verifying" => TaskStatus::Verifying,
+            "completed" => TaskStatus::Completed,
             "failed" => TaskStatus::Failed,
             "cancelled" => TaskStatus::Cancelled,
             _ => TaskStatus::Queued,
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Inspecting
+                | TaskStatus::Connecting
+                | TaskStatus::Downloading
+                | TaskStatus::Pausing
+                | TaskStatus::Resuming
+                | TaskStatus::Processing
+                | TaskStatus::Muxing
+                | TaskStatus::Verifying
+        )
     }
 }
 
@@ -80,6 +113,46 @@ impl TaskPriority {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskLogEntry {
+    pub timestamp: String,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryItem {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub destination_dir: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerSettings {
+    pub enabled: bool,
+    pub start_time: String,
+    pub stop_time: String,
+    pub pause_on_stop: bool,
+    pub days: Vec<u32>,
+}
+
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start_time: "01:00".to_string(),
+            stop_time: "06:00".to_string(),
+            pause_on_stop: true,
+            days: vec![0, 1, 2, 3, 4, 5, 6],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadTask {
     pub id: String,
     pub url: String,
@@ -95,15 +168,35 @@ pub struct DownloadTask {
     pub engine: String,
     pub status: TaskStatus,
     pub progress_percentage: f64,
+    #[serde(default = "default_true")]
+    pub percentage_known: bool,
     pub speed_str: String,
     pub speed_bytes_per_sec: f64,
+    #[serde(default)]
+    pub avg_speed_bytes_per_sec: f64,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
+    #[serde(default)]
+    pub remaining_bytes: u64,
     pub eta_str: String,
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
+    #[serde(default)]
+    pub elapsed_seconds: u64,
+    #[serde(default)]
+    pub active_connections: u32,
+    #[serde(default)]
+    pub last_progress_at: Option<String>,
     pub current_phase: String,
     pub format_id: String,
     pub format_note: Option<String>,
     pub ext: String,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    #[serde(default)]
+    pub resolution_label: Option<String>,
     pub is_audio_only: bool,
     pub audio_format: Option<String>,
     pub audio_bitrate: Option<String>,
@@ -112,13 +205,35 @@ pub struct DownloadTask {
     pub audio_channels: Option<u32>,
     pub is_lossy_source: Option<bool>,
     pub verified_audio_info: Option<String>,
+    #[serde(default)]
+    pub verified_sha256: Option<String>,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+    #[serde(default)]
+    pub checksum_verified: Option<bool>,
     pub output_path: String,
+    #[serde(default)]
+    pub custom_filename: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    #[serde(default)]
+    pub playlist_mode: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<TaskLogEntry>,
     pub priority: TaskPriority,
+    #[serde(default)]
+    pub queue_order: i64,
     pub created_at: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub retries: u32,
     pub max_retries: u32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +258,11 @@ pub struct CreateTaskPayload {
     pub is_lossy_source: Option<bool>,
     pub output_path: Option<String>,
     pub priority: Option<TaskPriority>,
+    pub custom_filename: Option<String>,
+    pub category_id: Option<String>,
+    pub playlist_mode: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +303,22 @@ pub struct SpotifyTrackItem {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaylistEntry {
+    pub id: String,
+    pub index: usize,
+    pub title: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_string: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploader: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MediaMetadata {
     pub url: String,
@@ -214,6 +350,8 @@ pub struct MediaMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracks: Option<Vec<SpotifyTrackItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<PlaylistEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tracks: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -221,6 +359,16 @@ pub struct MediaMetadata {
     pub partial_tracks: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_direct_file: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_file_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_ranges: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,7 +484,7 @@ pub struct DetectedBrowserInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CookieStatus {
-    pub active_source: String, // "file" | "browser" | "auto" | "none"
+    pub active_source: String,
     pub configured_browser: String,
     pub configured_profile: Option<String>,
     pub resolved_browser: Option<String>,
@@ -358,7 +506,7 @@ pub struct CookieStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CookieTestResult {
     pub success: bool,
-    pub stage: String, // "disabled" | "file_valid" | "file_invalid" | "browser_not_installed" | "profile_missing" | "db_locked" | "extraction_ok" | "auth_verified" | "auth_failed" | "engine_missing"
+    pub stage: String,
     pub active_source: String,
     pub browser: String,
     pub resolved_browser: Option<String>,
@@ -403,10 +551,16 @@ pub struct AppSettings {
     pub filename_template: String,
     pub proxy_url: String,
     pub floating_notifications_enabled: bool,
+    pub floating_widget_enabled: bool,
     pub auto_dismiss_seconds: u32,
     pub theme: String,
     pub auto_retry_failed: bool,
     pub auto_resume_on_startup: bool,
+    pub clipboard_monitoring: bool,
+    pub conflict_strategy: String,
+    pub verify_media_on_complete: bool,
+    pub tray_minimize_on_close: bool,
+    pub scheduler: SchedulerSettings,
     pub cookies_browser: Option<String>,
     pub cookies_profile: Option<String>,
     pub cookies_file: Option<String>,
@@ -437,10 +591,16 @@ impl Default for AppSettings {
             filename_template: "%(title)s [%(id)s].%(ext)s".to_string(),
             proxy_url: "".to_string(),
             floating_notifications_enabled: true,
+            floating_widget_enabled: true,
             auto_dismiss_seconds: 5,
             theme: "dark".to_string(),
             auto_retry_failed: true,
             auto_resume_on_startup: true,
+            clipboard_monitoring: false,
+            conflict_strategy: "rename".to_string(),
+            verify_media_on_complete: true,
+            tray_minimize_on_close: true,
+            scheduler: SchedulerSettings::default(),
             cookies_browser: Some("auto".to_string()),
             cookies_profile: None,
             cookies_file: None,

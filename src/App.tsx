@@ -11,8 +11,25 @@ import {
   AppSettings,
   NotificationItem,
   EngineInstallProgress,
+  CategoryItem,
+  ThemeMode,
 } from './types';
 import { api } from './services/api';
+import { isActiveTaskStatus } from './utils/download-core';
+import { Sidebar, ActiveTab } from './components/Sidebar';
+import { TopBar } from './components/TopBar';
+import { DownloadCenterView, QueueScopeFilter } from './components/DownloadCenterView';
+import { DownloadDetailsDrawer } from './components/DownloadDetailsDrawer';
+import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
+import { MusicLibraryView } from './components/MusicLibraryView';
+import { HistoryView } from './components/HistoryView';
+import { DiagnosticsView } from './components/DiagnosticsView';
+import { SettingsView } from './components/SettingsView';
+import { NewDownloadModal } from './components/NewDownloadModal';
+import { FloatingProgressDock } from './components/FloatingProgressDock';
+import { NotificationCenterModal } from './components/NotificationCenterModal';
+import { TitleBar } from './components/TitleBar';
+import { SafeCloseDialog } from './components/SafeCloseDialog';
 
 function makeCheckingEngine(): EngineInfo {
   return {
@@ -33,29 +50,44 @@ function createInitialCheckingEngineStatus(): EngineStatusMap {
     python3: makeCheckingEngine(),
   };
 }
-import { Sidebar, ActiveTab } from './components/Sidebar';
-import { TopBar } from './components/TopBar';
-import { DashboardView } from './components/DashboardView';
-import { QueueView } from './components/QueueView';
-import { MusicLibraryView } from './components/MusicLibraryView';
-import { HistoryView } from './components/HistoryView';
-import { DiagnosticsView } from './components/DiagnosticsView';
-import { SettingsView } from './components/SettingsView';
-import { NewDownloadModal } from './components/NewDownloadModal';
-import { FloatingProgressDock } from './components/FloatingProgressDock';
-import { NotificationCenterModal } from './components/NotificationCenterModal';
-import { TitleBar } from './components/TitleBar';
-import { SafeCloseDialog } from './components/SafeCloseDialog';
+
+function applyThemeToDocument(theme: ThemeMode) {
+  try {
+    localStorage.setItem('vanta_theme', theme);
+  } catch {
+    // ignore storage errors
+  }
+  const prefersDark =
+    typeof window !== 'undefined' &&
+    window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const shouldUseDark = theme === 'dark' || (theme === 'system' && prefersDark);
+  document.documentElement.classList.toggle('dark', shouldUseDark);
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
+  const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [categories, setCategories] = useState<CategoryItem[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
     createInitialCheckingEngineStatus
   );
   const isRefreshingEnginesRef = useRef(false);
-  const [isRefreshingEngines, setIsRefreshingEngines] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem('vanta_theme');
+      if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
+    } catch {
+      // ignore
+    }
+    return 'dark';
+  });
+
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
@@ -63,14 +95,64 @@ export default function App() {
   );
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  // Modals
+  // Modals & Clipboard
   const [isNewDownloadOpen, setIsNewDownloadOpen] = useState(false);
   const [initialInspectUrl, setInitialInspectUrl] = useState('');
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isSafeCloseOpen, setIsSafeCloseOpen] = useState(false);
+  const [clipboardUrl, setClipboardUrl] = useState<string | null>(null);
+  const lastClipboardSeenRef = useRef<string>('');
+
   const [installProgress, setInstallProgress] = useState<Record<string, EngineInstallProgress>>({});
   const [isInstallingEngines, setIsInstallingEngines] = useState(false);
   const [engineInstallError, setEngineInstallError] = useState<string | null>(null);
+
+  // Apply theme whenever setting changes or OS color-scheme switches
+  useEffect(() => {
+    applyThemeToDocument(theme);
+    if (theme !== 'system' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = () => applyThemeToDocument('system');
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, [theme]);
+
+  // Global keyboard shortcuts (Ctrl/Cmd+N for New Download, Escape to close inspector)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setInitialInspectUrl('');
+        setIsNewDownloadOpen(true);
+      } else if (e.key === 'Escape' && !isNewDownloadOpen && !isNotificationsOpen && !isSafeCloseOpen) {
+        setSelectedTaskId(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isNewDownloadOpen, isNotificationsOpen, isSafeCloseOpen]);
+
+  // Opt-in Clipboard URL monitor on window focus
+  useEffect(() => {
+    if (!settings?.clipboard_monitoring) return;
+    const checkClipboard = async () => {
+      try {
+        const text = (await navigator.clipboard.readText()).trim();
+        if (
+          text &&
+          text !== lastClipboardSeenRef.current &&
+          (text.startsWith('https://') || text.startsWith('http://') || text.startsWith('spotify:'))
+        ) {
+          lastClipboardSeenRef.current = text;
+          setClipboardUrl(text);
+        }
+      } catch {
+        // clipboard permission denied or unavailable
+      }
+    };
+    window.addEventListener('focus', checkClipboard);
+    return () => window.removeEventListener('focus', checkClipboard);
+  }, [settings?.clipboard_monitoring]);
 
   const executeNativeClose = async () => {
     try {
@@ -83,7 +165,14 @@ export default function App() {
     }
   };
 
-  const handleInitiateClose = () => {
+  const activeCount = tasks.filter((t) => isActiveTaskStatus(t.status)).length;
+
+  const handleInitiateClose = async () => {
+    if (settings?.tray_minimize_on_close && typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().hide().catch(() => executeNativeClose());
+      return;
+    }
     if (activeCount > 0) {
       setIsSafeCloseOpen(true);
     } else {
@@ -93,14 +182,13 @@ export default function App() {
 
   const handleConfirmExit = async () => {
     setIsSafeCloseOpen(false);
-    await handlePauseAll();
+    await api.pauseAll();
     executeNativeClose();
   };
 
   const runEngineScan = async (forceRefresh: boolean, isStillMounted?: () => boolean) => {
     if (isRefreshingEnginesRef.current) return;
     isRefreshingEnginesRef.current = true;
-    setIsRefreshingEngines(true);
     try {
       const status = await api.getEngineStatus(forceRefresh);
       if (!isStillMounted || isStillMounted()) {
@@ -110,28 +198,44 @@ export default function App() {
       console.error('Engine status scan failed:', err);
     } finally {
       isRefreshingEnginesRef.current = false;
-      if (!isStillMounted || isStillMounted()) {
-        setIsRefreshingEngines(false);
-      }
     }
   };
 
-  // Load initial data & subscribe to real-time events without blocking first paint
+  const loadCategories = async () => {
+    try {
+      const list = await api.getCategories();
+      setCategories(list);
+    } catch (err) {
+      console.error('Failed to load categories:', err);
+    }
+  };
+
   useEffect(() => {
     let mounted = true;
 
-    // 1. Initial non-blocking background fetches
     runEngineScan(false, () => mounted);
-    api.getSettings().then((s) => mounted && setSettings(s)).catch(console.error);
+    loadCategories();
+    api
+      .getSettings()
+      .then((s) => {
+        if (!mounted) return;
+        setSettings(s);
+        if (s.theme === 'dark' || s.theme === 'light' || s.theme === 'system') {
+          setTheme(s.theme);
+        }
+      })
+      .catch(console.error);
     api.getTasks().then((t) => mounted && setTasks(t)).catch(console.error);
     api.getNotifications().then((n) => mounted && setNotifications(n)).catch(console.error);
 
-    // 2. Real-time SSE / Tauri event subscription
     const unsubscribe = api.subscribeEvents({
       onInit: (data) => {
         if (!mounted) return;
         setTasks(data.tasks);
         setSettings(data.settings);
+        if (data.settings?.theme) {
+          setTheme(data.settings.theme);
+        }
       },
       onTaskUpdated: (updatedTask) => {
         if (!mounted) return;
@@ -152,10 +256,11 @@ export default function App() {
       onTaskDeleted: ({ id }) => {
         if (!mounted) return;
         setTasks((prev) => prev.filter((t) => t.id !== id));
+        setSelectedTaskId((cur) => (cur === id ? null : cur));
       },
-      onTasksCleared: (clearedTasks) => {
+      onTasksCleared: (remainingTasks) => {
         if (!mounted) return;
-        setTasks(clearedTasks);
+        setTasks(remainingTasks);
       },
       onNotification: (notif) => {
         if (!mounted) return;
@@ -164,6 +269,9 @@ export default function App() {
       onSettingsUpdated: (newSettings) => {
         if (!mounted) return;
         setSettings(newSettings);
+        if (newSettings.theme) {
+          setTheme(newSettings.theme);
+        }
       },
       onEngineInstallProgress: (progress) => {
         if (!mounted) return;
@@ -181,56 +289,24 @@ export default function App() {
   }, []);
 
   const handleQuickInspect = (url: string) => {
+    setClipboardUrl(null);
     setInitialInspectUrl(url);
     setIsNewDownloadOpen(true);
   };
 
-  const handlePauseTask = async (id: string) => {
-    await api.pauseTask(id);
+  const handleSaveSettings = async (patch: Partial<AppSettings>) => {
+    if (patch.theme) {
+      setTheme(patch.theme);
+    }
+    const saved = await api.updateSettings(patch);
+    setSettings(saved);
   };
 
-  const handleResumeTask = async (id: string) => {
-    await api.resumeTask(id);
-  };
-
-  const handleCancelTask = async (id: string) => {
-    await api.cancelTask(id);
-  };
-
-  const handleRetryTask = async (id: string) => {
-    await api.retryTask(id);
-  };
-
-  const handleDeleteTask = async (id: string, deleteFile = false) => {
-    await api.deleteTask(id, deleteFile);
-  };
-
-  const handleDeleteFile = async (id: string) => {
-    await api.deleteDownloadedFile(id);
-  };
-
-  const handlePauseAll = async () => {
-    await api.pauseAll();
-  };
-
-  const handleResumeAll = async () => {
-    await api.resumeAll();
-  };
-
-  const handleClearCompleted = async (deleteFiles = false) => {
-    await api.clearCompleted(deleteFiles);
-  };
-
-  const handleClearFailed = async () => {
-    await api.clearFailed();
-  };
-
-  const handleClearAll = async (deleteFiles = false) => {
-    await api.clearAll(deleteFiles);
-  };
-
-  const handleRefreshEngines = async () => {
-    await runEngineScan(true);
+  const handleCycleTheme = () => {
+    const order: ThemeMode[] = ['dark', 'light', 'system'];
+    const next = order[(order.indexOf(theme) + 1) % order.length];
+    setTheme(next);
+    handleSaveSettings({ theme: next }).catch(() => {});
   };
 
   const handleInstallAllEngines = async (force = false) => {
@@ -238,7 +314,7 @@ export default function App() {
     setEngineInstallError(null);
     try {
       const res = await api.installAllEngines(true, force);
-      await handleRefreshEngines();
+      await runEngineScan(true);
       const failures = res.results.filter((r) => !r.success);
       if (failures.length > 0) {
         setEngineInstallError(failures.map((f) => `${f.engine}: ${f.message}`).join(' | '));
@@ -250,211 +326,165 @@ export default function App() {
     }
   };
 
-  const handleSaveSettings = async (newSettings: Partial<AppSettings>) => {
-    const saved = await api.updateSettings(newSettings);
-    setSettings(saved);
-  };
-
-  const activeCount = tasks.filter(
-    (t) => t.status === 'downloading' || t.status === 'extracting' || t.status === 'processing'
-  ).length;
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0b0d10] text-[#e6edf3]">
-      {/* Native In-App TitleBar Window Header */}
-      <TitleBar
-        activeDownloadsCount={activeCount}
-        onRequestClose={handleInitiateClose}
-      />
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
+      <TitleBar activeDownloadsCount={activeCount} onRequestClose={handleInitiateClose} />
 
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
-        {/* Sidebar Navigation */}
         <Sidebar
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          onOpenNewDownload={() => {
-            setInitialInspectUrl('');
-            setIsNewDownloadOpen(true);
-          }}
           engineStatus={engineStatus}
           activeCount={activeCount}
+          tasks={tasks}
+          categories={categories}
+          selectedCategoryId={selectedCategoryId}
+          onSelectCategory={setSelectedCategoryId}
           isCollapsed={isSidebarCollapsed}
           setIsCollapsed={setIsSidebarCollapsed}
           isMobileOpen={isMobileMenuOpen}
           setIsMobileOpen={setIsMobileMenuOpen}
         />
 
-        {/* Main Content Viewport */}
         <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
-        {/* Top Bar Header */}
-        <TopBar
-          onQuickInspect={handleQuickInspect}
-          onOpenNewDownload={() => {
-            setInitialInspectUrl('');
-            setIsNewDownloadOpen(true);
-          }}
-          onOpenSettings={() => setActiveTab('settings')}
-          onOpenNotifications={() => setIsNotificationsOpen(true)}
-          unreadNotificationsCount={notifications.length}
-          activeCount={activeCount}
-          onPauseAll={handlePauseAll}
-          onResumeAll={handleResumeAll}
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        />
+          <TopBar
+            onQuickInspect={handleQuickInspect}
+            onOpenNewDownload={() => {
+              setInitialInspectUrl('');
+              setIsNewDownloadOpen(true);
+            }}
+            onOpenNotifications={() => setIsNotificationsOpen(true)}
+            unreadNotificationsCount={notifications.length}
+            activeCount={activeCount}
+            onPauseAll={() => api.pauseAll()}
+            onResumeAll={() => api.resumeAll()}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            theme={theme}
+            onCycleTheme={handleCycleTheme}
+            floatingDockEnabled={Boolean(settings?.floating_notifications_enabled)}
+            onToggleFloatingDock={() =>
+              handleSaveSettings({
+                floating_notifications_enabled: !settings?.floating_notifications_enabled,
+              })
+            }
+            onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
+          />
 
-        {/* View Content Area */}
-        <main className="flex-1 min-w-0 overflow-y-auto p-2.5 sm:p-4 md:p-6 pb-24 sm:pb-8 select-text">
-          {activeTab === 'dashboard' && (
-            <DashboardView
-              tasks={tasks}
-              engineStatus={engineStatus}
-              settings={settings}
-              onOpenNewDownload={() => {
-                setInitialInspectUrl('');
-                setIsNewDownloadOpen(true);
-              }}
-              onPauseTask={handlePauseTask}
-              onResumeTask={handleResumeTask}
-              onCancelTask={handleCancelTask}
-              onViewQueue={() => setActiveTab('queue')}
-              onRefreshEngines={handleRefreshEngines}
-              isRefreshingEngines={isRefreshingEngines}
-              onClearFailed={handleClearFailed}
-              installProgress={installProgress}
-              isInstallingEngines={isInstallingEngines}
-              engineInstallError={engineInstallError}
-              onInstallEngines={() => handleInstallAllEngines(false)}
-            />
-          )}
+          <div className="flex flex-1 min-h-0 overflow-hidden relative">
+            <main className="flex-1 min-w-0 overflow-y-auto p-3 sm:p-5 pb-24 sm:pb-10 select-text">
+              <ClipboardMonitorBanner
+                detectedUrl={clipboardUrl}
+                onInspect={handleQuickInspect}
+                onDismiss={() => setClipboardUrl(null)}
+              />
 
-          {activeTab === 'queue' && (
-            <QueueView
-              tasks={tasks}
-              onPauseTask={handlePauseTask}
-              onResumeTask={handleResumeTask}
-              onCancelTask={handleCancelTask}
-              onRetryTask={handleRetryTask}
-              onDeleteTask={handleDeleteTask}
-              onPauseAll={handlePauseAll}
-              onResumeAll={handleResumeAll}
-              onClearCompleted={handleClearCompleted}
-              onClearFailed={handleClearFailed}
-              onClearAll={handleClearAll}
-              onDeleteFile={handleDeleteFile}
-              onOpenNewDownload={() => {
-                setInitialInspectUrl('');
-                setIsNewDownloadOpen(true);
-              }}
-              searchFilter={searchQuery}
-            />
-          )}
-
-          {activeTab === 'active' && (
-            <QueueView
-              tasks={tasks.filter(
-                (t) =>
-                  t.status === 'downloading' ||
-                  t.status === 'extracting' ||
-                  t.status === 'processing'
+              {activeTab === 'downloads' && (
+                <DownloadCenterView
+                  tasks={tasks}
+                  categories={categories}
+                  engineStatus={engineStatus}
+                  scopeFilter={scopeFilter}
+                  setScopeFilter={setScopeFilter}
+                  selectedCategoryId={selectedCategoryId}
+                  setSelectedCategoryId={setSelectedCategoryId}
+                  searchQuery={searchQuery}
+                  selectedTaskId={selectedTaskId}
+                  onSelectTask={(t) => setSelectedTaskId(t.id)}
+                  onOpenNewDownload={() => {
+                    setInitialInspectUrl('');
+                    setIsNewDownloadOpen(true);
+                  }}
+                  onPauseTask={(id) => api.pauseTask(id)}
+                  onResumeTask={(id) => api.resumeTask(id)}
+                  onCancelTask={(id) => api.cancelTask(id)}
+                  onRetryTask={(id) => api.retryTask(id)}
+                  onDeleteTask={(id, deleteFile) => api.deleteTask(id, deleteFile)}
+                  onPauseAll={() => api.pauseAll()}
+                  onResumeAll={() => api.resumeAll()}
+                  onClearCompleted={(deleteFiles) => api.clearCompleted(deleteFiles)}
+                  onClearFailed={() => api.clearFailed()}
+                  onInstallEngines={() => handleInstallAllEngines(false)}
+                  isInstallingEngines={isInstallingEngines}
+                  engineInstallError={engineInstallError}
+                  installProgress={installProgress}
+                />
               )}
-              onPauseTask={handlePauseTask}
-              onResumeTask={handleResumeTask}
-              onCancelTask={handleCancelTask}
-              onRetryTask={handleRetryTask}
-              onDeleteTask={handleDeleteTask}
-              onPauseAll={handlePauseAll}
-              onResumeAll={handleResumeAll}
-              onClearCompleted={handleClearCompleted}
-              onClearFailed={handleClearFailed}
-              onClearAll={handleClearAll}
-              onDeleteFile={handleDeleteFile}
-              onOpenNewDownload={() => {
-                setInitialInspectUrl('');
-                setIsNewDownloadOpen(true);
-              }}
-              searchFilter={searchQuery}
-            />
-          )}
 
-          {activeTab === 'completed' && (
-            <QueueView
-              tasks={tasks.filter((t) => t.status === 'completed')}
-              onPauseTask={handlePauseTask}
-              onResumeTask={handleResumeTask}
-              onCancelTask={handleCancelTask}
-              onRetryTask={handleRetryTask}
-              onDeleteTask={handleDeleteTask}
-              onPauseAll={handlePauseAll}
-              onResumeAll={handleResumeAll}
-              onClearCompleted={handleClearCompleted}
-              onClearFailed={handleClearFailed}
-              onClearAll={handleClearAll}
-              onDeleteFile={handleDeleteFile}
-              onOpenNewDownload={() => {
-                setInitialInspectUrl('');
-                setIsNewDownloadOpen(true);
-              }}
-              searchFilter={searchQuery}
-            />
-          )}
+              {activeTab === 'music' && (
+                <MusicLibraryView
+                  tasks={tasks}
+                  onOpenNewDownload={(url) => {
+                    setInitialInspectUrl(url || '');
+                    setIsNewDownloadOpen(true);
+                  }}
+                  onSelectTask={(t) => setSelectedTaskId(t.id)}
+                />
+              )}
 
-          {activeTab === 'music' && (
-            <MusicLibraryView
-              tasks={tasks}
-              onOpenNewDownload={(url) => {
-                setInitialInspectUrl(url || '');
-                setIsNewDownloadOpen(true);
-              }}
-            />
-          )}
+              {activeTab === 'history' && (
+                <HistoryView
+                  tasks={tasks}
+                  onClearHistory={(deleteFiles) => api.clearCompleted(deleteFiles)}
+                  onDeleteTask={(id, deleteFile) => api.deleteTask(id, deleteFile)}
+                  onDeleteFile={(id) => api.deleteDownloadedFile(id)}
+                  onSelectTask={(t) => setSelectedTaskId(t.id)}
+                />
+              )}
 
-          {activeTab === 'history' && (
-            <HistoryView
-              tasks={tasks}
-              onClearHistory={handleClearCompleted}
-              onDeleteTask={handleDeleteTask}
-              onDeleteFile={handleDeleteFile}
-            />
-          )}
+              {activeTab === 'diagnostics' && (
+                <DiagnosticsView
+                  engineStatus={engineStatus}
+                  onRefresh={() => runEngineScan(true)}
+                  installProgress={installProgress}
+                />
+              )}
 
-          {activeTab === 'diagnostics' && (
-            <DiagnosticsView
-              engineStatus={engineStatus}
-              onRefresh={handleRefreshEngines}
-              installProgress={installProgress}
-            />
-          )}
+              {activeTab === 'settings' && (
+                <SettingsView
+                  settings={settings}
+                  categories={categories}
+                  onSaveSettings={handleSaveSettings}
+                  onCategoriesChanged={loadCategories}
+                />
+              )}
+            </main>
 
-          {activeTab === 'settings' && (
-            <SettingsView
-              settings={settings}
-              onSaveSettings={handleSaveSettings}
+            {/* Download Details Docked / Slide-Over Inspector */}
+            <DownloadDetailsDrawer
+              task={selectedTask}
+              categories={categories}
+              onClose={() => setSelectedTaskId(null)}
+              onRetryTask={(id) => api.retryTask(id)}
             />
-          )}
-        </main>
-      </div>
+          </div>
+        </div>
       </div>
 
-      {/* Floating Progress Surface */}
+      {/* Floating Active Transfers Dock */}
       {settings?.floating_notifications_enabled && (
         <FloatingProgressDock
           tasks={tasks}
-          onPauseTask={handlePauseTask}
-          onResumeTask={handleResumeTask}
-          onCancelTask={handleCancelTask}
-          onOpenQueue={() => setActiveTab('queue')}
+          onPauseTask={(id) => api.pauseTask(id)}
+          onResumeTask={(id) => api.resumeTask(id)}
+          onCancelTask={(id) => api.cancelTask(id)}
+          onOpenQueue={() => setActiveTab('downloads')}
         />
       )}
 
-      {/* Universal Download Modal */}
+      {/* New Download Modal */}
       <NewDownloadModal
         isOpen={isNewDownloadOpen}
         onClose={() => setIsNewDownloadOpen(false)}
         initialUrl={initialInspectUrl}
+        tasks={tasks}
+        categories={categories}
+        settings={settings}
         onTaskCreated={() => {
-          setActiveTab('queue');
+          setActiveTab('downloads');
+          setScopeFilter('all');
         }}
         onOpenCookieSettings={() => {
           setIsNewDownloadOpen(false);
@@ -462,7 +492,7 @@ export default function App() {
         }}
       />
 
-      {/* Notification Center Flyout */}
+      {/* Notifications Modal */}
       <NotificationCenterModal
         isOpen={isNotificationsOpen}
         onClose={() => setIsNotificationsOpen(false)}
@@ -473,7 +503,7 @@ export default function App() {
         }}
       />
 
-      {/* Safe Close Dialog */}
+      {/* Safe Close Confirmation */}
       <SafeCloseDialog
         isOpen={isSafeCloseOpen}
         activeCount={activeCount}

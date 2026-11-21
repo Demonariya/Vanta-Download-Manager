@@ -1,26 +1,49 @@
+export type EngineType = 'direct' | 'yt-dlp' | 'spotdl' | 'ffmpeg';
+
 export type TaskStatus =
   | 'queued'
-  | 'extracting'
+  | 'inspecting'
+  | 'ready'
+  | 'connecting'
   | 'downloading'
-  | 'processing'
-  | 'completed'
+  | 'pausing'
   | 'paused'
+  | 'resuming'
+  | 'processing'
+  | 'muxing'
+  | 'verifying'
+  | 'completed'
   | 'failed'
   | 'cancelled';
 
-export type TaskPriority = 'highest' | 'high' | 'normal' | 'low';
+export type TaskPriority = 'low' | 'normal' | 'high' | 'highest';
 
-export type EngineType = 'yt-dlp' | 'spotdl' | 'ffmpeg';
+export type ThemeMode = 'dark' | 'light' | 'system';
 
-export type CookieBrowserOption =
-  | 'auto'
-  | 'chrome'
-  | 'firefox'
-  | 'edge'
-  | 'brave'
-  | 'opera'
-  | 'vivaldi'
-  | 'none';
+export type ConflictStrategy = 'rename' | 'overwrite' | 'skip';
+
+export interface TaskLogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+}
+
+export interface CategoryItem {
+  id: string;
+  name: string;
+  color: string;
+  extensions: string[];
+  destination_dir?: string;
+  created_at: string;
+}
+
+export interface SchedulerSettings {
+  enabled: boolean;
+  start_time: string; // HH:mm
+  stop_time: string; // HH:mm
+  pause_on_stop: boolean;
+  days: number[]; // 0 (Sun) - 6 (Sat)
+}
 
 export interface FormatOption {
   format_id: string;
@@ -33,11 +56,11 @@ export interface FormatOption {
   acodec?: string;
   filesize?: number;
   filesize_approx?: number;
+  format_note?: string;
   tbr?: number;
   abr?: number;
-  format_note?: string;
-  is_audio_only: boolean;
-  is_video_only: boolean;
+  is_audio_only?: boolean;
+  is_video_only?: boolean;
 }
 
 export type SpotifyContentType = 'track' | 'album' | 'playlist' | 'artist';
@@ -53,6 +76,17 @@ export interface SpotifyTrackItem {
   artwork?: string;
   explicit?: boolean;
   url?: string;
+}
+
+export interface PlaylistEntry {
+  id: string;
+  index: number;
+  title: string;
+  url: string;
+  duration?: number;
+  duration_string?: string;
+  uploader?: string;
+  thumbnail?: string;
 }
 
 export interface MediaMetadata {
@@ -75,11 +109,17 @@ export interface MediaMetadata {
   track_number?: number;
   release_date?: string;
   explicit?: boolean;
-  tracks?: SpotifyTrackItem[];
-  total_tracks?: number;
   owner?: string;
+  tracks?: SpotifyTrackItem[];
+  entries?: PlaylistEntry[];
+  total_tracks?: number;
   partial_tracks?: boolean;
   metadata_source?: string;
+  is_direct_file?: boolean;
+  direct_file_size?: number;
+  direct_mime_type?: string;
+  direct_filename?: string;
+  accepts_ranges?: boolean;
 }
 
 export interface DownloadTask {
@@ -91,19 +131,29 @@ export interface DownloadTask {
   duration_string?: string;
   thumbnail?: string;
   album?: string;
-  content_type?: SpotifyContentType | string;
+  content_type?: SpotifyContentType;
   engine: EngineType;
   status: TaskStatus;
   progress_percentage: number;
+  percentage_known?: boolean;
   speed_str: string;
   speed_bytes_per_sec: number;
+  avg_speed_bytes_per_sec?: number;
   downloaded_bytes: number;
   total_bytes: number;
+  remaining_bytes?: number;
   eta_str: string;
+  eta_seconds?: number | null;
+  elapsed_seconds?: number;
+  active_connections?: number;
+  last_progress_at?: string | null;
   current_phase: string;
   format_id: string;
   format_note?: string;
   ext: string;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  resolution_label?: string | null;
   is_audio_only: boolean;
   audio_format?: string;
   audio_bitrate?: string;
@@ -112,70 +162,49 @@ export interface DownloadTask {
   audio_channels?: number;
   is_lossy_source?: boolean;
   verified_audio_info?: string;
+  verified_sha256?: string | null;
+  expected_sha256?: string | null;
+  checksum_verified?: boolean | null;
   output_path: string;
+  custom_filename?: string | null;
+  category_id?: string | null;
+  playlist_mode?: 'single' | 'playlist';
   error_message?: string;
+  logs?: TaskLogEntry[];
   priority: TaskPriority;
+  queue_order?: number;
   created_at: string;
+  started_at?: string | null;
   completed_at?: string;
   retries: number;
   max_retries: number;
 }
 
-export interface EngineInfo {
-  available: boolean;
-  version: string;
-  path: string;
-  status: 'ready' | 'missing' | 'error' | 'timed_out' | 'checking';
-  lastChecked: string;
-  durationMs?: number;
-  error?: string;
-  latestVersion?: string;
-  updateAvailable?: boolean;
-  isUpdating?: boolean;
-}
-
-export interface EngineUpdateResult {
-  engine: string;
-  success: boolean;
-  previousVersion: string;
-  currentVersion: string;
-  message: string;
-  rolledBack?: boolean;
-}
-
-export interface EngineStatusMap {
-  ytdlp: EngineInfo;
-  spotdl: EngineInfo;
-  ffmpeg: EngineInfo;
-  ffprobe: EngineInfo;
-  python3: EngineInfo;
-}
-
-export interface CookieValidationResult {
-  valid: boolean;
-  recordCount: number;
-  domainCount: number;
-  httpOnlyCount: number;
-  secureCount: number;
-  hasNetscapeHeader: boolean;
-  errors: string[];
-}
+export type BrowserCookieSource =
+  | 'auto'
+  | 'chrome'
+  | 'edge'
+  | 'firefox'
+  | 'brave'
+  | 'opera'
+  | 'vivaldi'
+  | 'none';
 
 export interface DetectedBrowserInfo {
   id: string;
   label: string;
   detected: boolean;
   profiles: string[];
-  defaultProfile?: string | null;
+  defaultProfile: string | null;
   hasCookieStore: boolean;
 }
 
 export interface CookieStatus {
   activeSource: 'file' | 'browser' | 'auto' | 'none';
   configuredBrowser: string;
-  configuredProfile?: string | null;
-  resolvedBrowser?: string | null;
-  resolvedProfile?: string | null;
+  configuredProfile: string | null;
+  resolvedBrowser: string | null;
+  resolvedProfile: string | null;
   fileConfigured: boolean;
   fileExists: boolean;
   filePath: string;
@@ -184,36 +213,48 @@ export interface CookieStatus {
   domainCount: number;
   httpOnlyCount: number;
   secureCount: number;
-  updatedAt?: string | null;
-  error?: string | null;
+  updatedAt: string | null;
+  error: string | null;
   detectedBrowsers: DetectedBrowserInfo[];
 }
 
+export interface CookieValidationResult {
+  valid: boolean;
+  recordCount: number;
+  domainCount: number;
+  httpOnlyCount: number;
+  secureCount: number;
+  hasNetscapeHeader?: boolean;
+  errors: string[];
+}
+
+export type CookieTestStage =
+  | 'disabled'
+  | 'engine_missing'
+  | 'file_invalid'
+  | 'file_valid'
+  | 'browser_not_installed'
+  | 'profile_missing'
+  | 'db_locked'
+  | 'extraction_ok'
+  | 'auth_verified'
+  | 'auth_failed';
+
 export interface CookieTestResult {
   success: boolean;
-  stage:
-    | 'disabled'
-    | 'file_valid'
-    | 'file_invalid'
-    | 'browser_not_installed'
-    | 'profile_missing'
-    | 'db_locked'
-    | 'extraction_ok'
-    | 'auth_verified'
-    | 'auth_failed'
-    | 'engine_missing';
+  stage: CookieTestStage;
   activeSource: string;
   browser: string;
-  resolvedBrowser?: string | null;
-  resolvedProfile?: string | null;
+  resolvedBrowser: string | null;
+  resolvedProfile: string | null;
   browserDetected: boolean;
   profileLocated: boolean;
   databaseAccessible: boolean;
   extractionSucceeded: boolean;
-  authVerified?: boolean | null;
+  authVerified: boolean | null;
   recordCount: number;
   message: string;
-  nextAction?: string | null;
+  nextAction: string | null;
 }
 
 export interface DiagnosticLogInfo {
@@ -235,39 +276,48 @@ export interface AppSettings {
   default_video_format: string;
   default_audio_format: string;
   default_audio_bitrate: string;
-  default_audio_bit_depth?: number;
   default_audio_sample_rate?: number;
+  default_audio_bit_depth?: number;
   embed_thumbnail: boolean;
   embed_metadata: boolean;
   filename_template: string;
   proxy_url: string;
   floating_notifications_enabled: boolean;
+  floating_widget_enabled?: boolean;
   auto_dismiss_seconds: number;
-  theme: 'dark';
+  theme: ThemeMode;
   auto_retry_failed: boolean;
   auto_resume_on_startup: boolean;
-  cookies_browser?: CookieBrowserOption;
+  clipboard_monitoring?: boolean;
+  conflict_strategy?: ConflictStrategy;
+  verify_media_on_complete?: boolean;
+  tray_minimize_on_close?: boolean;
+  scheduler?: SchedulerSettings;
+  cookies_browser?: BrowserCookieSource;
   cookies_profile?: string;
   cookies_file?: string;
   user_agent?: string;
 }
 
-export interface NotificationItem {
-  id: string;
-  type: 'info' | 'success' | 'warning' | 'error';
-  title: string;
-  message: string;
-  timestamp: string;
-  taskId?: string;
+export interface EngineInfo {
+  available: boolean;
+  version: string;
+  path: string;
+  status: 'ready' | 'missing' | 'error' | 'checking' | 'timed_out';
+  lastChecked: string;
+  error?: string;
+  durationMs?: number;
+  latestVersion?: string;
+  updateAvailable?: boolean;
+  isUpdating?: boolean;
 }
 
-export interface DiagnosticResult {
-  engine: string;
-  passed: boolean;
-  version?: string;
-  command: string;
-  output: string;
-  duration_ms: number;
+export interface EngineStatusMap {
+  ytdlp: EngineInfo;
+  spotdl: EngineInfo;
+  ffmpeg: EngineInfo;
+  ffprobe: EngineInfo;
+  python3?: EngineInfo;
 }
 
 export interface EngineInstallProgress {
@@ -287,4 +337,31 @@ export interface ManagedEngineInfo {
   requiredReady: boolean;
   missingRequired: string[];
   engines: EngineStatusMap;
+}
+
+export interface EngineUpdateResult {
+  engine: string;
+  success: boolean;
+  previousVersion: string;
+  currentVersion: string;
+  message: string;
+  rolledBack?: boolean;
+}
+
+export interface DiagnosticResult {
+  engine: string;
+  passed: boolean;
+  version?: string;
+  command: string;
+  output: string;
+  duration_ms: number;
+}
+
+export interface NotificationItem {
+  id: string;
+  type: 'success' | 'warning' | 'error' | 'info';
+  title: string;
+  message: string;
+  timestamp: string;
+  taskId?: string;
 }

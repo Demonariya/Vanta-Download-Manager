@@ -14,13 +14,17 @@ import {
   DownloadTask,
   DiagnosticResult,
   AppSettings,
+  PlaylistEntry,
 } from '../src/types';
 import {
   parseYtdlpProgress,
   formatDuration,
   sanitizeFilename,
   determineEngineForUrl,
+  isPlaylistCandidateUrl,
 } from '../src/utils/engine-parser';
+import { ProgressTracker, buildIdleMetricsPatch } from '../src/utils/download-core';
+import { resolveVideoFormatSelector } from '../src/utils/media-formats';
 import { sanitizeLog, classifyDownloadError } from '../src/utils/error-classifier';
 import { tryParseSpotifyInput } from '../src/utils/spotify';
 import { getSettings } from './db';
@@ -30,6 +34,11 @@ import {
   appendAppLog,
 } from './cookies';
 import { spotifyMetadataService } from './spotify';
+import {
+  inspectDirectUrl,
+  executeDirectDownload,
+  abortDirectDownload,
+} from './directDownloader';
 
 const ENGINE_VERSION_TIMEOUT_MS = 8_000;
 const DIAGNOSTICS_TIMEOUT_MS = 15_000;
@@ -472,13 +481,19 @@ export class EngineManager {
       timeoutMs?: number;
       maxStdoutBytes?: number;
       ytdlpBinary?: string;
+      includePlaylist?: boolean;
     }
   ): Promise<MediaMetadata> {
     const url = validateInspectionUrl(rawUrl);
     const engine = determineEngineForUrl(url);
+    const settings = getSettings();
 
     if (engine === 'spotdl') {
       return this.inspectSpotdlUrl(url, requestId, options?.timeoutMs);
+    }
+
+    if (engine === 'direct') {
+      return inspectDirectUrl(url, settings, options?.timeoutMs ?? 15_000);
     }
 
     const ytdlpPath = options?.ytdlpBinary || this.findExecutable('yt-dlp');
@@ -486,15 +501,15 @@ export class EngineManager {
       throw new Error('yt-dlp engine is not installed or not available.');
     }
 
-    const settings = getSettings();
     const cookieRequestArgs = this.getRequestAndCookieArgs(url, settings);
     const reqId = requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const timeoutMs = options?.timeoutMs ?? INSPECT_URL_TIMEOUT_MS;
     const maxStdoutBytes = options?.maxStdoutBytes ?? INSPECT_MAX_STDOUT_BYTES;
+    const wantsPlaylist = options?.includePlaylist ?? isPlaylistCandidateUrl(url);
 
     const args = [
       '--dump-single-json',
-      '--no-playlist',
+      wantsPlaylist ? '--flat-playlist' : '--no-playlist',
       '--no-warnings',
       '--no-call-home',
       '--no-cache-dir',
@@ -656,6 +671,34 @@ export class EngineManager {
               }
             }
 
+            const entries: PlaylistEntry[] | undefined =
+              isPlaylist && Array.isArray(raw.entries)
+                ? raw.entries
+                    .filter((e: any) => Boolean(e))
+                    .slice(0, 200)
+                    .map((e: any, idx: number): PlaylistEntry => {
+                      const entryUrl =
+                        e.webpage_url ||
+                        e.url ||
+                        (e.id && raw.extractor_key?.toLowerCase().includes('youtube')
+                          ? `https://www.youtube.com/watch?v=${e.id}`
+                          : url);
+                      return {
+                        id: String(e.id || idx + 1),
+                        index: idx + 1,
+                        title: String(e.title || `Item ${idx + 1}`),
+                        url: String(entryUrl),
+                        duration: typeof e.duration === 'number' ? e.duration : undefined,
+                        duration_string: e.duration ? formatDuration(e.duration) : undefined,
+                        uploader: e.uploader || e.channel || raw.uploader || undefined,
+                        thumbnail:
+                          e.thumbnail ||
+                          (Array.isArray(e.thumbnails) && e.thumbnails[0]?.url) ||
+                          undefined,
+                      };
+                    })
+                : undefined;
+
             const metadata: MediaMetadata = {
               url,
               id: raw.id || String(Date.now()),
@@ -668,6 +711,7 @@ export class EngineManager {
               formats: parsedFormats,
               is_playlist: isPlaylist,
               playlist_count: isPlaylist && raw.entries ? raw.entries.length : undefined,
+              entries,
               extractor: raw.extractor || 'generic',
             };
 
@@ -748,21 +792,61 @@ export class EngineManager {
     task: DownloadTask,
     settings: AppSettings,
     onProgress: (update: Partial<DownloadTask>) => void,
-    onComplete: (outputPath: string) => void,
+    onComplete: (outputPath: string, extra?: Partial<DownloadTask>) => void,
     onError: (err: string) => void
   ): void {
-    if (task.engine === 'spotdl') {
+    if (task.engine === 'direct') {
+      executeDirectDownload(task, settings, onProgress, onComplete, onError);
+    } else if (task.engine === 'spotdl') {
       this.executeSpotdlDownload(task, settings, onProgress, onComplete, onError);
     } else {
       this.executeYtdlpDownload(task, settings, onProgress, onComplete, onError);
     }
   }
 
+  private resolveOutputDir(task: DownloadTask, settings: AppSettings): string {
+    if (task.output_path && !path.extname(task.output_path)) {
+      return task.output_path;
+    }
+    return settings.download_dir;
+  }
+
+  private findRecentlyCreatedFile(dir: string, startedAtMs: number, isAudio: boolean): string | null {
+    if (!fs.existsSync(dir)) return null;
+    const extRegex = isAudio
+      ? /\.(mp3|flac|wav|m4a|aac|opus|ogg)$/i
+      : /\.(mp4|mkv|webm|mov|avi|m4v|flv|mp3|flac|m4a|opus)$/i;
+    let newestPath: string | null = null;
+    let newestMtime = 0;
+
+    const scan = (currentDir: string, depth: number) => {
+      if (depth > 2) return;
+      for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+        const full = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          scan(full, depth + 1);
+        } else if (entry.isFile() && extRegex.test(entry.name) && !entry.name.endsWith('.part')) {
+          try {
+            const st = fs.statSync(full);
+            if (st.size > 0 && st.mtimeMs >= startedAtMs - 2500 && st.mtimeMs > newestMtime) {
+              newestMtime = st.mtimeMs;
+              newestPath = full;
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
+    scan(dir, 0);
+    return newestPath;
+  }
+
   private executeYtdlpDownload(
     task: DownloadTask,
     settings: AppSettings,
     onProgress: (update: Partial<DownloadTask>) => void,
-    onComplete: (outputPath: string) => void,
+    onComplete: (outputPath: string, extra?: Partial<DownloadTask>) => void,
     onError: (err: string) => void
   ): void {
     const ytdlpPath = this.findExecutable('yt-dlp');
@@ -770,18 +854,25 @@ export class EngineManager {
       return onError('yt-dlp executable not found.');
     }
 
-    const outDir = task.output_path || settings.download_dir;
+    const outDir = this.resolveOutputDir(task, settings);
     if (!fs.existsSync(outDir)) {
       fs.mkdirSync(outDir, { recursive: true });
     }
 
-    const outTemplate = path.join(outDir, settings.filename_template || '%(title)s [%(id)s].%(ext)s');
+    const customStem = task.custom_filename?.trim()
+      ? sanitizeFilename(task.custom_filename.trim()).replace(/\.[^.]+$/, '')
+      : '';
+    const outTemplate = customStem
+      ? path.join(outDir, `${customStem}.%(ext)s`)
+      : path.join(outDir, settings.filename_template || '%(title)s [%(id)s].%(ext)s');
 
     const args: string[] = [
       '--newline',
       '--no-colors',
       '--progress-template',
       '%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s',
+      '--print',
+      'after_move:VANTA_OUTPUT_FILE:%(filepath)s',
       '-o',
       outTemplate,
       '--retries', '10',
@@ -792,6 +883,18 @@ export class EngineManager {
       '--extractor-retries', '3',
     ];
 
+    if (task.playlist_mode === 'single') {
+      args.push('--no-playlist');
+    } else if (task.playlist_mode === 'playlist') {
+      args.push('--yes-playlist');
+    }
+
+    if (settings.conflict_strategy === 'overwrite') {
+      args.push('--force-overwrites');
+    } else {
+      args.push('--no-overwrites');
+    }
+
     try {
       const requestArgs = this.getRequestAndCookieArgs(task.url, settings);
       args.push(...requestArgs);
@@ -799,25 +902,21 @@ export class EngineManager {
       return onError(err.message || 'Invalid cookie configuration');
     }
 
-    // On retries (especially after HTTP 410 or expired signatures), bypass cache and use robust player clients
     if (task.retries > 0) {
       args.push('--no-cache-dir');
       args.push('--extractor-args', 'youtube:player_client=default,web,android');
     }
 
-    // Bandwidth limit
     if (settings.global_bandwidth_limit_kbps > 0) {
       args.push('--limit-rate', `${settings.global_bandwidth_limit_kbps}K`);
     } else if (settings.per_task_bandwidth_limit_kbps > 0) {
       args.push('--limit-rate', `${settings.per_task_bandwidth_limit_kbps}K`);
     }
 
-    // Proxy
     if (settings.proxy_url) {
       args.push('--proxy', settings.proxy_url);
     }
 
-    // Audio extraction vs video
     if (task.is_audio_only) {
       args.push('-x');
       const audioFormat = task.audio_format || settings.default_audio_format || 'mp3';
@@ -832,14 +931,15 @@ export class EngineManager {
         args.push('--postprocessor-args', pp.trim());
       }
     } else {
-      if (task.format_id && task.format_id !== 'best') {
-        args.push('-f', task.format_id);
-      } else {
-        args.push('-f', 'bestvideo+bestaudio/best');
-      }
+      const selector = resolveVideoFormatSelector(task.format_id);
+      args.push('-f', selector);
+      const preferredContainer =
+        task.ext && ['mp4', 'mkv', 'webm', 'mov'].includes(task.ext.toLowerCase())
+          ? task.ext.toLowerCase()
+          : 'mp4';
+      args.push('--merge-output-format', preferredContainer);
     }
 
-    // Embeddings
     if (settings.embed_thumbnail) {
       args.push('--embed-thumbnail');
     }
@@ -847,7 +947,6 @@ export class EngineManager {
       args.push('--embed-metadata');
     }
 
-    // Fragment concurrency if supported
     if (settings.fragment_concurrency > 1) {
       args.push('-N', String(settings.fragment_concurrency));
     }
@@ -861,14 +960,21 @@ export class EngineManager {
 
     args.push('--', validatedTaskUrl);
 
+    const startedAtMs = Date.now();
+    const tracker = new ProgressTracker({ alpha: 0.3, startedAtMs });
+
     onProgress({
-      status: 'extracting',
-      current_phase: 'Initializing engine...',
-      progress_percentage: 2,
+      status: 'connecting',
+      current_phase: 'Connecting to media extractor...',
+      started_at: task.started_at || new Date(startedAtMs).toISOString(),
+      active_connections: Math.max(1, settings.fragment_concurrency || 1),
     });
 
     try {
-      const proc = spawn(ytdlpPath, args, { windowsHide: true });
+      const proc = spawn(ytdlpPath, args, {
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+      });
       this.activeProcesses.set(task.id, proc);
 
       let lastOutput = '';
@@ -883,7 +989,12 @@ export class EngineManager {
           const trimmed = line.trim();
           if (!trimmed) continue;
 
-          // Check for destination output
+          if (trimmed.startsWith('VANTA_OUTPUT_FILE:')) {
+            const printedPath = trimmed.slice('VANTA_OUTPUT_FILE:'.length).trim();
+            if (printedPath) detectedOutputFile = printedPath;
+            continue;
+          }
+
           const destMatch = trimmed.match(/\[(?:download|Merger|ExtractAudio)\] Destination:\s*(.*)$/);
           if (destMatch && destMatch[1]) {
             detectedOutputFile = destMatch[1].trim().replace(/^["']|["']$/g, '');
@@ -896,16 +1007,40 @@ export class EngineManager {
 
           const parsed = parseYtdlpProgress(trimmed);
           if (parsed) {
-            onProgress({
-              status: parsed.phase === 'processing' || parsed.phase === 'converting' ? 'processing' : 'downloading',
-              progress_percentage: parsed.percentage !== undefined ? parsed.percentage : undefined,
-              speed_str: parsed.speedStr,
-              speed_bytes_per_sec: parsed.speedBytesPerSec,
-              downloaded_bytes: parsed.downloadedBytes,
-              total_bytes: parsed.totalBytes,
-              eta_str: parsed.etaStr,
-              current_phase: parsed.phase || 'downloading',
-            });
+            if (parsed.phase === 'muxing') {
+              onProgress({
+                status: 'muxing',
+                current_phase: 'Muxing video & audio streams via FFmpeg...',
+                speed_bytes_per_sec: 0,
+                speed_str: '0 B/s',
+                eta_seconds: null,
+                eta_str: '--',
+                active_connections: 0,
+              });
+            } else if (parsed.phase === 'processing' || parsed.phase === 'converting') {
+              onProgress({
+                status: 'processing',
+                current_phase: 'Processing & embedding metadata...',
+                speed_bytes_per_sec: 0,
+                speed_str: '0 B/s',
+                eta_seconds: null,
+                eta_str: '--',
+                active_connections: 0,
+              });
+            } else {
+              const computed = tracker.update({
+                downloadedBytes: parsed.downloadedBytes ?? 0,
+                totalBytes: parsed.totalBytes ?? 0,
+                instantSpeedBytesPerSec: parsed.speedBytesPerSec,
+                percentageHint: parsed.percentage,
+                activeConnections: Math.max(1, settings.fragment_concurrency || 1),
+              });
+              onProgress({
+                status: 'downloading',
+                current_phase: 'Downloading media stream',
+                ...computed,
+              });
+            }
           }
         }
       });
@@ -917,7 +1052,48 @@ export class EngineManager {
       proc.on('close', (code) => {
         this.activeProcesses.delete(task.id);
         if (code === 0) {
-          onComplete(detectedOutputFile || outDir);
+          const finalFile =
+            detectedOutputFile && fs.existsSync(detectedOutputFile) && fs.statSync(detectedOutputFile).isFile()
+              ? detectedOutputFile
+              : this.findRecentlyCreatedFile(outDir, startedAtMs, task.is_audio_only);
+
+          if (!finalFile || !fs.existsSync(finalFile)) {
+            return onError('Download process finished, but no output file was found on disk.');
+          }
+          const stat = fs.statSync(finalFile);
+          if (!stat.isFile() || stat.size <= 0) {
+            return onError('Output file verification failed: file is empty (0 bytes).');
+          }
+
+          onProgress({
+            status: 'verifying',
+            current_phase: 'Verifying output file & codecs...',
+            progress_percentage: 100,
+            percentage_known: true,
+            downloaded_bytes: stat.size,
+            total_bytes: stat.size,
+            remaining_bytes: 0,
+            active_connections: 0,
+          });
+
+          const mediaInfo = this.verifyMediaFile(finalFile);
+          onComplete(finalFile, {
+            total_bytes: stat.size,
+            downloaded_bytes: stat.size,
+            remaining_bytes: 0,
+            percentage_known: true,
+            ext: path.extname(finalFile).replace(/^\./, '').toLowerCase() || task.ext,
+            verified_audio_info: mediaInfo?.audioSummary || undefined,
+            video_codec: mediaInfo?.videoCodec ?? null,
+            audio_codec: mediaInfo?.audioCodec ?? null,
+            resolution_label: mediaInfo?.resolutionLabel ?? null,
+            ...buildIdleMetricsPatch({
+              ...task,
+              total_bytes: stat.size,
+              downloaded_bytes: stat.size,
+            }),
+            eta_str: 'Finished',
+          });
         } else if (code === null) {
           // Process was killed (paused or cancelled)
         } else {
@@ -939,15 +1115,15 @@ export class EngineManager {
     task: DownloadTask,
     settings: AppSettings,
     onProgress: (update: Partial<DownloadTask>) => void,
-    onComplete: (outputPath: string) => void,
+    onComplete: (outputPath: string, extra?: Partial<DownloadTask>) => void,
     onError: (err: string) => void
   ): void {
     const spotdlPath = this.findExecutable('spotdl');
     if (!spotdlPath) {
-      return onError('spotDL executable not found.');
+      return onError('spotDL executable not found. Install spotDL in Engines & Diagnostics.');
     }
 
-    const outDir = task.output_path || settings.download_dir;
+    const outDir = this.resolveOutputDir(task, settings);
     if (!fs.existsSync(outDir)) {
       fs.mkdirSync(outDir, { recursive: true });
     }
@@ -964,10 +1140,14 @@ export class EngineManager {
 
     const format = task.audio_format || settings.default_audio_format || 'mp3';
     const bitrate = task.audio_bitrate || settings.default_audio_bitrate || '320k';
-    const outputTemplate =
-      task.content_type === 'playlist' || task.content_type === 'album'
-        ? path.join(outDir, '{list-name}', '{artists} - {title}.{output-ext}')
-        : path.join(outDir, '{artists} - {title}.{output-ext}');
+    const customStem = task.custom_filename?.trim()
+      ? sanitizeFilename(task.custom_filename.trim()).replace(/\.[^.]+$/, '')
+      : '';
+    const outputTemplate = customStem
+      ? path.join(outDir, `${customStem}.{output-ext}`)
+      : task.content_type === 'playlist' || task.content_type === 'album'
+      ? path.join(outDir, '{list-name}', '{artists} - {title}.{output-ext}')
+      : path.join(outDir, '{artists} - {title}.{output-ext}');
 
     const args = [
       'download',
@@ -982,10 +1162,14 @@ export class EngineManager {
       'INFO',
     ];
 
+    const startedAtMs = Date.now();
     onProgress({
-      status: 'extracting',
+      status: 'connecting',
       current_phase: 'Matching audio source via spotDL...',
-      progress_percentage: 10,
+      started_at: task.started_at || new Date(startedAtMs).toISOString(),
+      percentage_known: false,
+      progress_percentage: 0,
+      eta_str: '--',
     });
 
     try {
@@ -1002,21 +1186,21 @@ export class EngineManager {
         lastOutput = (lastOutput + text).slice(-4000);
         if (text.includes('Searching for') || text.includes('Found')) {
           onProgress({
-            status: 'extracting',
+            status: 'connecting',
             current_phase: 'Matching audio source...',
-            progress_percentage: 25,
+            percentage_known: false,
           });
         } else if (text.includes('Downloading')) {
           onProgress({
             status: 'downloading',
             current_phase: 'Downloading audio stream...',
-            progress_percentage: 60,
+            percentage_known: false,
           });
         } else if (text.includes('Converting') || text.includes('Embedding') || text.includes('Downloaded')) {
           onProgress({
             status: 'processing',
-            current_phase: 'Embedding metadata & cover artwork...',
-            progress_percentage: 85,
+            current_phase: 'Converting & embedding metadata...',
+            percentage_known: false,
           });
         }
       });
@@ -1028,7 +1212,41 @@ export class EngineManager {
       proc.on('close', (code) => {
         this.activeProcesses.delete(task.id);
         if (code === 0) {
-          onComplete(outDir);
+          const finalFile = this.findRecentlyCreatedFile(outDir, startedAtMs, true);
+          if (!finalFile || !fs.existsSync(finalFile)) {
+            return onError('spotDL completed without creating an output audio file on disk.');
+          }
+          const stat = fs.statSync(finalFile);
+          if (!stat.isFile() || stat.size <= 0) {
+            return onError('spotDL produced an empty file (0 bytes).');
+          }
+
+          onProgress({
+            status: 'verifying',
+            current_phase: 'Verifying audio stream via FFprobe...',
+            progress_percentage: 100,
+            percentage_known: true,
+            downloaded_bytes: stat.size,
+            total_bytes: stat.size,
+            remaining_bytes: 0,
+          });
+
+          const mediaInfo = this.verifyMediaFile(finalFile);
+          onComplete(finalFile, {
+            total_bytes: stat.size,
+            downloaded_bytes: stat.size,
+            remaining_bytes: 0,
+            percentage_known: true,
+            ext: path.extname(finalFile).replace(/^\./, '').toLowerCase() || format,
+            verified_audio_info: mediaInfo?.audioSummary || undefined,
+            audio_codec: mediaInfo?.audioCodec ?? null,
+            ...buildIdleMetricsPatch({
+              ...task,
+              total_bytes: stat.size,
+              downloaded_bytes: stat.size,
+            }),
+            eta_str: 'Finished',
+          });
         } else if (code === null) {
           // Process killed
         } else {
@@ -1046,17 +1264,13 @@ export class EngineManager {
     }
   }
 
-  public cancelOrPauseProcess(taskId: string): boolean {
+  public cancelOrPauseProcess(taskId: string, reason: 'paused' | 'cancelled' = 'cancelled'): boolean {
+    if (abortDirectDownload(taskId, reason)) {
+      return true;
+    }
     const proc = this.activeProcesses.get(taskId);
     if (proc) {
-      try {
-        proc.kill('SIGTERM');
-        setTimeout(() => {
-          try {
-            if (!proc.killed) proc.kill('SIGKILL');
-          } catch {}
-        }, 1000);
-      } catch {}
+      killChildProcessTree(proc);
       this.activeProcesses.delete(taskId);
       return true;
     }
@@ -1064,41 +1278,64 @@ export class EngineManager {
   }
 
   public verifyAudioFile(filePath: string): string | null {
+    return this.verifyMediaFile(filePath)?.audioSummary || null;
+  }
+
+  public verifyMediaFile(filePath: string): {
+    audioSummary: string | null;
+    audioCodec: string | null;
+    videoCodec: string | null;
+    resolutionLabel: string | null;
+  } | null {
     const ffprobePath = this.findExecutable('ffprobe');
     if (!ffprobePath) return null;
     if (!fs.existsSync(filePath)) return null;
 
     try {
       const stats = fs.statSync(filePath);
-      let targetFile = filePath;
-      if (stats.isDirectory()) {
-        const files = fs.readdirSync(filePath);
-        const audioFiles = files.filter((f) => /\.(flac|wav|mp3|m4a|aac|opus|ogg)$/i.test(f));
-        if (audioFiles.length === 0) return null;
-        targetFile = path.join(filePath, audioFiles[audioFiles.length - 1]);
-      }
+      if (!stats.isFile() || stats.size <= 0) return null;
 
-      const jsonStr = execSync(`"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${targetFile}"`, {
-        encoding: 'utf-8',
-        timeout: 8000,
-        windowsHide: true,
-      });
+      const jsonStr = execSync(
+        `"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${filePath}"`,
+        {
+          encoding: 'utf-8',
+          timeout: 8000,
+          windowsHide: true,
+        }
+      );
       const data = JSON.parse(jsonStr);
-      const audioStream = data?.streams?.find((s: any) => s.codec_type === 'audio') || data?.streams?.[0];
-      if (!audioStream) return null;
+      const streams: any[] = Array.isArray(data?.streams) ? data.streams : [];
+      const audioStream = streams.find((s) => s.codec_type === 'audio');
+      const videoStream = streams.find(
+        (s) => s.codec_type === 'video' && (!s.disposition || !s.disposition.attached_pic)
+      );
 
-      const codec = (audioStream.codec_name || 'unknown').toUpperCase();
-      const sampleRate = parseInt(audioStream.sample_rate || '44100', 10);
-      const channels = parseInt(audioStream.channels || '2', 10);
-      let bitDepth = parseInt(audioStream.bits_per_sample || audioStream.bits_per_raw_sample || '0', 10);
-      if (!bitDepth || bitDepth === 0) {
-        const fmt = (audioStream.sample_fmt || '').toLowerCase();
-        if (fmt.includes('s32') || fmt.includes('flt')) bitDepth = 24;
-        else if (fmt.includes('s24')) bitDepth = 24;
-        else bitDepth = 16;
+      let audioSummary: string | null = null;
+      let audioCodec: string | null = null;
+      if (audioStream) {
+        audioCodec = String(audioStream.codec_name || 'unknown').toUpperCase();
+        const sampleRate = parseInt(audioStream.sample_rate || '44100', 10);
+        const channels = parseInt(audioStream.channels || '2', 10);
+        let bitDepth = parseInt(
+          audioStream.bits_per_sample || audioStream.bits_per_raw_sample || '0',
+          10
+        );
+        if (!bitDepth || bitDepth === 0) {
+          const fmt = (audioStream.sample_fmt || '').toLowerCase();
+          if (fmt.includes('s32') || fmt.includes('flt') || fmt.includes('s24')) bitDepth = 24;
+          else bitDepth = 16;
+        }
+        const channelLabel = channels === 1 ? 'Mono' : channels === 2 ? 'Stereo' : `${channels}ch`;
+        audioSummary = `${audioCodec} · ${bitDepth}-bit · ${sampleRate} Hz · ${channelLabel}`;
       }
-      const channelLabel = channels === 1 ? 'Mono' : channels === 2 ? 'Stereo' : `${channels}ch`;
-      return `${codec} · ${bitDepth}-bit · ${sampleRate} Hz · ${channelLabel}`;
+
+      const videoCodec = videoStream ? String(videoStream.codec_name || 'unknown').toUpperCase() : null;
+      const resolutionLabel =
+        videoStream && videoStream.height
+          ? `${videoStream.width || ''}x${videoStream.height} (${videoStream.height}p)`.replace(/^x/, '')
+          : null;
+
+      return { audioSummary, audioCodec, videoCodec, resolutionLabel };
     } catch {
       return null;
     }
@@ -1436,6 +1673,33 @@ export class EngineManager {
     results.push(await this.updateEngine('ytdlp'));
     results.push(await this.updateEngine('spotdl'));
     return results;
+  }
+
+  public removeManagedEngine(engineName: string): {
+    engine: string;
+    removed: boolean;
+    message: string;
+  } {
+    const normalized = engineName.toLowerCase() === 'ytdlp' ? 'yt-dlp' : engineName.toLowerCase();
+    const exeName = process.platform === 'win32' && !normalized.endsWith('.exe') ? `${normalized}.exe` : normalized;
+    const managedPath = path.join(this.getManagedBinDir(), exeName);
+    const localBinPath = path.resolve(process.cwd(), 'bin', exeName);
+
+    let removed = false;
+    for (const candidate of [managedPath, localBinPath]) {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        fs.unlinkSync(candidate);
+        removed = true;
+      }
+    }
+    this.cachedEngineStatus = null;
+    return {
+      engine: normalized,
+      removed,
+      message: removed
+        ? `Removed managed ${normalized} binary.`
+        : `No managed ${normalized} binary found in install directory.`,
+    };
   }
 }
 

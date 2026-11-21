@@ -2,7 +2,7 @@ use crate::cookies::{self, ResolvedCookieSource};
 use crate::logging;
 use crate::models::{
     AppSettings, DiagnosticResult, EngineInfo, EngineInstallProgress, EngineStatusMap,
-    EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata,
+    EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata, PlaylistEntry,
 };
 use crate::process::{
     self, ProcessError, ProcessOptions, DIAGNOSTICS_TIMEOUT, ENGINE_VERSION_TIMEOUT,
@@ -1238,6 +1238,157 @@ impl EngineManager {
         Ok(trimmed.to_string())
     }
 
+    pub fn is_direct_file_url(url: &str) -> bool {
+        let parsed = match reqwest::Url::parse(url.trim()) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let streaming_hosts = [
+            "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "twitch.tv",
+            "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com",
+            "dailymotion.com", "soundcloud.com", "bandcamp.com", "bilibili.com", "reddit.com",
+            "rumble.com", "kick.com", "pornhub.com", "xvideos.com", "xnxx.com", "spankbang.com",
+            "redtube.com", "youporn.com",
+        ];
+        if streaming_hosts
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{}", h)))
+        {
+            return false;
+        }
+        let path_lower = parsed.path().to_ascii_lowercase();
+        let last_seg = path_lower.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
+        if let Some((_, ext)) = last_seg.rsplit_once('.') {
+            let direct_exts = [
+                "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "iso", "img", "dmg",
+                "exe", "msi", "msix", "appimage", "deb", "rpm", "apk", "pdf", "doc", "docx",
+                "xls", "xlsx", "ppt", "pptx", "csv", "txt", "json", "xml", "epub", "mp4",
+                "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "wav", "m4a",
+                "aac", "opus", "ogg", "png", "jpg", "jpeg", "webp", "gif", "svg", "avif",
+                "bin", "dat", "wasm",
+            ];
+            return direct_exts.contains(&ext);
+        }
+        false
+    }
+
+    pub fn is_playlist_candidate_url(url: &str) -> bool {
+        let lower = url.trim().to_ascii_lowercase();
+        if lower.contains("list=") || lower.contains("/playlist") || lower.contains("/sets/") || lower.contains("/album/") {
+            return true;
+        }
+        false
+    }
+
+    pub async fn inspect_direct_url_async(raw_url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
+        let url = Self::validate_inspection_url(raw_url)?;
+        let ua = settings
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string());
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent(ua)
+            .build()
+            .map_err(|e| format!("Failed creating HTTP client: {}", e))?;
+
+        let mut res = client
+            .head(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Direct HTTP probe failed: {}", e))?;
+
+        if res.status().as_u16() == 405 || res.status().as_u16() == 501 || res.status().as_u16() == 403 {
+            res = client
+                .get(&url)
+                .header(reqwest::header::RANGE, "bytes=0-0")
+                .send()
+                .await
+                .map_err(|e| format!("Direct HTTP GET probe failed: {}", e))?;
+        }
+
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} returned while inspecting direct file URL.", res.status().as_u16()));
+        }
+
+        let headers = res.headers();
+        let mut size: u64 = 0;
+        if let Some(cr) = headers.get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
+            if let Some((_, total_str)) = cr.rsplit_once('/') {
+                size = total_str.trim().parse().unwrap_or(0);
+            }
+        }
+        if size == 0 {
+            if let Some(cl) = headers.get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()) {
+                size = cl.trim().parse().unwrap_or(0);
+            }
+        }
+        let accepts_ranges = res.status().as_u16() == 206
+            || headers
+                .get(reqwest::header::ACCEPT_RANGES)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.to_ascii_lowercase().contains("bytes"))
+                .unwrap_or(false);
+        let mime = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        let parsed = reqwest::Url::parse(&url).ok();
+        let filename = parsed
+            .as_ref()
+            .and_then(|u| u.path_segments())
+            .and_then(|mut s| s.next_back())
+            .filter(|s| !s.is_empty())
+            .map(crate::sanitize_filename)
+            .unwrap_or_else(|| "download.bin".to_string());
+        let ext = Path::new(&filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin")
+            .to_ascii_lowercase();
+        let uploader = parsed.and_then(|u| u.host_str().map(|h| h.to_string()));
+        let mut hasher = Sha256::new();
+        hasher.update(url.as_bytes());
+        let id = hex::encode(hasher.finalize())[..12].to_string();
+
+        Ok(MediaMetadata {
+            url,
+            id,
+            title: filename.clone(),
+            uploader,
+            formats: vec![FormatOption {
+                format_id: "direct".to_string(),
+                ext,
+                resolution: None,
+                width: None,
+                height: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                filesize: if size > 0 { Some(size) } else { None },
+                filesize_approx: None,
+                format_note: Some(if accepts_ranges {
+                    "Direct HTTP (Resumable)".to_string()
+                } else {
+                    "Direct HTTP".to_string()
+                }),
+                is_audio_only: false,
+                is_video_only: false,
+            }],
+            is_playlist: false,
+            extractor: "direct-http".to_string(),
+            is_direct_file: Some(true),
+            direct_file_size: if size > 0 { Some(size) } else { None },
+            direct_mime_type: Some(mime),
+            direct_filename: Some(filename),
+            accepts_ranges: Some(accepts_ranges),
+            ..MediaMetadata::default()
+        })
+    }
+
     pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
         Self::inspect_url_with_tracking("direct", url, settings, None, None)
     }
@@ -1248,6 +1399,17 @@ impl EngineManager {
         settings: &AppSettings,
         cancel_flag: Option<Arc<AtomicBool>>,
         pid_slot: Option<Arc<AtomicU32>>,
+    ) -> Result<MediaMetadata, String> {
+        Self::inspect_url_with_tracking_opts(request_id, raw_url, settings, cancel_flag, pid_slot, None)
+    }
+
+    pub fn inspect_url_with_tracking_opts(
+        request_id: &str,
+        raw_url: &str,
+        settings: &AppSettings,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        pid_slot: Option<Arc<AtomicU32>>,
+        include_playlist: Option<bool>,
     ) -> Result<MediaMetadata, String> {
         let url = Self::validate_inspection_url(raw_url)?;
         if cancel_flag.as_ref().map(|f| f.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false) {
@@ -1263,7 +1425,7 @@ impl EngineManager {
                 .to_string()
         })?;
 
-        Self::inspect_url_with_binary(
+        Self::inspect_url_with_binary_opts(
             &ytdlp_path,
             request_id,
             &url,
@@ -1272,6 +1434,7 @@ impl EngineManager {
             INSPECT_MAX_STDOUT_BYTES,
             cancel_flag,
             pid_slot,
+            include_playlist,
         )
     }
 
@@ -1286,13 +1449,39 @@ impl EngineManager {
         cancel_flag: Option<Arc<AtomicBool>>,
         pid_slot: Option<Arc<AtomicU32>>,
     ) -> Result<MediaMetadata, String> {
+        Self::inspect_url_with_binary_opts(
+            ytdlp_path,
+            request_id,
+            url,
+            settings,
+            timeout,
+            max_stdout_bytes,
+            cancel_flag,
+            pid_slot,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn inspect_url_with_binary_opts(
+        ytdlp_path: &Path,
+        request_id: &str,
+        url: &str,
+        settings: &AppSettings,
+        timeout: Duration,
+        max_stdout_bytes: usize,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        pid_slot: Option<Arc<AtomicU32>>,
+        include_playlist: Option<bool>,
+    ) -> Result<MediaMetadata, String> {
         let validated_url = Self::validate_inspection_url(url)?;
         let extra_args = Self::build_ytdlp_request_args(&validated_url, settings)?;
+        let wants_playlist = include_playlist.unwrap_or_else(|| Self::is_playlist_candidate_url(&validated_url));
 
         let mut cmd = Command::new(ytdlp_path);
         cmd.args([
             "--dump-single-json",
-            "--no-playlist",
+            if wants_playlist { "--flat-playlist" } else { "--no-playlist" },
             "--no-warnings",
             "--no-call-home",
             "--no-cache-dir",
@@ -1482,6 +1671,65 @@ impl EngineManager {
             }
         }
 
+        let is_playlist = val.get("_type").and_then(|v| v.as_str()) == Some("playlist")
+            || val.get("entries").and_then(|v| v.as_array()).is_some();
+
+        let entries: Option<Vec<PlaylistEntry>> = if is_playlist {
+            val.get("entries").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .take(200)
+                    .enumerate()
+                    .map(|(idx, e)| {
+                        let entry_id = e
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("{}", idx + 1));
+                        let entry_url = e
+                            .get("webpage_url")
+                            .or_else(|| e.get("url"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| validated_url.clone());
+                        let dur = e.get("duration").and_then(|v| v.as_u64());
+                        let dur_str = dur.map(|d| {
+                            let m = (d % 3600) / 60;
+                            let s = d % 60;
+                            let h = d / 3600;
+                            if h > 0 {
+                                format!("{:02}:{:02}:{:02}", h, m, s)
+                            } else {
+                                format!("{:02}:{:02}", m, s)
+                            }
+                        });
+                        PlaylistEntry {
+                            id: entry_id,
+                            index: idx + 1,
+                            title: e
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Playlist Item")
+                                .to_string(),
+                            url: entry_url,
+                            duration: dur,
+                            duration_string: dur_str,
+                            uploader: e
+                                .get("uploader")
+                                .or_else(|| e.get("channel"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            thumbnail: e
+                                .get("thumbnail")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                        }
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
+
         Ok(MediaMetadata {
             url: validated_url,
             id: val
@@ -1512,8 +1760,9 @@ impl EngineManager {
                 .and_then(|v| v.as_str())
                 .map(|s| s.chars().take(500).collect()),
             formats,
-            is_playlist: val.get("_type").and_then(|v| v.as_str()) == Some("playlist"),
+            is_playlist,
             playlist_count: val.get("entries").and_then(|v| v.as_array()).map(|a| a.len()),
+            entries,
             extractor: val
                 .get("extractor")
                 .and_then(|v| v.as_str())
@@ -1622,6 +1871,149 @@ impl EngineManager {
             "{} · {}-bit · {} Hz · {}",
             codec, bit_depth, sample_rate, channel_label
         ))
+    }
+
+    pub fn verify_media_file(
+        file_path: &Path,
+    ) -> Option<(Option<String>, Option<String>, Option<String>, Option<String>)> {
+        let ffprobe = Self::find_executable("ffprobe")?;
+        if !file_path.is_file() {
+            return None;
+        }
+        let mut cmd = Command::new(&ffprobe);
+        cmd.args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            file_path.to_str()?,
+        ]);
+        Self::apply_engine_env(&mut cmd);
+
+        let opts = ProcessOptions {
+            timeout: FFPROBE_TIMEOUT,
+            truncate_stdout_tail: false,
+            ..ProcessOptions::default()
+        };
+        let output = process::run_command_with_options(&mut cmd, opts).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let val: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
+        let streams = val.get("streams").and_then(|s| s.as_array())?;
+
+        let audio_stream = streams
+            .iter()
+            .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"));
+        let video_stream = streams.iter().find(|s| {
+            s.get("codec_type").and_then(|v| v.as_str()) == Some("video")
+                && s.get("disposition")
+                    .and_then(|d| d.get("attached_pic"))
+                    .and_then(|a| a.as_u64())
+                    .unwrap_or(0)
+                    == 0
+        });
+
+        let mut audio_summary = None;
+        let mut audio_codec = None;
+        if let Some(stream) = audio_stream {
+            let codec = stream
+                .get("codec_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN")
+                .to_uppercase();
+            audio_codec = Some(codec.clone());
+            let sample_rate = stream
+                .get("sample_rate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("44100");
+            let channels = stream.get("channels").and_then(|v| v.as_u64()).unwrap_or(2);
+            let mut bit_depth = stream
+                .get("bits_per_sample")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if bit_depth == 0 {
+                bit_depth = stream
+                    .get("bits_per_raw_sample")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+            if bit_depth == 0 {
+                let fmt = stream
+                    .get("sample_fmt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                bit_depth = if fmt.contains("s32") || fmt.contains("flt") || fmt.contains("s24") {
+                    24
+                } else {
+                    16
+                };
+            }
+            let channel_label = match channels {
+                1 => "Mono".to_string(),
+                2 => "Stereo".to_string(),
+                n => format!("{}ch", n),
+            };
+            audio_summary = Some(format!(
+                "{} · {}-bit · {} Hz · {}",
+                codec, bit_depth, sample_rate, channel_label
+            ));
+        }
+
+        let video_codec = video_stream
+            .and_then(|s| s.get("codec_name").and_then(|v| v.as_str()))
+            .map(|c| c.to_uppercase());
+        let resolution_label = video_stream.and_then(|s| {
+            let h = s.get("height").and_then(|v| v.as_u64())?;
+            let w = s.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            if w > 0 {
+                Some(format!("{}x{} ({}p)", w, h, h))
+            } else {
+                Some(format!("{}p", h))
+            }
+        });
+
+        Some((audio_summary, audio_codec, video_codec, resolution_label))
+    }
+
+    pub fn remove_managed_engine(name: &str) -> EngineUpdateResult {
+        let normalized = if name.eq_ignore_ascii_case("ytdlp") || name.eq_ignore_ascii_case("yt-dlp") {
+            "yt-dlp"
+        } else if name.eq_ignore_ascii_case("ffmpeg") {
+            "ffmpeg"
+        } else if name.eq_ignore_ascii_case("ffprobe") {
+            "ffprobe"
+        } else {
+            "spotdl"
+        };
+        let bin_dir = Self::managed_bin_dir();
+        let exe_name = if cfg!(windows) {
+            format!("{}.exe", normalized)
+        } else {
+            normalized.to_string()
+        };
+        let target = bin_dir.join(exe_name);
+        let removed = if target.is_file() {
+            fs::remove_file(&target).is_ok()
+        } else {
+            false
+        };
+        EngineUpdateResult {
+            engine: normalized.to_string(),
+            success: true,
+            previous_version: String::new(),
+            current_version: String::new(),
+            message: if removed {
+                format!("Removed managed {} binary.", normalized)
+            } else {
+                format!("No managed {} binary found.", normalized)
+            },
+            rolled_back: None,
+        }
     }
 
     pub async fn update_engine_async(app: Option<&AppHandle>, name: &str) -> EngineUpdateResult {

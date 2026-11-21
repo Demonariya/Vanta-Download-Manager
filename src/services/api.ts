@@ -13,13 +13,14 @@ import {
   CookieValidationResult,
   DetectedBrowserInfo,
   DiagnosticLogInfo,
+  CategoryItem,
+  TaskPriority,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
 export class ApiService {
   private eventSource: EventSource | null = null;
-  private tauriUnlisteners: UnlistenFn[] = [];
 
   public isTauri(): boolean {
     return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -45,7 +46,9 @@ export class ApiService {
     return res.json();
   }
 
-  public async checkEngineUpdates(): Promise<Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>> {
+  public async checkEngineUpdates(): Promise<
+    Record<string, { currentVersion: string; latestVersion: string; updateAvailable: boolean }>
+  > {
     if (this.isTauri()) {
       return invoke('check_engine_updates');
     }
@@ -76,7 +79,10 @@ export class ApiService {
     return res.json();
   }
 
-  public async installAllEngines(includeSpotdl = true, force = false): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
+  public async installAllEngines(
+    includeSpotdl = true,
+    force = false
+  ): Promise<{ success: boolean; results: EngineUpdateResult[] }> {
     if (this.isTauri()) {
       const results = await invoke<EngineUpdateResult[]>('install_all_engines', {
         includeSpotdl,
@@ -112,6 +118,20 @@ export class ApiService {
     return res.json();
   }
 
+  public async removeManagedEngine(name: string): Promise<EngineUpdateResult> {
+    if (this.isTauri()) {
+      return invoke<EngineUpdateResult>('remove_managed_engine', { name });
+    }
+    const res = await fetch(`/api/engines/remove/${encodeURIComponent(name)}`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.message || err?.error || `Failed to remove ${name}`);
+    }
+    return res.json();
+  }
+
   public async cancelInspection(requestId: string): Promise<boolean> {
     if (!requestId) return false;
     try {
@@ -133,11 +153,12 @@ export class ApiService {
 
   public async inspectUrl(
     url: string,
-    options?: { requestId?: string; signal?: AbortSignal }
+    options?: { requestId?: string; signal?: AbortSignal; includePlaylist?: boolean }
   ): Promise<MediaMetadata> {
     const requestId =
       options?.requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const signal = options?.signal;
+    const includePlaylist = options?.includePlaylist;
 
     if (signal?.aborted) {
       throw new DOMException('Inspection cancelled.', 'AbortError');
@@ -154,7 +175,11 @@ export class ApiService {
         };
         signal?.addEventListener('abort', onAbort, { once: true });
 
-        invoke<MediaMetadata>('inspect_url', { url, requestId })
+        invoke<MediaMetadata>('inspect_url', {
+          url,
+          requestId,
+          includePlaylist: includePlaylist ?? null,
+        })
           .then((data) => {
             if (settled) return;
             settled = true;
@@ -174,7 +199,7 @@ export class ApiService {
     const res = await fetch('/api/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, requestId }),
+      body: JSON.stringify({ url, requestId, includePlaylist }),
       signal,
     });
     if (!res.ok) {
@@ -213,41 +238,47 @@ export class ApiService {
     if (this.isTauri()) {
       return invoke('pause_task', { id });
     }
-    await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
+    await fetch(`/api/tasks/${encodeURIComponent(id)}/pause`, { method: 'POST' });
   }
 
   public async resumeTask(id: string): Promise<void> {
     if (this.isTauri()) {
       return invoke('resume_task', { id });
     }
-    await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
+    await fetch(`/api/tasks/${encodeURIComponent(id)}/resume`, { method: 'POST' });
   }
 
   public async cancelTask(id: string): Promise<void> {
     if (this.isTauri()) {
       return invoke('cancel_task', { id });
     }
-    await fetch(`/api/tasks/${id}/cancel`, { method: 'POST' });
+    await fetch(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
   }
 
   public async retryTask(id: string): Promise<void> {
     if (this.isTauri()) {
       return invoke('retry_task', { id });
     }
-    await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+    await fetch(`/api/tasks/${encodeURIComponent(id)}/retry`, { method: 'POST' });
   }
 
   public async deleteTask(id: string, deleteFileFromDisk = false): Promise<void> {
     if (this.isTauri()) {
-      return invoke('delete_task', { id });
+      return invoke('delete_task', { id, deleteFile: deleteFileFromDisk });
     }
-    await fetch(`/api/tasks/${id}?deleteFile=${deleteFileFromDisk ? 'true' : 'false'}`, {
-      method: 'DELETE',
-    });
+    await fetch(
+      `/api/tasks/${encodeURIComponent(id)}?deleteFile=${deleteFileFromDisk ? 'true' : 'false'}`,
+      { method: 'DELETE' }
+    );
   }
 
   public async deleteDownloadedFile(id: string): Promise<boolean> {
-    const res = await fetch(`/api/tasks/${id}/delete-file`, { method: 'POST' });
+    if (this.isTauri()) {
+      return invoke<boolean>('delete_downloaded_file', { id });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/delete-file`, {
+      method: 'POST',
+    });
     const data = await res.json();
     return Boolean(data.removed);
   }
@@ -268,21 +299,198 @@ export class ApiService {
 
   public async clearCompleted(deleteFilesFromDisk = false): Promise<void> {
     if (this.isTauri()) {
-      return invoke('clear_completed');
+      return invoke('clear_completed', { deleteFiles: deleteFilesFromDisk });
     }
-    await fetch(`/api/tasks/clear-completed?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`, {
-      method: 'POST',
-    });
+    await fetch(
+      `/api/tasks/clear-completed?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`,
+      { method: 'POST' }
+    );
   }
 
   public async clearFailed(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('clear_failed');
+    }
     await fetch('/api/tasks/clear-failed', { method: 'POST' });
   }
 
   public async clearAll(deleteFilesFromDisk = false): Promise<void> {
-    await fetch(`/api/tasks/clear-all?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`, {
+    if (this.isTauri()) {
+      return invoke('clear_all', { deleteFiles: deleteFilesFromDisk });
+    }
+    await fetch(
+      `/api/tasks/clear-all?deleteFiles=${deleteFilesFromDisk ? 'true' : 'false'}`,
+      { method: 'POST' }
+    );
+  }
+
+  public async moveTask(id: string, direction: 'up' | 'down'): Promise<DownloadTask[]> {
+    if (this.isTauri()) {
+      return invoke<DownloadTask[]>('move_task', { id, direction });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction }),
+    });
+    if (!res.ok) throw new Error('Failed to reorder task');
+    return res.json();
+  }
+
+  public async updateTaskMeta(
+    id: string,
+    patch: { priority?: TaskPriority; category_id?: string | null; custom_filename?: string | null }
+  ): Promise<DownloadTask> {
+    if (this.isTauri()) {
+      return invoke<DownloadTask>('update_task_meta', {
+        id,
+        priority: patch.priority ?? null,
+        categoryId: patch.category_id ?? null,
+        customFilename: patch.custom_filename ?? null,
+      });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to update task');
+    }
+    return res.json();
+  }
+
+  public async renameTaskFile(id: string, filename: string): Promise<DownloadTask> {
+    if (this.isTauri()) {
+      return invoke<DownloadTask>('rename_task_file', { id, filename });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to rename output file');
+    }
+    return res.json();
+  }
+
+  public async verifyTaskChecksum(
+    id: string,
+    expectedSha256?: string
+  ): Promise<{ task: DownloadTask; sha256: string; matches: boolean | null }> {
+    if (this.isTauri()) {
+      return invoke<{ task: DownloadTask; sha256: string; matches: boolean | null }>(
+        'verify_task_checksum',
+        { id, expectedSha256: expectedSha256?.trim() || null }
+      );
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/verify-checksum`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedSha256: expectedSha256?.trim() || undefined }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to verify SHA-256 checksum');
+    }
+    return res.json();
+  }
+
+  public async bulkTaskAction(
+    ids: string[],
+    action: 'pause' | 'resume' | 'retry' | 'cancel' | 'delete',
+    deleteFiles = false
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    if (this.isTauri()) {
+      return invoke('bulk_task_action', { ids, action, deleteFiles });
+    }
+    const res = await fetch('/api/tasks/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, action, deleteFiles }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Bulk task operation failed');
+    }
+  }
+
+  public async openTaskFile(task: DownloadTask): Promise<void> {
+    if (this.isTauri()) {
+      if (!task.output_path) throw new Error('No output file path recorded');
+      return invoke('open_file_or_folder', { path: task.output_path });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/open-file`, {
       method: 'POST',
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to open file');
+    }
+  }
+
+  public async openTaskFolder(task: DownloadTask): Promise<void> {
+    if (this.isTauri()) {
+      const target = task.output_path || '';
+      const dir = target.replace(/[\\/][^\\/]+$/, '') || target;
+      if (!dir) throw new Error('No folder path recorded');
+      return invoke('open_file_or_folder', { path: dir });
+    }
+    const res = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/open-folder`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to open folder');
+    }
+  }
+
+  public async getCategories(): Promise<CategoryItem[]> {
+    if (this.isTauri()) {
+      return invoke<CategoryItem[]>('get_categories');
+    }
+    const res = await fetch('/api/categories');
+    if (!res.ok) throw new Error('Failed to fetch categories');
+    return res.json();
+  }
+
+  public async saveCategory(category: Partial<CategoryItem> & { name: string }): Promise<CategoryItem> {
+    if (this.isTauri()) {
+      const payload: CategoryItem = {
+        id: category.id || `cat_${Date.now()}`,
+        name: category.name,
+        color: category.color || '#58a6ff',
+        extensions: category.extensions || [],
+        destination_dir: category.destination_dir,
+        created_at: category.created_at || new Date().toISOString(),
+      };
+      return invoke<CategoryItem>('save_category', { category: payload });
+    }
+    const res = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(category),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to save category');
+    }
+    return res.json();
+  }
+
+  public async deleteCategory(id: string): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('delete_category', { id });
+    }
+    const res = await fetch(`/api/categories/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to delete category');
+    }
   }
 
   public async getCookieStatus(): Promise<CookieStatus> {
@@ -385,8 +593,7 @@ export class ApiService {
     if (this.isTauri()) {
       return invoke('open_logs_folder');
     }
-    const info = await this.getDiagnosticLogInfo(10);
-    console.info('Diagnostic log directory:', info.logDir);
+    await this.getDiagnosticLogInfo(10);
   }
 
   public async getSettings(): Promise<AppSettings> {
@@ -431,7 +638,8 @@ export class ApiService {
     if (this.isTauri()) {
       return invoke('open_file_or_folder', { path });
     }
-    console.info('Opening path (web simulation):', path);
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
   }
 
   public async selectDirectory(): Promise<string | null> {
@@ -455,7 +663,6 @@ export class ApiService {
       let isSubscribed = true;
       const unlisteners: UnlistenFn[] = [];
 
-      // Initial state fetch
       Promise.all([
         invoke<DownloadTask[]>('get_tasks'),
         invoke<AppSettings>('get_settings'),
@@ -467,7 +674,6 @@ export class ApiService {
         })
         .catch(console.error);
 
-      // Listen to native events
       if (callbacks.onTaskUpdated) {
         listen<DownloadTask>('task_updated', (e) => callbacks.onTaskUpdated?.(e.payload)).then((u) =>
           unlisteners.push(u)
@@ -520,31 +726,24 @@ export class ApiService {
     es.addEventListener('task_updated', (e) => {
       callbacks.onTaskUpdated?.(JSON.parse(e.data));
     });
-
     es.addEventListener('task_added', (e) => {
       callbacks.onTaskAdded?.(JSON.parse(e.data));
     });
-
     es.addEventListener('task_deleted', (e) => {
       callbacks.onTaskDeleted?.(JSON.parse(e.data));
     });
-
     es.addEventListener('tasks_cleared', (e) => {
       callbacks.onTasksCleared?.(JSON.parse(e.data));
     });
-
     es.addEventListener('notification', (e) => {
       callbacks.onNotification?.(JSON.parse(e.data));
     });
-
     es.addEventListener('settings_updated', (e) => {
       callbacks.onSettingsUpdated?.(JSON.parse(e.data));
     });
-
     es.addEventListener('engine_install_progress', (e) => {
       callbacks.onEngineInstallProgress?.(JSON.parse(e.data));
     });
-
     es.addEventListener('init', (e) => {
       callbacks.onInit?.(JSON.parse(e.data));
     });
