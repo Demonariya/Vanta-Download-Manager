@@ -265,7 +265,7 @@ pub struct CreateTaskPayload {
     pub total_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FormatOption {
     pub format_id: String,
     pub ext: String,
@@ -278,6 +278,10 @@ pub struct FormatOption {
     pub filesize: Option<u64>,
     pub filesize_approx: Option<u64>,
     pub format_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tbr: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abr: Option<f64>,
     pub is_audio_only: bool,
     pub is_video_only: bool,
 }
@@ -319,7 +323,7 @@ pub struct PlaylistEntry {
     pub thumbnail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MediaMetadata {
     pub url: String,
     pub id: String,
@@ -521,13 +525,14 @@ pub struct CookieTestResult {
     pub next_action: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotificationItem {
     pub id: String,
     pub r#type: String,
     pub title: String,
     pub message: String,
     pub timestamp: String,
+    #[serde(rename = "taskId", alias = "task_id")]
     pub task_id: Option<String>,
 }
 
@@ -623,3 +628,181 @@ pub fn default_downloads_path() -> std::path::PathBuf {
     }
     std::path::PathBuf::from("./downloads")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_media_metadata_direct_file_and_playlist_roundtrip() {
+        let direct = MediaMetadata {
+            url: "https://cdn.example.com/archive.zip".to_string(),
+            id: "abcdef123456".to_string(),
+            title: "archive.zip".to_string(),
+            uploader: Some("cdn.example.com".to_string()),
+            formats: vec![FormatOption {
+                format_id: "direct".to_string(),
+                ext: "zip".to_string(),
+                resolution: None,
+                width: None,
+                height: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                filesize: Some(4096),
+                filesize_approx: None,
+                format_note: Some("Direct HTTP (Resumable)".to_string()),
+                tbr: None,
+                abr: None,
+                is_audio_only: false,
+                is_video_only: false,
+            }],
+            is_playlist: false,
+            extractor: "direct-http".to_string(),
+            is_direct_file: Some(true),
+            direct_file_size: Some(4096),
+            direct_mime_type: Some("application/zip".to_string()),
+            direct_filename: Some("archive.zip".to_string()),
+            accepts_ranges: Some(true),
+            ..MediaMetadata::default()
+        };
+
+        let json = serde_json::to_value(&direct).unwrap();
+        assert_eq!(json["is_direct_file"], true);
+        assert_eq!(json["direct_file_size"], 4096);
+        assert_eq!(json["direct_mime_type"], "application/zip");
+        assert_eq!(json["direct_filename"], "archive.zip");
+        assert_eq!(json["accepts_ranges"], true);
+        assert!(json["entries"].is_null());
+        assert!(json["formats"][0].get("tbr").is_none());
+        assert!(json["formats"][0].get("abr").is_none());
+
+        let decoded: MediaMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, direct);
+    }
+
+    #[test]
+    fn test_media_metadata_video_audio_formats_and_entries_roundtrip() {
+        let playlist = MediaMetadata {
+            url: "https://www.youtube.com/playlist?list=PL123".to_string(),
+            id: "PL123".to_string(),
+            title: "Sample Playlist".to_string(),
+            uploader: Some("Channel".to_string()),
+            formats: vec![
+                FormatOption {
+                    format_id: "137".to_string(),
+                    ext: "mp4".to_string(),
+                    resolution: Some("1920x1080".to_string()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    fps: Some(60.0),
+                    vcodec: Some("avc1.640028".to_string()),
+                    acodec: Some("none".to_string()),
+                    filesize: Some(50_000_000),
+                    filesize_approx: None,
+                    format_note: Some("1080p60".to_string()),
+                    tbr: Some(4200.5),
+                    abr: None,
+                    is_audio_only: false,
+                    is_video_only: true,
+                },
+                FormatOption {
+                    format_id: "251".to_string(),
+                    ext: "webm".to_string(),
+                    resolution: Some("audio only".to_string()),
+                    width: None,
+                    height: None,
+                    fps: None,
+                    vcodec: Some("none".to_string()),
+                    acodec: Some("opus".to_string()),
+                    filesize: None,
+                    filesize_approx: Some(3_500_000),
+                    format_note: Some("medium".to_string()),
+                    tbr: Some(135.2),
+                    abr: Some(128.0),
+                    is_audio_only: true,
+                    is_video_only: false,
+                },
+            ],
+            is_playlist: true,
+            playlist_count: Some(1),
+            extractor: "youtube".to_string(),
+            entries: Some(vec![PlaylistEntry {
+                id: "vid1".to_string(),
+                index: 1,
+                title: "First Episode".to_string(),
+                url: "https://www.youtube.com/watch?v=vid1".to_string(),
+                duration: Some(125),
+                duration_string: Some("02:05".to_string()),
+                uploader: Some("Channel".to_string()),
+                thumbnail: None,
+            }]),
+            ..MediaMetadata::default()
+        };
+
+        let json_str = serde_json::to_string(&playlist).unwrap();
+        let parsed: MediaMetadata = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed, playlist);
+        assert_eq!(parsed.formats[0].tbr, Some(4200.5));
+        assert_eq!(parsed.formats[1].abr, Some(128.0));
+        assert_eq!(parsed.entries.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_media_metadata_missing_optional_fields_deserialize_cleanly() {
+        let minimal_json = r#"{
+            "url": "https://example.com/video",
+            "id": "v1",
+            "title": "Minimal",
+            "uploader": null,
+            "duration": null,
+            "duration_string": null,
+            "thumbnail": null,
+            "description": null,
+            "formats": [],
+            "is_playlist": false,
+            "playlist_count": null,
+            "extractor": "generic"
+        }"#;
+        let parsed: MediaMetadata = serde_json::from_str(minimal_json).unwrap();
+        assert_eq!(parsed.title, "Minimal");
+        assert!(parsed.entries.is_none());
+        assert!(parsed.is_direct_file.is_none());
+        assert!(parsed.direct_file_size.is_none());
+        assert!(parsed.direct_mime_type.is_none());
+        assert!(parsed.direct_filename.is_none());
+        assert!(parsed.accepts_ranges.is_none());
+    }
+
+    #[test]
+    fn test_notification_item_and_engine_update_info_casing() {
+        let notif = NotificationItem {
+            id: "n1".to_string(),
+            r#type: "success".to_string(),
+            title: "Done".to_string(),
+            message: "Saved".to_string(),
+            timestamp: "2026-11-20T00:00:00Z".to_string(),
+            task_id: Some("task_123".to_string()),
+        };
+        let notif_json = serde_json::to_value(&notif).unwrap();
+        assert_eq!(notif_json["taskId"], "task_123");
+        assert!(notif_json.get("task_id").is_none());
+
+        let from_legacy: NotificationItem = serde_json::from_str(
+            r#"{"id":"n2","type":"info","title":"T","message":"M","timestamp":"ts","task_id":"t2"}"#,
+        )
+        .unwrap();
+        assert_eq!(from_legacy.task_id.as_deref(), Some("t2"));
+
+        let update = EngineUpdateInfo {
+            current_version: "2026.01.01".to_string(),
+            latest_version: "2026.01.02".to_string(),
+            update_available: true,
+        };
+        let update_json = serde_json::to_value(&update).unwrap();
+        assert_eq!(update_json["currentVersion"], "2026.01.01");
+        assert_eq!(update_json["latestVersion"], "2026.01.02");
+        assert_eq!(update_json["updateAvailable"], true);
+    }
+}
+

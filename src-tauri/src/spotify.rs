@@ -624,10 +624,16 @@ pub fn build_media_metadata_from_entity(
             release_date,
             explicit,
             tracks: None,
+            entries: None,
             total_tracks: None,
             owner: None,
             partial_tracks: None,
             metadata_source: Some(source.to_string()),
+            is_direct_file: None,
+            direct_file_size: None,
+            direct_mime_type: None,
+            direct_filename: None,
+            accepts_ranges: None,
         });
     }
 
@@ -757,10 +763,16 @@ pub fn build_media_metadata_from_entity(
                 release_date,
                 explicit,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner: None,
                 partial_tracks,
                 metadata_source: Some(source.to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Playlist => {
@@ -820,10 +832,16 @@ pub fn build_media_metadata_from_entity(
                 release_date: None,
                 explicit: None,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner,
                 partial_tracks,
                 metadata_source: Some(source.to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Artist => {
@@ -858,10 +876,16 @@ pub fn build_media_metadata_from_entity(
                 release_date: None,
                 explicit: None,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some(source.to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Track => unreachable!(),
@@ -911,10 +935,16 @@ pub fn build_media_metadata_from_oembed(
         release_date: None,
         explicit: None,
         tracks: None,
+        entries: None,
         total_tracks: None,
         owner: None,
         partial_tracks: Some(true),
         metadata_source: Some("spotify-oembed".to_string()),
+        is_direct_file: None,
+        direct_file_size: None,
+        direct_mime_type: None,
+        direct_filename: None,
+        accepts_ranges: None,
     })
 }
 
@@ -1029,10 +1059,16 @@ pub fn build_media_metadata_from_web_api(
                 release_date,
                 explicit: payload.get("explicit").and_then(|v| v.as_bool()),
                 tracks: None,
+                entries: None,
                 total_tracks: None,
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some("spotify-web-api".to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Album => {
@@ -1162,10 +1198,16 @@ pub fn build_media_metadata_from_web_api(
                 release_date,
                 explicit: None,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner: None,
                 partial_tracks,
                 metadata_source: Some("spotify-web-api".to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Playlist => {
@@ -1287,10 +1329,16 @@ pub fn build_media_metadata_from_web_api(
                 release_date: None,
                 explicit: None,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner,
                 partial_tracks,
                 metadata_source: Some("spotify-web-api".to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
         SpotifyContentType::Artist => {
@@ -1394,10 +1442,16 @@ pub fn build_media_metadata_from_web_api(
                 release_date: None,
                 explicit: None,
                 tracks: Some(tracks),
+                entries: None,
                 total_tracks,
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some("spotify-web-api".to_string()),
+                is_direct_file: None,
+                direct_file_size: None,
+                direct_mime_type: None,
+                direct_filename: None,
+                accepts_ranges: None,
             })
         }
     }
@@ -2099,6 +2153,122 @@ mod tests {
         assert_ne!(meta.title, "Spotify Music Track");
         assert_ne!(meta.uploader.as_deref(), Some("Spotify Artist"));
         assert!(!meta.thumbnail.as_deref().unwrap_or("").contains("favicon"));
+        assert!(meta.entries.is_none());
+        assert!(meta.is_direct_file.is_none());
+        assert!(meta.direct_file_size.is_none());
+        assert!(meta.direct_mime_type.is_none());
+        assert!(meta.direct_filename.is_none());
+        assert!(meta.accepts_ranges.is_none());
+    }
+
+    #[test]
+    fn test_spotify_album_playlist_artist_oembed_and_web_api_builders() {
+        let album_entity = serde_json::json!({
+            "id": "1DFixLWuPkv3KT3TnV35m3",
+            "title": "Emotion",
+            "artists": [{ "name": "Carly Rae Jepsen" }],
+            "releaseDate": { "isoString": "2015-09-25T00:00:00Z" },
+            "visualIdentity": { "image": [{ "url": "https://i.scdn.co/image/album640", "maxWidth": 640 }] },
+            "trackList": [
+                { "title": "Run Away with Me", "subtitle": "Carly Rae Jepsen", "duration": 251000, "uri": "spotify:track:aaa111222333" },
+                { "title": "Emotion", "subtitle": "Carly Rae Jepsen", "duration": 197000, "uri": "spotify:track:bbb111222333" }
+            ]
+        });
+        let album_meta = build_media_metadata_from_entity(
+            "https://open.spotify.com/album/1DFixLWuPkv3KT3TnV35m3",
+            "1DFixLWuPkv3KT3TnV35m3",
+            SpotifyContentType::Album,
+            &album_entity,
+            None,
+            "spotify-embed",
+        )
+        .unwrap();
+        assert_eq!(album_meta.content_type.as_deref(), Some("album"));
+        assert_eq!(album_meta.total_tracks, Some(2));
+        assert!(album_meta.entries.is_none());
+        assert!(album_meta.is_direct_file.is_none());
+
+        let playlist_entity = serde_json::json!({
+            "id": "37i9dQZF1DXcBWIGoYBM5M",
+            "title": "Today's Top Hits",
+            "subtitle": "Spotify",
+            "trackList": [
+                { "title": "Track One", "subtitle": "Artist One", "duration": 180000, "uri": "spotify:track:track1234567890" }
+            ]
+        });
+        let og_pl = SpotifyOpenGraphMeta {
+            song_count: Some(50),
+            ..SpotifyOpenGraphMeta::default()
+        };
+        let playlist_meta = build_media_metadata_from_entity(
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+            "37i9dQZF1DXcBWIGoYBM5M",
+            SpotifyContentType::Playlist,
+            &playlist_entity,
+            Some(&og_pl),
+            "spotify-embed",
+        )
+        .unwrap();
+        assert_eq!(playlist_meta.owner.as_deref(), Some("Spotify"));
+        assert_eq!(playlist_meta.partial_tracks, Some(true));
+        assert!(playlist_meta.accepts_ranges.is_none());
+
+        let artist_entity = serde_json::json!({
+            "id": "0gxyHStUsqpMadRV0Di1Qt",
+            "title": "Rick Astley",
+            "trackList": [
+                { "title": "Never Gonna Give You Up", "subtitle": "Rick Astley", "duration": 213000, "uri": "spotify:track:4cOdK2wGLETKBW3PvgPWqT" }
+            ]
+        });
+        let artist_meta = build_media_metadata_from_entity(
+            "https://open.spotify.com/artist/0gxyHStUsqpMadRV0Di1Qt",
+            "0gxyHStUsqpMadRV0Di1Qt",
+            SpotifyContentType::Artist,
+            &artist_entity,
+            None,
+            "spotify-embed",
+        )
+        .unwrap();
+        assert_eq!(artist_meta.content_type.as_deref(), Some("artist"));
+        assert_eq!(artist_meta.tracks.as_ref().unwrap().len(), 1);
+
+        let oembed_meta = build_media_metadata_from_oembed(
+            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+            "4cOdK2wGLETKBW3PvgPWqT",
+            SpotifyContentType::Track,
+            &serde_json::json!({
+                "title": "Never Gonna Give You Up",
+                "thumbnail_url": "https://open.spotifycdn.com/cdn/images/favicon.0f31d2ea.ico"
+            }),
+        )
+        .unwrap();
+        assert!(oembed_meta.thumbnail.is_none());
+        assert_eq!(oembed_meta.partial_tracks, Some(true));
+        assert!(oembed_meta.direct_filename.is_none());
+
+        let web_track = build_media_metadata_from_web_api(
+            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+            "4cOdK2wGLETKBW3PvgPWqT",
+            SpotifyContentType::Track,
+            &serde_json::json!({
+                "id": "4cOdK2wGLETKBW3PvgPWqT",
+                "name": "Never Gonna Give You Up",
+                "duration_ms": 213573,
+                "track_number": 1,
+                "explicit": false,
+                "artists": [{ "name": "Rick Astley" }],
+                "album": {
+                    "name": "Whenever You Need Somebody",
+                    "release_date": "1987-11-12",
+                    "images": [{ "url": "https://i.scdn.co/image/rick640", "width": 640 }]
+                }
+            }),
+            None,
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&web_track).unwrap();
+        let roundtrip: MediaMetadata = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtrip, web_track);
     }
 
     #[test]

@@ -4,12 +4,12 @@ use crate::logging;
 use crate::models::{
     AppSettings, CategoryItem, CookieStatus, CookieTestResult, CookieValidationResult,
     CreateTaskPayload, DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask,
-    EngineStatusMap, EngineUpdateResult, ManagedEngineInfo, MediaMetadata, NotificationItem,
-    TaskLogEntry, TaskPriority, TaskStatus,
+    EngineStatusMap, EngineUpdateInfo, EngineUpdateResult, ManagedEngineInfo, MediaMetadata,
+    NotificationItem, TaskLogEntry, TaskPriority, TaskStatus,
 };
 use crate::process;
 use crate::state::AppState;
-use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -762,33 +762,45 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
 }
 
 #[tauri::command]
-pub async fn check_engine_updates() -> Result<serde_json::Value, String> {
+pub async fn check_engine_updates() -> Result<HashMap<String, EngineUpdateInfo>, String> {
     let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
         .await
         .map_err(|e| format!("Update check failed: {}", e))?;
 
-    Ok(serde_json::json!({
-        "ytdlp": {
-            "currentVersion": status.ytdlp.version,
-            "latestVersion": status.ytdlp.version,
-            "updateAvailable": !status.ytdlp.available
+    let mut updates = HashMap::new();
+    updates.insert(
+        "ytdlp".to_string(),
+        EngineUpdateInfo {
+            current_version: status.ytdlp.version.clone(),
+            latest_version: status.ytdlp.version,
+            update_available: !status.ytdlp.available,
         },
-        "spotdl": {
-            "currentVersion": status.spotdl.version,
-            "latestVersion": status.spotdl.version,
-            "updateAvailable": !status.spotdl.available
+    );
+    updates.insert(
+        "spotdl".to_string(),
+        EngineUpdateInfo {
+            current_version: status.spotdl.version.clone(),
+            latest_version: status.spotdl.version,
+            update_available: !status.spotdl.available,
         },
-        "ffmpeg": {
-            "currentVersion": status.ffmpeg.version,
-            "latestVersion": status.ffmpeg.version,
-            "updateAvailable": !status.ffmpeg.available
+    );
+    updates.insert(
+        "ffmpeg".to_string(),
+        EngineUpdateInfo {
+            current_version: status.ffmpeg.version.clone(),
+            latest_version: status.ffmpeg.version,
+            update_available: !status.ffmpeg.available,
         },
-        "ffprobe": {
-            "currentVersion": status.ffprobe.version,
-            "latestVersion": status.ffprobe.version,
-            "updateAvailable": !status.ffprobe.available
-        }
-    }))
+    );
+    updates.insert(
+        "ffprobe".to_string(),
+        EngineUpdateInfo {
+            current_version: status.ffprobe.version.clone(),
+            latest_version: status.ffprobe.version,
+            update_available: !status.ffprobe.available,
+        },
+    );
+    Ok(updates)
 }
 
 #[tauri::command]
@@ -1403,13 +1415,20 @@ async fn run_direct_download_task(app: &AppHandle, task_id: &str) {
         }
     }
 
+    let total_elapsed = started.elapsed().as_secs();
     task.status = TaskStatus::Completed;
     task.progress_percentage = 100.0;
     task.percentage_known = true;
     task.downloaded_bytes = part_size;
     task.total_bytes = part_size;
     task.remaining_bytes = 0;
+    task.elapsed_seconds = total_elapsed;
     task.speed_bytes_per_sec = 0.0;
+    task.avg_speed_bytes_per_sec = if total_elapsed > 0 {
+        part_size as f64 / total_elapsed as f64
+    } else {
+        part_size as f64
+    };
     task.speed_str = "0 B/s".to_string();
     task.eta_seconds = Some(0);
     task.eta_str = "Finished".to_string();
@@ -1418,6 +1437,17 @@ async fn run_direct_download_task(app: &AppHandle, task_id: &str) {
     task.completed_at = Some(chrono::Utc::now().to_rfc3339());
     state.upsert_task(&task);
     let _ = app.emit("task_updated", &task);
+
+    let notif = NotificationItem {
+        id: format!("notif_{}", chrono::Utc::now().timestamp_millis()),
+        r#type: "success".to_string(),
+        title: "Download Complete".to_string(),
+        message: format!("'{}' downloaded successfully.", task.title),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        task_id: Some(task.id.clone()),
+    };
+    state.add_notification(&notif);
+    let _ = app.emit("notification", &notif);
 }
 
 fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> Option<PathBuf> {

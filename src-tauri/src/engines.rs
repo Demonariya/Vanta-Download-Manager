@@ -1375,6 +1375,8 @@ impl EngineManager {
                 } else {
                     "Direct HTTP".to_string()
                 }),
+                tbr: None,
+                abr: None,
                 is_audio_only: false,
                 is_video_only: false,
             }],
@@ -1647,6 +1649,8 @@ impl EngineManager {
                     .get("format_note")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let tbr = f.get("tbr").and_then(|v| v.as_f64());
+                let abr = f.get("abr").and_then(|v| v.as_f64());
 
                 let is_audio_only =
                     vcodec.as_deref() == Some("none") && acodec.as_deref() != Some("none");
@@ -1665,6 +1669,8 @@ impl EngineManager {
                     filesize,
                     filesize_approx,
                     format_note,
+                    tbr,
+                    abr,
                     is_audio_only,
                     is_video_only,
                 });
@@ -1691,7 +1697,13 @@ impl EngineManager {
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| validated_url.clone());
-                        let dur = e.get("duration").and_then(|v| v.as_u64());
+                        let dur = e.get("duration").and_then(|v| {
+                            v.as_u64().or_else(|| {
+                                v.as_f64()
+                                    .filter(|f| f.is_finite() && *f >= 0.0)
+                                    .map(|f| f.round() as u64)
+                            })
+                        });
                         let dur_str = dur.map(|d| {
                             let m = (d % 3600) / 60;
                             let s = d % 60;
@@ -1746,7 +1758,13 @@ impl EngineManager {
                 .get("uploader")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            duration: val.get("duration").and_then(|v| v.as_u64()),
+            duration: val.get("duration").and_then(|v| {
+                v.as_u64().or_else(|| {
+                    v.as_f64()
+                        .filter(|f| f.is_finite() && *f >= 0.0)
+                        .map(|f| f.round() as u64)
+                })
+            }),
             duration_string: val
                 .get("duration_string")
                 .and_then(|v| v.as_str())
