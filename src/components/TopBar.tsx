@@ -93,7 +93,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <div className="relative flex-1 min-w-0">
           <input
             type="text"
-            placeholder="Paste video, Spotify, or direct file URL..."
+            placeholder="Paste video or music URL (YouTube, Spotify, etc.)..."
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
             className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs py-1.5 pl-3 pr-8 text-[var(--vanta-text)] placeholder-[var(--vanta-muted)] transition-colors truncate"

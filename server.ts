@@ -16,12 +16,9 @@ import {
   deleteDownloadedFile,
   moveTaskOrderInDb,
   renameTaskFileInDb,
-  verifyTaskChecksumInDb,
-  getCategories,
-  saveCategory,
-  deleteCategory,
   getSettings,
   saveSettings,
+  resetSettings,
   getNotifications,
   clearNotifications,
 } from './server/db';
@@ -33,12 +30,11 @@ import {
   getDiagnosticLogInfo,
 } from './server/cookies';
 import { validateNetscapeCookies } from './src/utils/cookie-validator';
-import { engineManager } from './server/engineManager';
+import { engineManager, validatePythonExecutable } from './server/engineManager';
 import { spotifyMetadataService } from './server/spotify';
 import { queueController } from './server/queueController';
 import { DownloadTask } from './src/types';
-import { determineEngineForUrl } from './src/utils/engine-parser';
-import { matchCategoryForTask } from './src/utils/categories';
+import { determineEngineForUrl, validateMediaUrl } from './src/utils/engine-parser';
 
 dotenv.config();
 
@@ -207,6 +203,10 @@ async function startServer() {
         lower.includes('url cannot be empty') ||
         lower.includes('invalid url') ||
         lower.includes('unsupported url scheme') ||
+        lower.includes('unsupported file') ||
+        lower.includes('only supports video and music') ||
+        lower.includes('downloads music and video only') ||
+        lower.includes('files are not supported') ||
         lower.includes('malformed url') ||
         lower.includes('malformed spotify') ||
         lower.includes('unsupported spotify') ||
@@ -232,31 +232,6 @@ async function startServer() {
     }
     const cancelled = engineManager.cancelInspection(requestId);
     res.json({ cancelled });
-  });
-
-  // Categories API
-  app.get('/api/categories', (_req: Request, res: Response) => {
-    res.json(getCategories());
-  });
-
-  app.post('/api/categories', (req: Request, res: Response) => {
-    const { id, name, color, extensions, destination_dir } = req.body || {};
-    if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ error: 'Category name is required' });
-    }
-    const saved = saveCategory({
-      id,
-      name: name.trim(),
-      color: typeof color === 'string' ? color : '#58a6ff',
-      extensions: Array.isArray(extensions) ? extensions : [],
-      destination_dir: typeof destination_dir === 'string' ? destination_dir : undefined,
-    });
-    res.json(saved);
-  });
-
-  app.delete('/api/categories/:id', (req: Request, res: Response) => {
-    deleteCategory(req.params.id);
-    res.json({ success: true });
   });
 
   // Tasks API
@@ -287,9 +262,8 @@ async function startServer() {
       audio_channels,
       is_lossy_source,
       custom_filename,
-      category_id,
       playlist_mode,
-      expected_sha256,
+      selected_items,
       total_bytes,
     } = req.body;
 
@@ -297,9 +271,13 @@ async function startServer() {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    const trimmedUrl = url.trim();
+    const urlCheck = validateMediaUrl(url.trim());
+    if (!urlCheck.valid) {
+      return res.status(400).json({ error: urlCheck.error });
+    }
+    const trimmedUrl = urlCheck.normalized;
+
     const settings = getSettings();
-    const categories = getCategories();
     const engine = determineEngineForUrl(trimmedUrl);
 
     let resolvedUrl = trimmedUrl;
@@ -346,11 +324,14 @@ async function startServer() {
       }
     }
 
-    const resolvedExt = ext || (is_audio_only || engine === 'spotdl' ? 'mp3' : 'mp4');
     const resolvedIsAudio = Boolean(is_audio_only || engine === 'spotdl');
-    const matchedCat =
-      (category_id ? categories.find((c) => c.id === category_id) : null) ||
-      matchCategoryForTask(resolvedExt, resolvedIsAudio, categories);
+    const resolvedExt = ext || (resolvedIsAudio ? settings.default_audio_format || 'mp3' : 'mp4');
+
+    const normalizedSelectedItems = Array.isArray(selected_items)
+      ? selected_items.map((item: any) => String(item).trim()).filter(Boolean)
+      : [];
+    const tracksRequested =
+      normalizedSelectedItems.length > 0 ? normalizedSelectedItems.length : undefined;
 
     const existingTasks = getAllTasks();
     const maxOrder = existingTasks.reduce((max, t) => Math.max(max, t.queue_order || 0), 0);
@@ -391,11 +372,13 @@ async function startServer() {
       audio_bit_depth: audio_bit_depth ? parseInt(audio_bit_depth, 10) : settings.default_audio_bit_depth,
       audio_channels: audio_channels ? parseInt(audio_channels, 10) : undefined,
       is_lossy_source: is_lossy_source !== undefined ? Boolean(is_lossy_source) : engine === 'spotdl',
-      output_path: output_path || matchedCat?.destination_dir || settings.download_dir,
+      output_path: (typeof output_path === 'string' && output_path.trim()) || settings.download_dir,
       custom_filename: typeof custom_filename === 'string' && custom_filename.trim() ? custom_filename.trim() : null,
-      category_id: matchedCat?.id || null,
       playlist_mode: playlist_mode === 'playlist' ? 'playlist' : 'single',
-      expected_sha256: typeof expected_sha256 === 'string' && expected_sha256.trim() ? expected_sha256.trim().toLowerCase() : null,
+      selected_items: normalizedSelectedItems.length > 0 ? normalizedSelectedItems : undefined,
+      tracks_requested: tracksRequested ?? undefined,
+      tracks_completed: tracksRequested ? 0 : undefined,
+      tracks_failed: tracksRequested ? 0 : undefined,
       logs: [
         {
           timestamp: new Date().toISOString(),
@@ -421,9 +404,8 @@ async function startServer() {
     const task = getTaskById(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
-    const { priority, category_id, custom_filename } = req.body || {};
+    const { priority, custom_filename } = req.body || {};
     if (priority) task.priority = priority;
-    if (category_id !== undefined) task.category_id = category_id || null;
     if (custom_filename !== undefined) task.custom_filename = custom_filename || null;
 
     upsertTask(task);
@@ -447,17 +429,6 @@ async function startServer() {
       res.json(updated);
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Rename failed' });
-    }
-  });
-
-  app.post('/api/tasks/:id/verify-checksum', async (req: Request, res: Response) => {
-    try {
-      const expected = typeof req.body?.expectedSha256 === 'string' ? req.body.expectedSha256 : undefined;
-      const result = await verifyTaskChecksumInDb(req.params.id, expected);
-      queueController.broadcast('task_updated', result.task);
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Checksum verification failed' });
     }
   });
 
@@ -641,15 +612,47 @@ async function startServer() {
     res.json(getDiagnosticLogInfo(limit));
   });
 
-  // Settings
+  // Settings & Python Validation
   app.get('/api/settings', (_req: Request, res: Response) => {
-    res.json(getSettings());
+    try {
+      res.json(getSettings());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed reading settings' });
+    }
   });
 
   app.put('/api/settings', (req: Request, res: Response) => {
-    const updated = saveSettings(req.body);
-    queueController.broadcast('settings_updated', updated);
-    res.json(updated);
+    try {
+      const updated = saveSettings(req.body || {});
+      queueController.broadcast('settings_updated', updated);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Failed saving settings' });
+    }
+  });
+
+  app.post('/api/settings/reset', (_req: Request, res: Response) => {
+    try {
+      const reset = resetSettings();
+      queueController.broadcast('settings_updated', reset);
+      res.json(reset);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed resetting settings' });
+    }
+  });
+
+  app.post('/api/python/validate', async (req: Request, res: Response) => {
+    try {
+      const pythonPath = typeof req.body?.pythonPath === 'string' ? req.body.pythonPath : '';
+      const result = await validatePythonExecutable(pythonPath);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        valid: false,
+        executablePath: req.body?.pythonPath || '',
+        error: err.message || 'Python validation failed',
+      });
+    }
   });
 
   // Notifications

@@ -629,11 +629,6 @@ pub fn build_media_metadata_from_entity(
             owner: None,
             partial_tracks: None,
             metadata_source: Some(source.to_string()),
-            is_direct_file: None,
-            direct_file_size: None,
-            direct_mime_type: None,
-            direct_filename: None,
-            accepts_ranges: None,
         });
     }
 
@@ -768,11 +763,6 @@ pub fn build_media_metadata_from_entity(
                 owner: None,
                 partial_tracks,
                 metadata_source: Some(source.to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Playlist => {
@@ -837,11 +827,6 @@ pub fn build_media_metadata_from_entity(
                 owner,
                 partial_tracks,
                 metadata_source: Some(source.to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Artist => {
@@ -881,11 +866,6 @@ pub fn build_media_metadata_from_entity(
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some(source.to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Track => unreachable!(),
@@ -940,11 +920,6 @@ pub fn build_media_metadata_from_oembed(
         owner: None,
         partial_tracks: Some(true),
         metadata_source: Some("spotify-oembed".to_string()),
-        is_direct_file: None,
-        direct_file_size: None,
-        direct_mime_type: None,
-        direct_filename: None,
-        accepts_ranges: None,
     })
 }
 
@@ -1064,11 +1039,6 @@ pub fn build_media_metadata_from_web_api(
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some("spotify-web-api".to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Album => {
@@ -1203,11 +1173,6 @@ pub fn build_media_metadata_from_web_api(
                 owner: None,
                 partial_tracks,
                 metadata_source: Some("spotify-web-api".to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Playlist => {
@@ -1334,11 +1299,6 @@ pub fn build_media_metadata_from_web_api(
                 owner,
                 partial_tracks,
                 metadata_source: Some("spotify-web-api".to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
         SpotifyContentType::Artist => {
@@ -1447,11 +1407,6 @@ pub fn build_media_metadata_from_web_api(
                 owner: None,
                 partial_tracks: None,
                 metadata_source: Some("spotify-web-api".to_string()),
-                is_direct_file: None,
-                direct_file_size: None,
-                direct_mime_type: None,
-                direct_filename: None,
-                accepts_ranges: None,
             })
         }
     }
@@ -2154,11 +2109,6 @@ mod tests {
         assert_ne!(meta.uploader.as_deref(), Some("Spotify Artist"));
         assert!(!meta.thumbnail.as_deref().unwrap_or("").contains("favicon"));
         assert!(meta.entries.is_none());
-        assert!(meta.is_direct_file.is_none());
-        assert!(meta.direct_file_size.is_none());
-        assert!(meta.direct_mime_type.is_none());
-        assert!(meta.direct_filename.is_none());
-        assert!(meta.accepts_ranges.is_none());
     }
 
     #[test]
@@ -2186,7 +2136,6 @@ mod tests {
         assert_eq!(album_meta.content_type.as_deref(), Some("album"));
         assert_eq!(album_meta.total_tracks, Some(2));
         assert!(album_meta.entries.is_none());
-        assert!(album_meta.is_direct_file.is_none());
 
         let playlist_entity = serde_json::json!({
             "id": "37i9dQZF1DXcBWIGoYBM5M",
@@ -2211,7 +2160,6 @@ mod tests {
         .unwrap();
         assert_eq!(playlist_meta.owner.as_deref(), Some("Spotify"));
         assert_eq!(playlist_meta.partial_tracks, Some(true));
-        assert!(playlist_meta.accepts_ranges.is_none());
 
         let artist_entity = serde_json::json!({
             "id": "0gxyHStUsqpMadRV0Di1Qt",
@@ -2244,7 +2192,6 @@ mod tests {
         .unwrap();
         assert!(oembed_meta.thumbnail.is_none());
         assert_eq!(oembed_meta.partial_tracks, Some(true));
-        assert!(oembed_meta.direct_filename.is_none());
 
         let web_track = build_media_metadata_from_web_api(
             "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",

@@ -10,9 +10,8 @@ import {
   ChevronLeft,
   Download,
   X,
-  Folder,
 } from 'lucide-react';
-import { CategoryItem, DownloadTask, EngineStatusMap } from '../types';
+import { EngineStatusMap } from '../types';
 
 export type ActiveTab =
   | 'downloads'
@@ -26,10 +25,6 @@ interface SidebarProps {
   setActiveTab: (tab: ActiveTab) => void;
   engineStatus: EngineStatusMap | null;
   activeCount: number;
-  tasks: DownloadTask[];
-  categories: CategoryItem[];
-  selectedCategoryId: string | null;
-  onSelectCategory: (id: string | null) => void;
   isCollapsed: boolean;
   setIsCollapsed: (collapsed: boolean) => void;
   isMobileOpen: boolean;
@@ -41,10 +36,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveTab,
   engineStatus,
   activeCount,
-  tasks,
-  categories,
-  selectedCategoryId,
-  onSelectCategory,
   isCollapsed,
   setIsCollapsed,
   isMobileOpen,
@@ -75,9 +66,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const handleNavClick = (id: ActiveTab) => {
     setActiveTab(id);
-    if (id !== 'downloads') {
-      onSelectCategory(null);
-    }
     setIsMobileOpen(false);
   };
 
@@ -143,15 +131,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <nav className="px-2.5 py-3 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id && !(item.id === 'downloads' && selectedCategoryId);
+            const isActive = activeTab === item.id;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => {
-                  if (item.id === 'downloads') onSelectCategory(null);
-                  handleNavClick(item.id);
-                }}
+                onClick={() => handleNavClick(item.id)}
                 aria-label={item.label}
                 title={isCollapsed && !isDrawer ? item.label : undefined}
                 className={`w-full flex items-center ${
@@ -175,45 +160,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             );
           })}
         </nav>
-
-        {/* Categories Filter List */}
-        {(!isCollapsed || isDrawer) && categories.length > 0 && (
-          <div className="px-2.5 pt-3 pb-2 border-t border-[var(--vanta-border)]">
-            <p className="px-3 pb-1.5 text-[10px] font-mono uppercase tracking-wider text-[var(--vanta-muted)]">
-              Categories
-            </p>
-            <div className="space-y-0.5">
-              {categories.map((cat) => {
-                const count = tasks.filter((t) => t.category_id === cat.id).length;
-                const isSelected = activeTab === 'downloads' && selectedCategoryId === cat.id;
-                return (
-                  <button
-                    key={cat.id}
-                    type="button"
-                    onClick={() => {
-                      onSelectCategory(isSelected ? null : cat.id);
-                      setActiveTab('downloads');
-                      setIsMobileOpen(false);
-                    }}
-                    className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors whitespace-nowrap shrink-0 ${
-                      isSelected
-                        ? 'bg-[var(--vanta-accent)]/12 text-[var(--vanta-accent)] font-medium'
-                        : 'text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2 min-w-0">
-                      <Folder className="w-3.5 h-3.5 shrink-0 text-[var(--vanta-muted)]" />
-                      <span className="truncate">{cat.name}</span>
-                    </span>
-                    <span className="text-[11px] font-mono tabular-nums text-[var(--vanta-muted)]">
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Engine Status Footer */}

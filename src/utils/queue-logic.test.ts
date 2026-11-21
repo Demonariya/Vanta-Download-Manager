@@ -120,26 +120,27 @@ test('shouldAutoRetry checks retry limit', () => {
   assert.equal(shouldAutoRetry(task, 3), false);
 });
 
-test('filterAndSortTasks and computeHistoryStats derive exact real totals', () => {
+test('filterAndSortTasks supports audio/video filters without categories and computeHistoryStats derives exact totals', () => {
   const tasks = [
     makeTask('1', {
       title: 'Alpha Video',
       status: 'completed',
+      is_audio_only: false,
       total_bytes: 1000,
       elapsed_seconds: 10,
-      category_id: 'cat_video',
     }),
     makeTask('2', {
       title: 'Beta Track',
       status: 'completed',
+      engine: 'spotdl',
       is_audio_only: true,
       total_bytes: 2000,
       elapsed_seconds: 20,
-      category_id: 'cat_music',
     }),
     makeTask('3', {
       title: 'Broken Stream',
       status: 'failed',
+      is_audio_only: false,
       total_bytes: 500,
     }),
   ];
@@ -147,6 +148,13 @@ test('filterAndSortTasks and computeHistoryStats derive exact real totals', () =
   const audioOnly = filterAndSortTasks(tasks, { statusFilter: 'audio' });
   assert.equal(audioOnly.length, 1);
   assert.equal(audioOnly[0].id, '2');
+
+  const videoOnly = filterAndSortTasks(tasks, { statusFilter: 'video' });
+  assert.equal(videoOnly.length, 2);
+  assert.deepEqual(
+    videoOnly.map((t) => t.id).sort(),
+    ['1', '3']
+  );
 
   const stats = computeHistoryStats(tasks);
   assert.equal(stats.totalCompleted, 2);

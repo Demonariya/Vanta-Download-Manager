@@ -10,32 +10,31 @@ import {
   CheckCircle2,
   XCircle,
   FolderOpen,
-  Plus,
   Sun,
   Moon,
   Monitor,
+  Terminal,
+  RotateCcw,
 } from 'lucide-react';
 import {
   AppSettings,
-  CategoryItem,
   ConflictStrategy,
   CookieStatus,
   CookieTestResult,
   CookieValidationResult,
+  PythonValidationResult,
   ThemeMode,
 } from '../types';
 import { api } from '../services/api';
 import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
-import { normalizeExtensionsList } from '../utils/categories';
 import { DEFAULT_SCHEDULER_SETTINGS } from '../utils/scheduler';
 import { ConfirmDialog } from './ConfirmDialog';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
-  categories: CategoryItem[];
-  onSaveSettings: (settings: Partial<AppSettings>) => Promise<void> | void;
-  onCategoriesChanged: () => void;
+  onSaveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings | void> | void;
+  onResetSettings?: () => Promise<AppSettings | void> | void;
 }
 
 type SettingsSection =
@@ -44,7 +43,7 @@ type SettingsSection =
   | 'connection'
   | 'scheduler'
   | 'media'
-  | 'categories'
+  | 'python'
   | 'cookies'
   | 'about';
 
@@ -61,20 +60,19 @@ const DAYS_OF_WEEK = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
-  categories,
   onSaveSettings,
-  onCategoriesChanged,
+  onResetSettings,
 }) => {
   const [section, setSection] = useState<SettingsSection>('general');
   const [form, setForm] = useState<AppSettings | null>(settings);
+  const [isSaving, setIsSaving] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
-  // Category editor state
-  const [newCatName, setNewCatName] = useState('');
-  const [newCatExts, setNewCatExts] = useState('');
-  const [newCatDir, setNewCatDir] = useState('');
-  const [catError, setCatError] = useState<string | null>(null);
-  const [deleteCatTarget, setDeleteCatTarget] = useState<CategoryItem | null>(null);
+  // Python executable configuration state
+  const [validatingPython, setValidatingPython] = useState(false);
+  const [pythonValidation, setPythonValidation] = useState<PythonValidationResult | null>(null);
 
   // Cookie state
   const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
@@ -132,6 +130,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (dir) {
       setForm({ ...form, download_dir: dir });
     }
+  };
+
+  const handleBrowsePython = async () => {
+    const selected = await api.browsePythonExecutable();
+    if (selected) {
+      setForm({ ...form, python_path: selected });
+      setPythonValidation(null);
+      setSaveError(null);
+    }
+  };
+
+  const handleValidatePython = async () => {
+    setValidatingPython(true);
+    setSaveError(null);
+    try {
+      const res = await api.validatePythonExecutable(form.python_path || '');
+      setPythonValidation(res);
+    } catch (err: any) {
+      setPythonValidation({
+        valid: false,
+        executablePath: form.python_path || 'python',
+        error: err?.message || 'Failed to validate Python executable.',
+      });
+    } finally {
+      setValidatingPython(false);
+    }
+  };
+
+  const handleClearPython = () => {
+    setForm({ ...form, python_path: '' });
+    setPythonValidation(null);
+    setSaveError(null);
   };
 
   const handleTestCookies = async () => {
@@ -220,37 +250,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleCreateCategory = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setCatError(null);
-    if (!newCatName.trim()) {
-      setCatError('Category name is required.');
-      return;
-    }
+    setSaveError(null);
+    setIsSaved(false);
+    setIsSaving(true);
     try {
-      await api.saveCategory({
-        name: newCatName.trim(),
-        extensions: normalizeExtensionsList(newCatExts),
-        destination_dir: newCatDir.trim() || undefined,
+      const saved = await onSaveSettings({
+        ...form,
+        python_path: form.python_path?.trim() || '',
+        cookies_profile: form.cookies_profile?.trim() || undefined,
       });
-      setNewCatName('');
-      setNewCatExts('');
-      setNewCatDir('');
-      onCategoriesChanged();
+      if (saved && typeof saved === 'object') {
+        setForm({
+          ...saved,
+          scheduler: saved.scheduler || DEFAULT_SCHEDULER_SETTINGS,
+        });
+      }
+      await refreshCookieStatus();
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 2400);
     } catch (err: any) {
-      setCatError(err?.message || 'Failed saving category.');
+      setSaveError(err?.message || 'Failed to save settings.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await onSaveSettings({
-      ...form,
-      cookies_profile: form.cookies_profile?.trim() || undefined,
-    });
-    await refreshCookieStatus();
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2200);
+  const handleConfirmReset = async () => {
+    setConfirmResetOpen(false);
+    if (!onResetSettings) return;
+    setSaveError(null);
+    setIsSaving(true);
+    try {
+      const reset = await onResetSettings();
+      if (reset && typeof reset === 'object') {
+        setForm({
+          ...reset,
+          scheduler: reset.scheduler || DEFAULT_SCHEDULER_SETTINGS,
+        });
+      }
+      setPythonValidation(null);
+      await refreshCookieStatus();
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 2400);
+    } catch (err: any) {
+      setSaveError(err?.message || 'Failed resetting settings to defaults.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const sectionTabs: Array<{ id: SettingsSection; label: string }> = [
@@ -259,7 +307,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     { id: 'connection', label: 'Connection & Limits' },
     { id: 'scheduler', label: 'Queue & Scheduler' },
     { id: 'media', label: 'Audio & Video' },
-    { id: 'categories', label: 'Categories' },
+    { id: 'python', label: 'Python Configuration' },
     { id: 'cookies', label: 'Cookies & Auth' },
     { id: 'about', label: 'About' },
   ];
@@ -273,18 +321,48 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             Settings &amp; Preferences
           </h1>
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
-            Appearance, storage, connection limits, scheduler windows, categories, and authentication
+            Appearance, storage, connection limits, scheduler windows, Python runtime, and authentication
           </p>
         </div>
 
-        <button
-          type="submit"
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-        >
-          {isSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-          <span>{isSaved ? 'Saved' : 'Save Changes'}</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {onResetSettings && (
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={() => setConfirmResetOpen(true)}
+              className="px-3 py-2 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] disabled:opacity-50 border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset to Defaults</span>
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={isSaving}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+          >
+            {isSaving ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : isSaved ? (
+              <Check className="w-3.5 h-3.5" />
+            ) : (
+              <Save className="w-3.5 h-3.5" />
+            )}
+            <span>{isSaving ? 'Saving...' : isSaved ? 'Saved' : 'Save Changes'}</span>
+          </button>
+        </div>
       </div>
+
+      {saveError && (
+        <div
+          role="alert"
+          className="p-3 rounded-xl border border-red-500/35 bg-red-500/10 text-xs text-red-600 dark:text-[#f85149] flex items-center gap-2"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{saveError}</span>
+        </div>
+      )}
 
       {/* Section Navigation */}
       <div className="flex items-center gap-1 overflow-x-auto p-1 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
@@ -328,10 +406,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     key={id}
                     type="button"
-                    onClick={() => {
+                    onClick={async () => {
                       const nextTheme = id as ThemeMode;
                       setForm({ ...form, theme: nextTheme });
-                      onSaveSettings({ theme: nextTheme });
+                      setSaveError(null);
+                      try {
+                        await onSaveSettings({ theme: nextTheme });
+                      } catch (err: any) {
+                        setSaveError(err?.message || 'Failed saving theme preference.');
+                      }
                     }}
                     className={`p-3 rounded-lg border flex items-center justify-center gap-2 font-medium transition-colors ${
                       selected
@@ -358,7 +441,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
                 />
                 <span className="text-[var(--vanta-text-secondary)]">
-                  Prompt when supported URL is copied to clipboard
+                  Prompt when supported media URL is copied to clipboard
                 </span>
               </label>
 
@@ -396,7 +479,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
                 />
                 <span className="text-[var(--vanta-text-secondary)]">
-                  Verify completed files &amp; codecs with FFprobe
+                  Verify completed media files &amp; codecs with FFprobe
                 </span>
               </label>
             </div>
@@ -767,73 +850,108 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* Section 6: Categories CRUD */}
-      {section === 'categories' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
-          <div>
-            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Download Categories</h2>
-            <p className="text-[var(--vanta-muted)] mt-0.5">
-              Automatically classify new downloads by file extension and route them to custom subfolders.
-            </p>
+      {/* Section 6: Python Configuration (for spotDL) */}
+      {section === 'python' && (
+        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+          <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--vanta-border)]">
+            <div>
+              <h2 className="text-sm font-semibold text-[var(--vanta-text)] flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-[var(--vanta-accent)]" />
+                <span>Python Configuration (spotDL Environment)</span>
+              </h2>
+              <p className="text-[11px] text-[var(--vanta-muted)] mt-1">
+                Configure the Python 3 interpreter used to create and run VANTA&apos;s isolated spotDL virtual environment inside Engine\spotdl\venv. When a custom path is provided, VANTA validates it strictly without falling back to PATH.
+              </p>
+            </div>
           </div>
 
-          <div className="divide-y divide-[var(--vanta-border)] rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
-            {categories.map((cat) => (
-              <div key={cat.id} className="p-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="font-semibold text-[var(--vanta-text)]">{cat.name}</p>
-                  <p className="font-mono text-[11px] text-[var(--vanta-muted)] truncate">
-                    Extensions: {cat.extensions.join(', ') || 'None'}
-                    {cat.destination_dir ? ` · Folder: ${cat.destination_dir}` : ''}
-                  </p>
-                </div>
+          <div className="space-y-2">
+            <label
+              htmlFor="python-executable-path"
+              className="font-medium text-[var(--vanta-text-secondary)] block"
+            >
+              Python Executable Path (Optional — leave blank for auto-detection)
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                id="python-executable-path"
+                type="text"
+                value={form.python_path || ''}
+                onChange={(e) => {
+                  setForm({ ...form, python_path: e.target.value });
+                  setPythonValidation(null);
+                }}
+                placeholder="C:\\Program Files\\Python312\\python.exe or /usr/bin/python3"
+                className="flex-1 min-w-[240px] bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              />
+              {api.isTauri() && (
                 <button
                   type="button"
-                  onClick={() => setDeleteCatTarget(cat)}
-                  className="p-1.5 text-[var(--vanta-muted)] hover:text-red-600 dark:hover:text-[#f85149] rounded transition-colors shrink-0"
-                  title="Delete category"
+                  onClick={handleBrowsePython}
+                  className="px-3 py-2 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-text)] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  <span>Browse</span>
                 </button>
-              </div>
-            ))}
+              )}
+              <button
+                type="button"
+                disabled={validatingPython}
+                onClick={handleValidatePython}
+                className="px-3 py-2 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] disabled:opacity-50 text-white font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                {validatingPython ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                )}
+                <span>{validatingPython ? 'Validating...' : 'Validate'}</span>
+              </button>
+              {form.python_path && (
+                <button
+                  type="button"
+                  onClick={handleClearPython}
+                  className="px-3 py-2 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-muted)] hover:text-red-600 dark:hover:text-[#f85149] font-medium whitespace-nowrap shrink-0"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
-            <h3 className="font-semibold text-[var(--vanta-text)]">Add Category</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <input
-                type="text"
-                placeholder="Category name (e.g. ISOs)"
-                value={newCatName}
-                onChange={(e) => setNewCatName(e.target.value)}
-                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
-              />
-              <input
-                type="text"
-                placeholder="Extensions (e.g. iso, img, bin)"
-                value={newCatExts}
-                onChange={(e) => setNewCatExts(e.target.value)}
-                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
-              />
-              <input
-                type="text"
-                placeholder="Custom folder (optional)"
-                value={newCatDir}
-                onChange={(e) => setNewCatDir(e.target.value)}
-                className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
-              />
-            </div>
-            {catError && <p className="text-red-600 dark:text-[#f85149]">{catError}</p>}
-            <button
-              type="button"
-              onClick={handleCreateCategory}
-              className="px-3.5 py-1.5 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white font-medium inline-flex items-center gap-1.5"
+          {pythonValidation && (
+            <div
+              data-testid="python-validation-result"
+              className={`p-3 rounded-lg border space-y-1 ${
+                pythonValidation.valid
+                  ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-700 dark:text-[#3fb950]'
+                  : 'bg-red-500/10 border-red-500/35 text-red-600 dark:text-[#f85149]'
+              }`}
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Category</span>
-            </button>
-          </div>
+              <div className="flex items-start gap-2">
+                {pythonValidation.valid ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1 min-w-0">
+                  <p className="font-medium">
+                    {pythonValidation.valid
+                      ? `Verified ${pythonValidation.version || 'Python 3'}`
+                      : pythonValidation.error || 'Python validation failed'}
+                  </p>
+                  <p className="text-[11px] font-mono text-[var(--vanta-text-secondary)] break-all">
+                    Executable: {pythonValidation.executablePath}
+                  </p>
+                  {pythonValidation.stderr && !pythonValidation.valid && (
+                    <p className="text-[11px] font-mono text-[var(--vanta-text-secondary)] break-words">
+                      {pythonValidation.stderr}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -959,7 +1077,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={testingCookies}
                   className="px-3 py-1.5 bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] disabled:opacity-50 text-white rounded-lg font-medium flex items-center gap-1.5 shrink-0"
                 >
-                  {testingCookies ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  {testingCookies ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5" />
+                  )}
                   <span>{testingCookies ? 'Testing...' : 'Test'}</span>
                 </button>
               </div>
@@ -1083,7 +1205,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             VANTA Download Manager
           </h2>
           <p className="text-[var(--vanta-muted)] leading-relaxed">
-            Workstation download manager supporting direct HTTP/HTTPS byte-range resume &amp; SHA-256 verification, yt-dlp video/playlist extraction with FFmpeg muxing, and spotDL music workflows.
+            Focused video and music download workstation powered by yt-dlp, FFmpeg/FFprobe, and spotDL in an isolated virtual environment.
           </p>
           <p className="font-mono text-[11px] text-[var(--vanta-muted)] pt-2">
             Keyboard shortcuts: Ctrl/Cmd + N (New Download) · Esc (Close inspector/modal)
@@ -1092,19 +1214,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       <ConfirmDialog
-        isOpen={Boolean(deleteCatTarget)}
-        title="Delete Category"
-        message={`Delete category "${deleteCatTarget?.name}"? Existing transfers will remain in your queue as uncategorized.`}
-        confirmLabel="Delete"
+        isOpen={confirmResetOpen}
+        title="Reset Settings to Defaults"
+        message="Restore all VANTA preferences, scheduler windows, bandwidth limits, and Python path to default values?"
+        confirmLabel="Reset Defaults"
         danger
-        onConfirm={async () => {
-          if (deleteCatTarget) {
-            await api.deleteCategory(deleteCatTarget.id);
-            setDeleteCatTarget(null);
-            onCategoriesChanged();
-          }
-        }}
-        onCancel={() => setDeleteCatTarget(null)}
+        onConfirm={handleConfirmReset}
+        onCancel={() => setConfirmResetOpen(false)}
       />
     </form>
   );

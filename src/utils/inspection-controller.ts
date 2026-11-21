@@ -1,5 +1,5 @@
 import { MediaMetadata } from '../types';
-import { tryParseSpotifyInput } from './spotify';
+import { validateMediaUrl } from './engine-parser';
 
 export interface InspectionUiState {
   isExtracting: boolean;
@@ -35,37 +35,8 @@ export function isCancellationError(err: unknown): boolean {
 }
 
 export function validateClientUrl(raw: string): string | null {
-  const trimmed = (raw || '').trim();
-  if (!trimmed) {
-    return 'Please enter a valid HTTP or HTTPS media URL.';
-  }
-  if (/[\s\u0000-\u001F\u007F]/.test(trimmed)) {
-    return 'Invalid URL: remove spaces or control characters.';
-  }
-  if (trimmed.startsWith('-')) {
-    return 'Invalid URL: must start with http:// or https://.';
-  }
-
-  const spotifyParsed = tryParseSpotifyInput(trimmed);
-  if (spotifyParsed) {
-    if (spotifyParsed.kind === 'invalid') {
-      return spotifyParsed.error;
-    }
-    return null;
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return 'Unsupported URL scheme. Only http://, https://, and spotify: URIs are supported.';
-    }
-    if (!parsed.hostname || parsed.hostname.startsWith('.')) {
-      return 'Invalid URL host. Please check the URL and try again.';
-    }
-  } catch {
-    return 'Invalid URL format. Include http://, https://, or a valid spotify: URI.';
-  }
-  return null;
+  const res = validateMediaUrl(raw);
+  return res.valid ? null : res.error;
 }
 
 export class InspectionController {

@@ -11,6 +11,8 @@ import {
   FileText,
   FolderOpen,
   Trash2,
+  HardDrive,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   EngineStatusMap,
@@ -18,6 +20,7 @@ import {
   EngineUpdateResult,
   EngineInstallProgress,
   DiagnosticLogInfo,
+  ManagedEngineInfo,
 } from '../types';
 import { api } from '../services/api';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -43,8 +46,18 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   const [updatingEngine, setUpdatingEngine] = useState<string | null>(null);
   const [updateResults, setUpdateResults] = useState<EngineUpdateResult[] | null>(null);
   const [logInfo, setLogInfo] = useState<DiagnosticLogInfo | null>(null);
+  const [managedInfo, setManagedInfo] = useState<ManagedEngineInfo | null>(null);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+
+  const loadManagedInfo = async () => {
+    try {
+      const info = await api.getManagedEngineInfo();
+      setManagedInfo(info);
+    } catch {
+      // ignore transient info load failure
+    }
+  };
 
   const loadDiagnosticLogs = async () => {
     setIsLoadingLogs(true);
@@ -140,6 +153,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
       setUpdateResults(res.results);
       onRefresh();
       handleCheckUpdates();
+      loadManagedInfo();
     } catch (err: any) {
       console.error('Update all failed:', err);
     } finally {
@@ -150,6 +164,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   useEffect(() => {
     handleCheckUpdates();
     loadDiagnosticLogs();
+    loadManagedInfo();
   }, []);
 
   return (
@@ -222,6 +237,55 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Engine Installation Layout & Storage */}
+      {managedInfo && (
+        <div className="p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-xs font-semibold uppercase font-mono text-[var(--vanta-text)] flex items-center gap-2">
+              <HardDrive className="w-4 h-4 text-[var(--vanta-accent)]" />
+              <span>Engine Installation Layout</span>
+            </h2>
+            <span
+              className={`font-mono text-[11px] flex items-center gap-1.5 ${
+                managedInfo.requiresElevation
+                  ? 'text-amber-600 dark:text-[#e3b341]'
+                  : 'text-emerald-700 dark:text-[#3fb950]'
+              }`}
+            >
+              {managedInfo.requiresElevation && <ShieldAlert className="w-3.5 h-3.5" />}
+              {managedInfo.requiresElevation
+                ? 'Administrator UAC Elevation Required for Writes'
+                : 'Engine Directory Writable'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 font-mono text-[11px]">
+            <div className="p-2.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              <span className="text-[var(--vanta-muted)] block">Engine Root</span>
+              <span className="text-[var(--vanta-text)] break-all">{managedInfo.installDir}</span>
+            </div>
+            <div className="p-2.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              <span className="text-[var(--vanta-muted)] block">yt-dlp Directory</span>
+              <span className="text-[var(--vanta-text)] break-all">{managedInfo.ytdlpDir}</span>
+            </div>
+            <div className="p-2.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              <span className="text-[var(--vanta-muted)] block">spotDL Isolated Venv</span>
+              <span className="text-[var(--vanta-text)] break-all">{managedInfo.spotdlDir}</span>
+            </div>
+            <div className="p-2.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              <span className="text-[var(--vanta-muted)] block">FFmpeg / FFprobe Bin</span>
+              <span className="text-[var(--vanta-text)] break-all">{managedInfo.ffmpegDir}</span>
+            </div>
+          </div>
+
+          {managedInfo.settingsFilePath && (
+            <p className="text-[11px] font-mono text-[var(--vanta-muted)] break-all">
+              Settings Persistence: {managedInfo.settingsFilePath}
+            </p>
+          )}
         </div>
       )}
 
@@ -334,7 +398,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
                 {canManageInApp && (
                   <div className="pt-2.5 border-t border-[var(--vanta-border)] flex items-center justify-between gap-2">
                     <span className="text-[11px] text-[var(--vanta-muted)]">
-                      Managed Runtime
+                      {key === 'spotdl' ? 'Isolated Venv (Engine\\spotdl)' : 'Managed Engine Binary'}
                     </span>
                     <div className="flex items-center gap-1.5">
                       {isReady && (

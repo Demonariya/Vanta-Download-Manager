@@ -1,14 +1,13 @@
 use crate::logging;
 use crate::models::{
-    AppSettings, CategoryItem, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry,
-    TaskPriority, TaskStatus,
+    AppSettings, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry, TaskPriority,
+    TaskStatus,
 };
 use crate::process;
 use rusqlite::{params, Connection};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,9 +20,10 @@ pub struct TrackedInspection {
 }
 
 pub struct AppState {
+    pub data_dir: PathBuf,
     pub db: Mutex<Connection>,
+    pub settings_file_lock: Mutex<()>,
     pub active_processes: Arc<Mutex<HashMap<String, u32>>>,
-    pub active_direct_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub active_inspections: Arc<Mutex<HashMap<String, TrackedInspection>>>,
     pub cached_engine_status: Mutex<Option<(Instant, EngineStatusMap)>>,
     pub is_shutting_down: AtomicBool,
@@ -33,19 +33,31 @@ pub struct AppState {
 
 impl AppState {
     pub fn app_data_dir() -> PathBuf {
+        if let Ok(override_dir) = std::env::var("VANTA_DATA_DIR") {
+            let trimmed = override_dir.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+
         #[cfg(target_os = "windows")]
         {
-            if let Ok(local) = std::env::var("LOCALAPPDATA") {
-                if !local.trim().is_empty() {
-                    return PathBuf::from(local).join("com.vanta.downloadmanager");
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                if !appdata.trim().is_empty() {
+                    return PathBuf::from(appdata).join("VANTA Download Manager");
                 }
             }
             if let Ok(profile) = std::env::var("USERPROFILE") {
                 if !profile.trim().is_empty() {
                     return PathBuf::from(profile)
                         .join("AppData")
-                        .join("Local")
-                        .join("com.vanta.downloadmanager");
+                        .join("Roaming")
+                        .join("VANTA Download Manager");
+                }
+            }
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                if !local.trim().is_empty() {
+                    return PathBuf::from(local).join("VANTA Download Manager");
                 }
             }
         }
@@ -53,7 +65,7 @@ impl AppState {
         {
             if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
                 if !xdg.trim().is_empty() {
-                    return PathBuf::from(xdg).join("com.vanta.downloadmanager");
+                    return PathBuf::from(xdg).join("vanta-download-manager");
                 }
             }
             if let Ok(home) = std::env::var("HOME") {
@@ -61,16 +73,99 @@ impl AppState {
                     return PathBuf::from(home)
                         .join(".local")
                         .join("share")
-                        .join("com.vanta.downloadmanager");
+                        .join("vanta-download-manager");
                 }
             }
         }
         PathBuf::from(".vanta_data")
     }
 
+    fn legacy_app_data_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                if !local.trim().is_empty() {
+                    return Some(PathBuf::from(local).join("com.vanta.downloadmanager"));
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+                if !xdg.trim().is_empty() {
+                    return Some(PathBuf::from(xdg).join("com.vanta.downloadmanager"));
+                }
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                if !home.trim().is_empty() {
+                    return Some(
+                        PathBuf::from(home)
+                            .join(".local")
+                            .join("share")
+                            .join("com.vanta.downloadmanager"),
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    fn migrate_legacy_user_data_if_needed(target_dir: &Path) {
+        if std::env::var("VANTA_DATA_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some()
+        {
+            return;
+        }
+        let Some(legacy_dir) = Self::legacy_app_data_dir() else {
+            return;
+        };
+        if legacy_dir == target_dir || !legacy_dir.is_dir() {
+            return;
+        }
+
+        let target_db = target_dir.join("vanta_native.db");
+        let legacy_db = legacy_dir.join("vanta_native.db");
+        if !target_db.exists() && legacy_db.is_file() {
+            if let Err(e) = fs::copy(&legacy_db, &target_db) {
+                logging::warn(
+                    "state",
+                    &format!("Legacy DB migration copy failed cleanly: {}", e),
+                );
+            } else {
+                logging::info(
+                    "state",
+                    &format!(
+                        "Migrated legacy user database from '{}' to '{}'",
+                        legacy_db.display(),
+                        target_db.display()
+                    ),
+                );
+            }
+        }
+
+        let target_cookies = target_dir.join("cookies.txt");
+        let legacy_cookies = legacy_dir.join("cookies.txt");
+        if !target_cookies.exists() && legacy_cookies.is_file() {
+            let _ = fs::copy(&legacy_cookies, &target_cookies);
+        }
+    }
+
+    pub fn settings_file_path_for(dir: &Path) -> PathBuf {
+        dir.join("settings.v1.json")
+    }
+
+    pub fn settings_file_path(&self) -> PathBuf {
+        Self::settings_file_path_for(&self.data_dir)
+    }
+
     pub fn init() -> Result<Self, String> {
+        Self::init_in_dir(Self::app_data_dir())
+    }
+
+    pub fn init_in_dir(db_dir: PathBuf) -> Result<Self, String> {
         let init_start = Instant::now();
-        let db_dir = Self::app_data_dir();
         fs::create_dir_all(&db_dir).map_err(|e| {
             format!(
                 "Failed to create app data directory '{}': {}",
@@ -78,8 +173,9 @@ impl AppState {
                 e
             )
         })?;
-        let db_path = db_dir.join("vanta_native.db");
+        Self::migrate_legacy_user_data_if_needed(&db_dir);
 
+        let db_path = db_dir.join("vanta_native.db");
         let db_start = Instant::now();
         let conn = Connection::open(&db_path).map_err(|e| {
             format!(
@@ -146,15 +242,6 @@ impl AppState {
                 timestamp TEXT NOT NULL,
                 task_id TEXT
             );
-
-            CREATE TABLE IF NOT EXISTS categories (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                color TEXT NOT NULL,
-                extensions_json TEXT NOT NULL,
-                destination_dir TEXT,
-                created_at TEXT NOT NULL
-            );
             ",
         )
         .map_err(|e| format!("Failed to initialize SQLite tables: {}", e))?;
@@ -172,12 +259,12 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN video_codec TEXT",
             "ALTER TABLE tasks ADD COLUMN audio_codec TEXT",
             "ALTER TABLE tasks ADD COLUMN resolution_label TEXT",
-            "ALTER TABLE tasks ADD COLUMN verified_sha256 TEXT",
-            "ALTER TABLE tasks ADD COLUMN expected_sha256 TEXT",
-            "ALTER TABLE tasks ADD COLUMN checksum_verified INTEGER",
             "ALTER TABLE tasks ADD COLUMN custom_filename TEXT",
-            "ALTER TABLE tasks ADD COLUMN category_id TEXT",
             "ALTER TABLE tasks ADD COLUMN playlist_mode TEXT",
+            "ALTER TABLE tasks ADD COLUMN selected_items_json TEXT",
+            "ALTER TABLE tasks ADD COLUMN tracks_requested INTEGER",
+            "ALTER TABLE tasks ADD COLUMN tracks_completed INTEGER",
+            "ALTER TABLE tasks ADD COLUMN tracks_failed INTEGER",
             "ALTER TABLE tasks ADD COLUMN logs_json TEXT",
             "ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
@@ -186,27 +273,7 @@ impl AppState {
             let _ = conn.execute(sql, []);
         }
 
-        // Seed default categories if empty
-        let cat_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0))
-            .unwrap_or(0);
-        if cat_count == 0 {
-            let defaults = vec![
-                ("cat_video", "Video", "#58a6ff", vec!["mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"]),
-                ("cat_music", "Music & Audio", "#3fb950", vec!["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"]),
-                ("cat_documents", "Documents", "#d29922", vec!["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "epub"]),
-                ("cat_archives", "Archives", "#a371f7", vec!["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst"]),
-                ("cat_software", "Software & Disk Images", "#f0883e", vec!["exe", "msi", "msix", "dmg", "iso", "img", "deb", "rpm", "apk", "appimage"]),
-            ];
-            for (id, name, color, exts) in defaults {
-                let exts_json = serde_json::to_string(&exts).unwrap_or_else(|_| "[]".to_string());
-                let _ = conn.execute(
-                    "INSERT OR IGNORE INTO categories (id, name, color, extensions_json, destination_dir, created_at) VALUES (?1, ?2, ?3, ?4, NULL, '2026-01-01T00:00:00.000Z')",
-                    params![id, name, color, exts_json],
-                );
-            }
-        }
-
+        // Preserve existing user tasks while gracefully normalizing abandoned in-flight statuses
         let _ = conn.execute(
             "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
             [],
@@ -217,27 +284,33 @@ impl AppState {
             [],
         );
 
+        let state = Self {
+            data_dir: db_dir,
+            db: Mutex::new(conn),
+            settings_file_lock: Mutex::new(()),
+            active_processes: Arc::new(Mutex::new(HashMap::new())),
+            active_inspections: Arc::new(Mutex::new(HashMap::new())),
+            cached_engine_status: Mutex::new(None),
+            is_shutting_down: AtomicBool::new(false),
+            is_running_diagnostics: AtomicBool::new(false),
+            is_scanning_engines: AtomicBool::new(false),
+        };
+
+        // Ensure durable settings.v1.json exists and recovers cleanly if corrupt
+        let _ = state.get_settings();
+
         let db_ms = db_start.elapsed().as_millis();
         logging::info(
             "state",
             &format!(
-                "Initialized SQLite state at '{}' in {}ms (total AppState::init {}ms).",
+                "Initialized AppState at '{}' in {}ms (total {}ms).",
                 db_path.display(),
                 db_ms,
                 init_start.elapsed().as_millis()
             ),
         );
 
-        Ok(Self {
-            db: Mutex::new(conn),
-            active_processes: Arc::new(Mutex::new(HashMap::new())),
-            active_direct_cancels: Arc::new(Mutex::new(HashMap::new())),
-            active_inspections: Arc::new(Mutex::new(HashMap::new())),
-            cached_engine_status: Mutex::new(None),
-            is_shutting_down: AtomicBool::new(false),
-            is_running_diagnostics: AtomicBool::new(false),
-            is_scanning_engines: AtomicBool::new(false),
-        })
+        Ok(state)
     }
 
     pub fn register_inspection(&self, request_id: &str) -> TrackedInspection {
@@ -281,46 +354,21 @@ impl AppState {
         false
     }
 
-    pub fn register_direct_cancel(&self, task_id: &str) -> Arc<AtomicBool> {
-        let flag = Arc::new(AtomicBool::new(false));
-        let mut map = self
-            .active_direct_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.insert(task_id.to_string(), Arc::clone(&flag));
-        flag
-    }
-
-    pub fn trigger_direct_cancel(&self, task_id: &str) {
-        let mut map = self
-            .active_direct_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(flag) = map.remove(task_id) {
-            flag.store(true, Ordering::SeqCst);
-        }
-    }
-
-    pub fn remove_direct_cancel(&self, task_id: &str) {
-        let mut map = self
-            .active_direct_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.remove(task_id);
-    }
-
     fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
         let status_str: String = row.get("status")?;
         let priority_str: String = row.get("priority")?;
         let is_audio_only_int: i32 = row.get("is_audio_only")?;
         let is_lossy_int: Option<i32> = row.get("is_lossy_source")?;
         let pct_known_int: Option<i32> = row.get("percentage_known").ok().flatten();
-        let checksum_verified_int: Option<i32> = row.get("checksum_verified").ok().flatten();
         let logs_json: Option<String> = row.get("logs_json").ok().flatten();
         let logs: Vec<TaskLogEntry> = logs_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
+        let selected_items_json: Option<String> = row.get("selected_items_json").ok().flatten();
+        let selected_items: Option<Vec<String>> = selected_items_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
 
         Ok(DownloadTask {
             id: row.get("id")?,
@@ -362,13 +410,13 @@ impl AppState {
             audio_channels: row.get("audio_channels")?,
             is_lossy_source: is_lossy_int.map(|v| v == 1),
             verified_audio_info: row.get("verified_audio_info")?,
-            verified_sha256: row.get("verified_sha256").ok().flatten(),
-            expected_sha256: row.get("expected_sha256").ok().flatten(),
-            checksum_verified: checksum_verified_int.map(|v| v != 0),
             output_path: row.get("output_path")?,
             custom_filename: row.get("custom_filename").ok().flatten(),
-            category_id: row.get("category_id").ok().flatten(),
             playlist_mode: row.get("playlist_mode").ok().flatten(),
+            selected_items,
+            tracks_requested: row.get("tracks_requested").ok().flatten(),
+            tracks_completed: row.get("tracks_completed").ok().flatten(),
+            tracks_failed: row.get("tracks_failed").ok().flatten(),
             error_message: row.get("error_message")?,
             logs,
             priority: TaskPriority::from_str(&priority_str),
@@ -413,6 +461,10 @@ impl AppState {
             task.logs.iter().collect()
         };
         let logs_json = serde_json::to_string(&logs_tail).unwrap_or_else(|_| "[]".to_string());
+        let selected_items_json = task
+            .selected_items
+            .as_ref()
+            .and_then(|items| serde_json::to_string(items).ok());
 
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO tasks (
@@ -422,9 +474,9 @@ impl AppState {
                 active_connections, last_progress_at, current_phase, format_id, format_note, ext,
                 video_codec, audio_codec, resolution_label, is_audio_only, audio_format,
                 audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
-                verified_audio_info, verified_sha256, expected_sha256, checksum_verified,
-                output_path, custom_filename, category_id, playlist_mode, error_message, logs_json,
-                priority, queue_order, created_at, started_at, completed_at, retries, max_retries
+                verified_audio_info, output_path, custom_filename, playlist_mode,
+                selected_items_json, tracks_requested, tracks_completed, tracks_failed,
+                error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
@@ -433,8 +485,8 @@ impl AppState {
                 ?29, ?30, ?31, ?32, ?33,
                 ?34, ?35, ?36, ?37, ?38,
                 ?39, ?40, ?41, ?42,
-                ?43, ?44, ?45, ?46, ?47, ?48,
-                ?49, ?50, ?51, ?52, ?53, ?54, ?55
+                ?43, ?44, ?45, ?46,
+                ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55
             )",
             params![
                 task.id,
@@ -476,13 +528,13 @@ impl AppState {
                 task.audio_channels,
                 task.is_lossy_source.map(|b| if b { 1 } else { 0 }),
                 task.verified_audio_info,
-                task.verified_sha256,
-                task.expected_sha256,
-                task.checksum_verified.map(|b| if b { 1 } else { 0 }),
                 task.output_path,
                 task.custom_filename,
-                task.category_id,
                 task.playlist_mode,
+                selected_items_json,
+                task.tracks_requested,
+                task.tracks_completed,
+                task.tracks_failed,
                 task.error_message,
                 logs_json,
                 task.priority.as_str(),
@@ -630,117 +682,15 @@ impl AppState {
         Ok(task)
     }
 
-    pub fn verify_task_checksum(
-        &self,
-        task_id: &str,
-        expected_sha256: Option<String>,
-    ) -> Result<(DownloadTask, String, Option<bool>), String> {
-        let mut task = self
-            .get_task_by_id(task_id)
-            .ok_or_else(|| "Task not found.".to_string())?;
-        let path = Path::new(&task.output_path);
-        if task.output_path.is_empty() || !path.is_file() {
-            return Err("Output file does not exist on disk yet.".to_string());
-        }
-
-        let mut file = fs::File::open(path).map_err(|e| format!("Failed opening file: {}", e))?;
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = file.read(&mut buf).map_err(|e| format!("Read error: {}", e))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let digest = hex::encode(hasher.finalize());
-
-        let expected_clean = expected_sha256
-            .or_else(|| task.expected_sha256.clone())
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty());
-
-        let matches = expected_clean.as_ref().map(|exp| exp == &digest);
-        task.verified_sha256 = Some(digest.clone());
-        if let Some(exp) = expected_clean {
-            task.expected_sha256 = Some(exp);
-        }
-        task.checksum_verified = matches;
-        self.upsert_task(&task);
-
-        Ok((task, digest, matches))
-    }
-
-    pub fn get_categories(&self) -> Vec<CategoryItem> {
-        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = match conn.prepare("SELECT id, name, color, extensions_json, destination_dir, created_at FROM categories ORDER BY created_at ASC") {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = match stmt.query_map([], |row| {
-            let exts_raw: String = row.get(3)?;
-            let extensions: Vec<String> = serde_json::from_str(&exts_raw).unwrap_or_default();
-            Ok(CategoryItem {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                color: row.get(2)?,
-                extensions,
-                destination_dir: row.get(4)?,
-                created_at: row.get(5)?,
+    fn read_settings_from_sqlite_unlocked(conn: &Connection) -> Option<AppSettings> {
+        let mut stmt = conn.prepare("SELECT key, value FROM settings").ok()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let k: String = row.get(0)?;
+                let v: String = row.get(1)?;
+                Ok((k, v))
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        rows.flatten().collect()
-    }
-
-    pub fn save_category(&self, cat: CategoryItem) -> CategoryItem {
-        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let id = if cat.id.trim().is_empty() {
-            format!("cat_{}", chrono::Utc::now().timestamp_millis())
-        } else {
-            cat.id.clone()
-        };
-        let exts_json = serde_json::to_string(&cat.extensions).unwrap_or_else(|_| "[]".to_string());
-        let created_at = if cat.created_at.trim().is_empty() {
-            chrono::Utc::now().to_rfc3339()
-        } else {
-            cat.created_at.clone()
-        };
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO categories (id, name, color, extensions_json, destination_dir, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, cat.name, cat.color, exts_json, cat.destination_dir, created_at],
-        );
-        CategoryItem {
-            id,
-            name: cat.name,
-            color: cat.color,
-            extensions: cat.extensions,
-            destination_dir: cat.destination_dir,
-            created_at,
-        }
-    }
-
-    pub fn delete_category(&self, id: &str) {
-        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = conn.execute("DELETE FROM categories WHERE id = ?1", params![id]);
-    }
-
-    pub fn get_settings(&self) -> AppSettings {
-        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = match conn.prepare("SELECT key, value FROM settings") {
-            Ok(s) => s,
-            Err(_) => return AppSettings::default(),
-        };
-        let rows = match stmt.query_map([], |row| {
-            let k: String = row.get(0)?;
-            let v: String = row.get(1)?;
-            Ok((k, v))
-        }) {
-            Ok(r) => r,
-            Err(_) => return AppSettings::default(),
-        };
+            .ok()?;
 
         let mut map = serde_json::Map::new();
         for item in rows.flatten() {
@@ -755,30 +705,234 @@ impl AppState {
             }
         }
 
-        serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default()
+        if map.is_empty() {
+            return None;
+        }
+        let mut settings: AppSettings =
+            serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default();
+        settings.schema_version = 1;
+        Some(settings)
     }
 
-    pub fn save_settings(&self, settings: &AppSettings) {
-        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = conn.execute(
-            "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
-            [],
-        );
-        if let Ok(val) = serde_json::to_value(settings) {
-            if let Some(obj) = val.as_object() {
+    fn write_settings_json_atomic_locked(data_dir: &Path, settings: &AppSettings) -> Result<(), String> {
+        fs::create_dir_all(data_dir).map_err(|e| {
+            format!(
+                "Failed to ensure settings directory '{}': {}",
+                data_dir.display(),
+                e
+            )
+        })?;
+        let target_path = Self::settings_file_path_for(data_dir);
+        let temp_path = data_dir.join(format!("settings.v1.tmp.{}", uuid::Uuid::new_v4()));
+
+        let json = serde_json::to_string_pretty(settings)
+            .map_err(|e| format!("Failed serializing settings JSON: {}", e))?;
+
+        let mut tmp_file = fs::File::create(&temp_path).map_err(|e| {
+            format!(
+                "Failed creating temp settings file '{}': {}",
+                temp_path.display(),
+                e
+            )
+        })?;
+        tmp_file
+            .write_all(json.as_bytes())
+            .and_then(|_| tmp_file.sync_all())
+            .map_err(|e| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "Failed writing temp settings file '{}': {}",
+                    temp_path.display(),
+                    e
+                )
+            })?;
+        drop(tmp_file);
+
+        if let Err(rename_err) = fs::rename(&temp_path, &target_path) {
+            // Windows rename can fail if destination exists on older filesystems
+            let backup = data_dir.join("settings.v1.prev.bak");
+            let had_existing = target_path.exists();
+            if had_existing {
+                let _ = fs::remove_file(&backup);
+                let _ = fs::rename(&target_path, &backup);
+            }
+            if let Err(second_err) = fs::rename(&temp_path, &target_path) {
+                if had_existing && backup.exists() {
+                    let _ = fs::rename(&backup, &target_path);
+                }
+                let _ = fs::remove_file(&temp_path);
+                return Err(format!(
+                    "Failed committing settings file '{}': {} ({})",
+                    target_path.display(),
+                    rename_err,
+                    second_err
+                ));
+            }
+            let _ = fs::remove_file(&backup);
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+        if settings.download_dir.trim().is_empty() {
+            return Err("Download destination folder cannot be empty.".to_string());
+        }
+        if settings.max_concurrent_downloads == 0 || settings.max_concurrent_downloads > 16 {
+            return Err("Max concurrent downloads must be between 1 and 16.".to_string());
+        }
+        let proxy = settings.proxy_url.trim();
+        if !proxy.is_empty() {
+            let lower = proxy.to_ascii_lowercase();
+            let valid_scheme = lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("socks4://")
+                || lower.starts_with("socks5://");
+            if !valid_scheme {
+                return Err(
+                    "Proxy URL must start with http://, https://, socks4://, or socks5://."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_settings(&self) -> AppSettings {
+        let _guard = self
+            .settings_file_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let json_path = self.settings_file_path();
+
+        if json_path.exists() {
+            match fs::read_to_string(&json_path) {
+                Ok(raw) => match serde_json::from_str::<AppSettings>(&raw) {
+                    Ok(mut parsed) => {
+                        parsed.schema_version = 1;
+                        return parsed;
+                    }
+                    Err(parse_err) => {
+                        let ts = chrono::Utc::now().timestamp_millis();
+                        let backup_path = self
+                            .data_dir
+                            .join(format!("settings.v1.corrupt.{}.json", ts));
+                        let _ = fs::rename(&json_path, &backup_path);
+                        logging::warn(
+                            "settings",
+                            &format!(
+                                "Detected corrupt settings file ({}); backed up to '{}' and restored defaults.",
+                                parse_err,
+                                backup_path.display()
+                            ),
+                        );
+                        let defaults = AppSettings::default();
+                        let _ = Self::write_settings_json_atomic_locked(&self.data_dir, &defaults);
+                        return defaults;
+                    }
+                },
+                Err(io_err) => {
+                    logging::warn(
+                        "settings",
+                        &format!("Failed reading '{}': {}", json_path.display(), io_err),
+                    );
+                }
+            }
+        }
+
+        let from_db = {
+            let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+            Self::read_settings_from_sqlite_unlocked(&conn)
+        };
+        let resolved = from_db.unwrap_or_default();
+        let _ = Self::write_settings_json_atomic_locked(&self.data_dir, &resolved);
+        resolved
+    }
+
+    pub fn save_settings(&self, settings: &AppSettings) -> Result<AppSettings, String> {
+        let mut normalized = settings.clone();
+        normalized.schema_version = 1;
+        normalized.download_dir = normalized.download_dir.trim().to_string();
+        normalized.proxy_url = normalized.proxy_url.trim().to_string();
+        normalized.python_path = normalized
+            .python_path
+            .as_ref()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+
+        Self::validate_settings(&normalized)?;
+
+        // 1. Atomically persist versioned JSON file under per-user AppData
+        {
+            let _guard = self
+                .settings_file_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Self::write_settings_json_atomic_locked(&self.data_dir, &normalized)?;
+        }
+
+        // 2. Sync SQLite settings table inside an atomic transaction
+        {
+            let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+            let val = serde_json::to_value(&normalized)
+                .map_err(|e| format!("Failed serializing settings for SQLite: {}", e))?;
+            let obj = val
+                .as_object()
+                .ok_or_else(|| "Settings payload must be a JSON object.".to_string())?;
+
+            conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+                .map_err(|e| format!("Failed starting settings transaction: {}", e))?;
+
+            let tx_res: Result<(), String> = (|| {
+                conn.execute(
+                    "DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')",
+                    [],
+                )
+                .map_err(|e| format!("Failed cleaning legacy settings keys: {}", e))?;
+
+                if normalized.python_path.is_none() {
+                    conn.execute("DELETE FROM settings WHERE key = 'python_path'", [])
+                        .map_err(|e| format!("Failed clearing python_path key: {}", e))?;
+                }
+
                 for (k, v) in obj {
                     let str_val = if let Some(s) = v.as_str() {
                         s.to_string()
                     } else {
                         v.to_string()
                     };
-                    let _ = conn.execute(
+                    conn.execute(
                         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
                         params![k, str_val],
-                    );
+                    )
+                    .map_err(|e| format!("Failed writing setting '{}' to SQLite: {}", k, e))?;
+                }
+                Ok(())
+            })();
+
+            match tx_res {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT;")
+                        .map_err(|e| format!("Failed committing settings transaction: {}", e))?;
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(e);
                 }
             }
         }
+
+        Ok(normalized)
+    }
+
+    pub fn reset_settings(&self) -> Result<AppSettings, String> {
+        let defaults = AppSettings::default();
+        {
+            let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute("DELETE FROM settings", [])
+                .map_err(|e| format!("Failed clearing settings table on reset: {}", e))?;
+        }
+        self.save_settings(&defaults)
     }
 
     pub fn get_notifications(&self) -> Vec<NotificationItem> {
@@ -847,18 +1001,104 @@ impl AppState {
             procs.drain().map(|(_id, pid)| pid).collect()
         };
 
-        {
-            let mut directs = self
-                .active_direct_cancels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            for (_id, flag) in directs.drain() {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
-
         for pid in inspection_pids.into_iter().chain(task_pids.into_iter()) {
             process::kill_process_tree(pid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_temp_state_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vanta_state_{}_{}", label, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_settings_atomic_save_reset_and_corrupt_recovery() {
+        let dir = make_temp_state_dir("settings");
+        let state = AppState::init_in_dir(dir.clone()).unwrap();
+
+        let mut custom = state.get_settings();
+        custom.max_concurrent_downloads = 7;
+        custom.python_path = Some("C:\\Program Files\\Python312\\python.exe".to_string());
+        custom.proxy_url = "http://127.0.0.1:8888".to_string();
+        let saved = state.save_settings(&custom).unwrap();
+        assert_eq!(saved.max_concurrent_downloads, 7);
+        assert_eq!(
+            saved.python_path.as_deref(),
+            Some("C:\\Program Files\\Python312\\python.exe")
+        );
+
+        // Reload in fresh AppState instance
+        let reloaded_state = AppState::init_in_dir(dir.clone()).unwrap();
+        let reloaded = reloaded_state.get_settings();
+        assert_eq!(reloaded.max_concurrent_downloads, 7);
+        assert_eq!(
+            reloaded.python_path.as_deref(),
+            Some("C:\\Program Files\\Python312\\python.exe")
+        );
+
+        // Corrupt JSON recovery backs up corrupt file and restores valid defaults
+        let json_path = reloaded_state.settings_file_path();
+        fs::write(&json_path, "{ corrupt json :::").unwrap();
+        let recovered = reloaded_state.get_settings();
+        assert_eq!(recovered.schema_version, 1);
+        assert_eq!(recovered.max_concurrent_downloads, 3);
+        let has_backup = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("settings.v1.corrupt."));
+        assert!(has_backup, "expected corrupt backup file to be preserved");
+
+        // Validation failure returns error and does not overwrite valid persisted settings
+        let mut bad = recovered.clone();
+        bad.max_concurrent_downloads = 99;
+        assert!(reloaded_state.save_settings(&bad).is_err());
+
+        // Reset to defaults works cleanly
+        reloaded_state.save_settings(&custom).unwrap();
+        let reset = reloaded_state.reset_settings().unwrap();
+        assert_eq!(reset.max_concurrent_downloads, 3);
+        assert!(reset.python_path.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_existing_tasks_preserved_without_categories_table() {
+        let dir = make_temp_state_dir("legacy_tasks");
+        {
+            let db_path = dir.join("vanta_native.db");
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    engine TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    category_id TEXT
+                );
+                INSERT INTO tasks (id, url, title, engine, status, output_path, created_at, category_id)
+                VALUES ('t_legacy', 'https://example.com/v', 'Legacy Video', 'yt-dlp', 'completed', '/tmp/v.mp4', '2026-01-01T00:00:00Z', 'cat_video');
+                ",
+            )
+            .unwrap();
+        }
+
+        let state = AppState::init_in_dir(dir.clone()).unwrap();
+        let tasks = state.get_tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "t_legacy");
+        assert_eq!(tasks[0].title, "Legacy Video");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

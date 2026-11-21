@@ -212,8 +212,8 @@ jobs:
             - **`build-report.txt`**: Toolchain, version, and artifact size manifest.
 
             ### Managed Runtime Architecture
-            - Slim installers exclude bulky external CLI binaries (~300+ MiB).
-            - On first launch (or from **Diagnostics**), VANTA downloads and **SHA-256 verifies** `yt-dlp`, `FFmpeg`/`FFprobe`, and `spotDL` into `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin` (or loads side-by-side `bin/` binaries in portable mode).
+            - Per-machine Windows installer places the application in `C:\Program Files\VANTA Download Manager` and manages `yt-dlp`, `FFmpeg`/`FFprobe`, and isolated `spotDL` under `C:\Program Files\VANTA Download Manager\Engine` (`Engine\yt-dlp`, `Engine\spotdl\venv`, `Engine\ffmpeg\bin`).
+            - User settings (`settings.v1.json`), task history (`vanta_native.db`), and cookies are stored in `%APPDATA%\VANTA Download Manager` and preserved across upgrades and uninstalls.
           files: |
             dist/*-setup.exe
             dist/*.msi

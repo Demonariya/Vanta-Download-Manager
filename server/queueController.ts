@@ -241,6 +241,32 @@ export class QueueController {
         if (!current) return;
         if (current.status === 'paused' || current.status === 'cancelled') return;
 
+        if (current.tracks_requested && current.tracks_requested > 0 && (current.tracks_failed || 0) > 0) {
+          current.status = 'failed';
+          current.current_phase = `Partial failure (${current.tracks_completed || 0}/${current.tracks_requested} tracks)`;
+          current.error_message = errorMessage;
+          Object.assign(current, buildIdleMetricsPatch(current));
+          current.logs = [
+            ...(current.logs || []),
+            { timestamp: new Date().toISOString(), level: 'error' as const, message: errorMessage },
+          ].slice(-100);
+          upsertTask(current);
+          this.broadcast('task_updated', current);
+
+          const notif: NotificationItem = {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'error',
+            title: 'Playlist Partially Failed',
+            message: `"${current.title}": ${errorMessage}`,
+            timestamp: new Date().toISOString(),
+            taskId: current.id,
+          };
+          addNotification(notif);
+          this.broadcast('notification', notif);
+          this.scheduleNext();
+          return;
+        }
+
         const classified = classifyDownloadError(errorMessage, current.retries);
         const canRetry = current.retries < current.max_retries;
 

@@ -11,7 +11,6 @@ import {
   AppSettings,
   NotificationItem,
   EngineInstallProgress,
-  CategoryItem,
   ThemeMode,
 } from './types';
 import { api } from './services/api';
@@ -68,9 +67,7 @@ function applyThemeToDocument(theme: ThemeMode) {
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
@@ -201,20 +198,10 @@ export default function App() {
     }
   };
 
-  const loadCategories = async () => {
-    try {
-      const list = await api.getCategories();
-      setCategories(list);
-    } catch (err) {
-      console.error('Failed to load categories:', err);
-    }
-  };
-
   useEffect(() => {
     let mounted = true;
 
     runEngineScan(false, () => mounted);
-    loadCategories();
     api
       .getSettings()
       .then((s) => {
@@ -294,12 +281,31 @@ export default function App() {
     setIsNewDownloadOpen(true);
   };
 
-  const handleSaveSettings = async (patch: Partial<AppSettings>) => {
+  const handleSaveSettings = async (patch: Partial<AppSettings>): Promise<AppSettings> => {
+    const prevTheme = theme;
     if (patch.theme) {
       setTheme(patch.theme);
     }
-    const saved = await api.updateSettings(patch);
-    setSettings(saved);
+    try {
+      const saved = await api.updateSettings(patch);
+      setSettings(saved);
+      if (saved.theme) {
+        setTheme(saved.theme);
+      }
+      return saved;
+    } catch (err) {
+      setTheme(prevTheme);
+      throw err;
+    }
+  };
+
+  const handleResetSettings = async (): Promise<AppSettings> => {
+    const reset = await api.resetSettings();
+    setSettings(reset);
+    if (reset.theme) {
+      setTheme(reset.theme);
+    }
+    return reset;
   };
 
   const handleCycleTheme = () => {
@@ -338,10 +344,6 @@ export default function App() {
           setActiveTab={setActiveTab}
           engineStatus={engineStatus}
           activeCount={activeCount}
-          tasks={tasks}
-          categories={categories}
-          selectedCategoryId={selectedCategoryId}
-          onSelectCategory={setSelectedCategoryId}
           isCollapsed={isSidebarCollapsed}
           setIsCollapsed={setIsSidebarCollapsed}
           isMobileOpen={isMobileMenuOpen}
@@ -384,12 +386,9 @@ export default function App() {
               {activeTab === 'downloads' && (
                 <DownloadCenterView
                   tasks={tasks}
-                  categories={categories}
                   engineStatus={engineStatus}
                   scopeFilter={scopeFilter}
                   setScopeFilter={setScopeFilter}
-                  selectedCategoryId={selectedCategoryId}
-                  setSelectedCategoryId={setSelectedCategoryId}
                   searchQuery={searchQuery}
                   selectedTaskId={selectedTaskId}
                   onSelectTask={(t) => setSelectedTaskId(t.id)}
@@ -445,9 +444,8 @@ export default function App() {
               {activeTab === 'settings' && (
                 <SettingsView
                   settings={settings}
-                  categories={categories}
                   onSaveSettings={handleSaveSettings}
-                  onCategoriesChanged={loadCategories}
+                  onResetSettings={handleResetSettings}
                 />
               )}
             </main>
@@ -455,7 +453,6 @@ export default function App() {
             {/* Download Details Docked / Slide-Over Inspector */}
             <DownloadDetailsDrawer
               task={selectedTask}
-              categories={categories}
               onClose={() => setSelectedTaskId(null)}
               onRetryTask={(id) => api.retryTask(id)}
             />
@@ -480,7 +477,6 @@ export default function App() {
         onClose={() => setIsNewDownloadOpen(false)}
         initialUrl={initialInspectUrl}
         tasks={tasks}
-        categories={categories}
         settings={settings}
         onTaskCreated={() => {
           setActiveTab('downloads');

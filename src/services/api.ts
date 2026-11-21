@@ -13,7 +13,7 @@ import {
   CookieValidationResult,
   DetectedBrowserInfo,
   DiagnosticLogInfo,
-  CategoryItem,
+  PythonValidationResult,
   TaskPriority,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
@@ -339,13 +339,12 @@ export class ApiService {
 
   public async updateTaskMeta(
     id: string,
-    patch: { priority?: TaskPriority; category_id?: string | null; custom_filename?: string | null }
+    patch: { priority?: TaskPriority; custom_filename?: string | null }
   ): Promise<DownloadTask> {
     if (this.isTauri()) {
       return invoke<DownloadTask>('update_task_meta', {
         id,
         priority: patch.priority ?? null,
-        categoryId: patch.category_id ?? null,
         customFilename: patch.custom_filename ?? null,
       });
     }
@@ -373,28 +372,6 @@ export class ApiService {
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error || 'Failed to rename output file');
-    }
-    return res.json();
-  }
-
-  public async verifyTaskChecksum(
-    id: string,
-    expectedSha256?: string
-  ): Promise<{ task: DownloadTask; sha256: string; matches: boolean | null }> {
-    if (this.isTauri()) {
-      return invoke<{ task: DownloadTask; sha256: string; matches: boolean | null }>(
-        'verify_task_checksum',
-        { id, expectedSha256: expectedSha256?.trim() || null }
-      );
-    }
-    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/verify-checksum`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expectedSha256: expectedSha256?.trim() || undefined }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      throw new Error(err?.error || 'Failed to verify SHA-256 checksum');
     }
     return res.json();
   }
@@ -446,50 +423,6 @@ export class ApiService {
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error || 'Failed to open folder');
-    }
-  }
-
-  public async getCategories(): Promise<CategoryItem[]> {
-    if (this.isTauri()) {
-      return invoke<CategoryItem[]>('get_categories');
-    }
-    const res = await fetch('/api/categories');
-    if (!res.ok) throw new Error('Failed to fetch categories');
-    return res.json();
-  }
-
-  public async saveCategory(category: Partial<CategoryItem> & { name: string }): Promise<CategoryItem> {
-    if (this.isTauri()) {
-      const payload: CategoryItem = {
-        id: category.id || `cat_${Date.now()}`,
-        name: category.name,
-        color: category.color || '#58a6ff',
-        extensions: category.extensions || [],
-        destination_dir: category.destination_dir,
-        created_at: category.created_at || new Date().toISOString(),
-      };
-      return invoke<CategoryItem>('save_category', { category: payload });
-    }
-    const res = await fetch('/api/categories', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(category),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      throw new Error(err?.error || 'Failed to save category');
-    }
-    return res.json();
-  }
-
-  public async deleteCategory(id: string): Promise<void> {
-    if (this.isTauri()) {
-      return invoke('delete_category', { id });
-    }
-    const res = await fetch(`/api/categories/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      throw new Error(err?.error || 'Failed to delete category');
     }
   }
 
@@ -601,7 +534,10 @@ export class ApiService {
       return invoke<AppSettings>('get_settings');
     }
     const res = await fetch('/api/settings');
-    if (!res.ok) throw new Error('Failed to fetch settings');
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error || 'Failed to load settings');
+    }
     return res.json();
   }
 
@@ -614,8 +550,46 @@ export class ApiService {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
     });
-    if (!res.ok) throw new Error('Failed to update settings');
-    return res.json();
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to persist settings');
+    }
+    return data;
+  }
+
+  public async resetSettings(): Promise<AppSettings> {
+    if (this.isTauri()) {
+      return invoke<AppSettings>('reset_settings');
+    }
+    const res = await fetch('/api/settings/reset', { method: 'POST' });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to reset settings to defaults');
+    }
+    return data;
+  }
+
+  public async validatePythonExecutable(pythonPath: string): Promise<PythonValidationResult> {
+    if (this.isTauri()) {
+      return invoke<PythonValidationResult>('validate_python_executable', { pythonPath });
+    }
+    const res = await fetch('/api/python/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pythonPath }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok && !data) {
+      throw new Error('Failed to validate Python executable');
+    }
+    return data;
+  }
+
+  public async browsePythonExecutable(): Promise<string | null> {
+    if (this.isTauri()) {
+      return invoke<string | null>('browse_python_executable');
+    }
+    return null;
   }
 
   public async getNotifications(): Promise<NotificationItem[]> {

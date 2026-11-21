@@ -24,11 +24,7 @@ describe('Rust <-> TypeScript MediaMetadata & IPC contract consistency', () => {
       },
     });
     assert.equal(track.entries, undefined);
-    assert.equal(track.is_direct_file, undefined);
-    assert.equal(track.direct_file_size, undefined);
-    assert.equal(track.direct_mime_type, undefined);
-    assert.equal(track.direct_filename, undefined);
-    assert.equal(track.accepts_ranges, undefined);
+    assert.equal(track.extractor, 'spotdl');
 
     const oembed = buildMediaMetadataFromSpotifyOembed({
       canonicalUrl: 'https://open.spotify.com/album/1DFixLWuPkv3KT3TnV35m3',
@@ -109,48 +105,19 @@ describe('Rust <-> TypeScript MediaMetadata & IPC contract consistency', () => {
     assert.equal(resolveVideoFormatSelector('137', media.formats), '137+bestaudio/best');
     assert.equal(media.formats[1].abr, 128.0);
     assert.equal(media.entries?.length, 1);
-  });
-
-  it('handles direct HTTP metadata and NotificationItem taskId casing', () => {
-    const directMeta: MediaMetadata = {
-      url: 'https://cdn.example.com/installer.msi',
-      id: 'abcdef123456',
-      title: 'installer.msi',
-      uploader: 'cdn.example.com',
-      formats: [
-        {
-          format_id: 'direct',
-          ext: 'msi',
-          filesize: 1048576,
-          format_note: 'Direct HTTP (Resumable)',
-          is_audio_only: false,
-          is_video_only: false,
-        },
-      ],
-      is_playlist: false,
-      extractor: 'direct-http',
-      is_direct_file: true,
-      direct_file_size: 1048576,
-      direct_mime_type: 'application/x-msi',
-      direct_filename: 'installer.msi',
-      accepts_ranges: true,
-    };
-
-    assert.equal(directMeta.is_direct_file, true);
-    assert.equal(directMeta.accepts_ranges, true);
 
     const notif: NotificationItem = {
       id: 'n1',
       type: 'success',
       title: 'Download Complete',
-      message: 'installer.msi finished',
+      message: 'Episode 1 finished',
       timestamp: new Date().toISOString(),
       taskId: 'task_123',
     };
     assert.equal(notif.taskId, 'task_123');
   });
 
-  it('verifies Rust models.rs defines all MediaMetadata and FormatOption contract fields', () => {
+  it('verifies Rust models.rs & spotify.rs uphold media-only, playlist ordering, python_path, and no direct/category fields', () => {
     const modelsRs = fs.readFileSync(
       path.join(process.cwd(), 'src-tauri/src/models.rs'),
       'utf-8'
@@ -163,21 +130,43 @@ describe('Rust <-> TypeScript MediaMetadata & IPC contract consistency', () => {
       path.join(process.cwd(), 'src-tauri/src/commands.rs'),
       'utf-8'
     );
+    const typesTs = fs.readFileSync(
+      path.join(process.cwd(), 'src/types/index.ts'),
+      'utf-8'
+    );
 
-    const requiredMediaFields = [
-      'entries',
+    const removedFields = [
       'is_direct_file',
       'direct_file_size',
       'direct_mime_type',
       'direct_filename',
       'accepts_ranges',
+      'category_id',
+      'verified_sha256',
+      'CategoryItem',
     ];
-    for (const field of requiredMediaFields) {
-      assert.ok(modelsRs.includes(`pub ${field}:`), `models.rs missing MediaMetadata::${field}`);
+    for (const removed of removedFields) {
+      assert.equal(modelsRs.includes(removed), false, `models.rs must not contain ${removed}`);
+      assert.equal(typesTs.includes(removed), false, `src/types/index.ts must not contain ${removed}`);
     }
 
-    assert.ok(modelsRs.includes('pub tbr: Option<f64>'), 'models.rs missing FormatOption::tbr');
-    assert.ok(modelsRs.includes('pub abr: Option<f64>'), 'models.rs missing FormatOption::abr');
+    const requiredTaskAndSettingsFields = [
+      'pub selected_items: Option<Vec<String>>',
+      'pub tracks_requested: Option<u32>',
+      'pub tracks_completed: Option<u32>',
+      'pub tracks_failed: Option<u32>',
+      'pub python_path:',
+      'pub schema_version:',
+      'pub struct PythonValidationResult',
+      'pub settings_file_path: String',
+    ];
+    for (const field of requiredTaskAndSettingsFields) {
+      assert.ok(modelsRs.includes(field), `models.rs missing required contract declaration: ${field}`);
+    }
+
+    assert.ok(modelsRs.includes('pub entries: Option<Vec<PlaylistEntry>>'));
+    assert.ok(modelsRs.includes('pub tbr: Option<f64>'));
+    assert.ok(modelsRs.includes('pub abr: Option<f64>'));
     assert.ok(
       modelsRs.includes('#[serde(rename = "taskId", alias = "task_id")]'),
       'models.rs missing NotificationItem taskId serde rename'
@@ -193,9 +182,9 @@ describe('Rust <-> TypeScript MediaMetadata & IPC contract consistency', () => {
       'spotify.rs must explicitly initialize entries across all 9 MediaMetadata constructors'
     );
     assert.equal(
-      (spotifyRs.match(/accepts_ranges:\s*None,/g) || []).length,
-      9,
-      'spotify.rs must explicitly initialize accepts_ranges across all 9 MediaMetadata constructors'
+      spotifyRs.includes('accepts_ranges:'),
+      false,
+      'spotify.rs must not contain removed direct-download accepts_ranges field'
     );
   });
 });

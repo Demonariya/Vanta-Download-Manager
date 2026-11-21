@@ -5,8 +5,11 @@ import {
   formatBytes,
   formatDuration,
   determineEngineForUrl,
-  isDirectFileUrl,
+  validateMediaUrl,
+  isUnsupportedGenericFileUrl,
+  getUnsupportedNonMediaExtension,
   isPlaylistCandidateUrl,
+  formatYtDlpPlaylistItems,
   parseBatchUrls,
   sanitizeFilename,
   parseYtdlpProgress,
@@ -35,34 +38,73 @@ test('formatDuration formats seconds to MM:SS or HH:MM:SS', () => {
   assert.equal(formatDuration(3665), '01:01:05');
 });
 
-test('determineEngineForUrl routes Spotify, direct files, and video extractors accurately', () => {
+test('determineEngineForUrl routes exclusively to spotdl or yt-dlp', () => {
   assert.equal(determineEngineForUrl('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT'), 'spotdl');
+  assert.equal(determineEngineForUrl('spotify:album:1DFixLWuPkv3KT3TnV35m3'), 'spotdl');
   assert.equal(determineEngineForUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'yt-dlp');
   assert.equal(determineEngineForUrl('https://vimeo.com/76979871'), 'yt-dlp');
-  assert.equal(determineEngineForUrl('https://example.com/archive.zip'), 'direct');
-  assert.equal(determineEngineForUrl('https://example.com/video.mp4'), 'direct');
-  assert.equal(isDirectFileUrl('https://cdn.example.org/ubuntu.iso'), true);
-  assert.equal(isDirectFileUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), false);
+  assert.equal(determineEngineForUrl('https://soundcloud.com/artist/track'), 'yt-dlp');
 });
 
-test('isPlaylistCandidateUrl detects yt-dlp and Spotify collections cleanly', () => {
+test('validateMediaUrl rejects non-media files, bad schemes, and CLI injection flags', () => {
+  const rejected = [
+    'https://example.com/archive.zip',
+    'https://example.com/backup.rar',
+    'https://cdn.example.org/setup.exe',
+    'https://cdn.example.org/installer.msi',
+    'https://docs.example.org/manual.pdf',
+    'https://mirror.example.org/linux.iso',
+    'https://mirror.example.org/app.dmg',
+    'ftp://example.com/file.mp4',
+    '--exec=evil',
+    'not a valid url',
+  ];
+
+  for (const url of rejected) {
+    const res = validateMediaUrl(url);
+    assert.equal(res.valid, false, `Expected rejection for ${url}`);
+  }
+
+  assert.equal(getUnsupportedNonMediaExtension('https://example.com/archive.zip'), 'zip');
+  assert.equal(isUnsupportedGenericFileUrl('https://cdn.example.org/setup.exe'), true);
+  assert.equal(isUnsupportedGenericFileUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), false);
+
+  const okVideo = validateMediaUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.equal(okVideo.valid, true);
+  if (okVideo.valid) {
+    assert.equal(okVideo.engine, 'yt-dlp');
+  }
+
+  const okSpotify = validateMediaUrl('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
+  assert.equal(okSpotify.valid, true);
+  if (okSpotify.valid) {
+    assert.equal(okSpotify.engine, 'spotdl');
+  }
+});
+
+test('isPlaylistCandidateUrl and formatYtDlpPlaylistItems handle ordered collections cleanly', () => {
   assert.equal(isPlaylistCandidateUrl('https://www.youtube.com/watch?v=abc&list=PL123'), true);
   assert.equal(isPlaylistCandidateUrl('https://www.youtube.com/playlist?list=PL123'), true);
   assert.equal(isPlaylistCandidateUrl('https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M'), true);
   assert.equal(isPlaylistCandidateUrl('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT'), false);
+  assert.equal(isPlaylistCandidateUrl('https://example.com/archive.zip'), false);
+
+  assert.equal(formatYtDlpPlaylistItems([3, 1, 3, -1, 2]), '3,1,2');
+  assert.equal(formatYtDlpPlaylistItems([]), '');
 });
 
-test('parseBatchUrls separates valid URLs, duplicates, and invalid lines', () => {
+test('parseBatchUrls separates valid media URLs, duplicates, and rejected non-media or invalid lines', () => {
   const res = parseBatchUrls([
-    'https://example.com/file.zip',
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
     'not a valid url',
     'https://example.com/file.zip',
-    '--exec=evil',
     'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    '--exec=evil',
+    'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
   ].join('\n'));
 
   assert.equal(res.valid.length, 2);
-  assert.equal(res.invalid.length, 2);
+  assert.equal(res.invalid.length, 3);
   assert.equal(res.duplicatesRemoved, 1);
 });
 

@@ -1,4 +1,4 @@
-import { spawn, execSync, ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,6 +15,7 @@ import {
   DiagnosticResult,
   AppSettings,
   PlaylistEntry,
+  PythonValidationResult,
 } from '../src/types';
 import {
   parseYtdlpProgress,
@@ -22,23 +23,20 @@ import {
   sanitizeFilename,
   determineEngineForUrl,
   isPlaylistCandidateUrl,
+  validateMediaUrl,
+  formatYtDlpPlaylistItems,
 } from '../src/utils/engine-parser';
 import { ProgressTracker, buildIdleMetricsPatch } from '../src/utils/download-core';
 import { resolveVideoFormatSelector } from '../src/utils/media-formats';
-import { sanitizeLog, classifyDownloadError } from '../src/utils/error-classifier';
+import { sanitizeLog } from '../src/utils/error-classifier';
 import { tryParseSpotifyInput } from '../src/utils/spotify';
-import { getSettings } from './db';
+import { getAppDataDir, getSettings, getSettingsFilePath } from './db';
 import {
   resolveCookieSource,
   testCookieExtraction as runCookieTest,
   appendAppLog,
 } from './cookies';
 import { spotifyMetadataService } from './spotify';
-import {
-  inspectDirectUrl,
-  executeDirectDownload,
-  abortDirectDownload,
-} from './directDownloader';
 
 const ENGINE_VERSION_TIMEOUT_MS = 8_000;
 const DIAGNOSTICS_TIMEOUT_MS = 15_000;
@@ -162,74 +160,195 @@ function runProcessAsync(
 }
 
 export function validateInspectionUrl(raw: string): string {
-  const trimmed = (raw || '').trim();
+  const res = validateMediaUrl(raw);
+  if (!res.valid) {
+    throw new Error(res.error);
+  }
+  return res.normalized;
+}
+
+export async function validatePythonExecutable(rawPath: string): Promise<PythonValidationResult> {
+  const trimmed = (rawPath || '').trim();
   if (!trimmed) {
-    throw new Error('URL cannot be empty. Enter an HTTP or HTTPS media URL.');
-  }
-  if (/[\s\u0000-\u001F\u007F]/.test(trimmed)) {
-    throw new Error('Invalid URL: contains whitespace or control characters.');
-  }
-  if (trimmed.startsWith('-')) {
-    throw new Error('Invalid URL: must start with http://, https://, or spotify:.');
+    return {
+      valid: false,
+      executablePath: '',
+      error: 'Python executable path cannot be empty.',
+    };
   }
 
-  // Validate Spotify URIs and Spotify URLs explicitly (supports spotify:<type>:<id>, open.spotify.com, spotify.link)
-  const parsedSpotify = tryParseSpotifyInput(trimmed);
-  if (parsedSpotify) {
-    if (parsedSpotify.kind === 'invalid') {
-      throw new Error(parsedSpotify.error);
-    }
-    return trimmed;
+  const resolved = path.resolve(trimmed);
+  if (!fs.existsSync(resolved)) {
+    return {
+      valid: false,
+      executablePath: trimmed,
+      error: `Configured Python executable does not exist: ${trimmed}`,
+    };
   }
-
-  let parsed: URL;
   try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new Error('Malformed URL. Check the URL and try again.');
+    const st = fs.statSync(resolved);
+    if (!st.isFile()) {
+      return {
+        valid: false,
+        executablePath: trimmed,
+        error: `Configured Python path is not a file: ${trimmed}`,
+      };
+    }
+  } catch (err: any) {
+    return {
+      valid: false,
+      executablePath: trimmed,
+      error: `Unable to inspect Python path: ${err?.message || String(err)}`,
+    };
   }
 
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Unsupported URL scheme. Only http:// and https:// URLs are supported.');
+  try {
+    const res = await runProcessAsync(resolved, ['--version'], ENGINE_VERSION_TIMEOUT_MS);
+    const stdout = (res.stdout || '').trim();
+    const stderr = (res.stderr || '').trim();
+    if (res.timedOut) {
+      return {
+        valid: false,
+        executablePath: resolved,
+        stdout: stdout || undefined,
+        stderr: stderr || undefined,
+        error: 'Timed out waiting for Python --version response.',
+      };
+    }
+    const combined = (stdout || stderr).trim();
+    const firstLine = combined.split(/\r?\n/)[0]?.trim() || '';
+    if (res.code === 0 && /^python\s+\d+/i.test(firstLine)) {
+      return {
+        valid: true,
+        executablePath: resolved,
+        version: firstLine,
+        stdout: stdout || undefined,
+        stderr: stderr || undefined,
+      };
+    }
+    return {
+      valid: false,
+      executablePath: resolved,
+      stdout: stdout || undefined,
+      stderr: stderr || undefined,
+      error:
+        combined ||
+        `Executable exited with status ${res.code ?? 'unknown'} and did not report a Python version.`,
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      executablePath: resolved,
+      error: `Failed to execute Python binary: ${err?.message || String(err)}`,
+    };
   }
-  if (!parsed.hostname || parsed.hostname.startsWith('.')) {
-    throw new Error('Malformed URL host. Check the URL and try again.');
-  }
-
-  return trimmed;
 }
 
 export class EngineManager {
   private activeProcesses: Map<string, ChildProcess> = new Map();
+  private cancelledTasks: Set<string> = new Set();
   private activeInspections: Map<string, TrackedInspection> = new Map();
   private cachedEngineStatus: { ts: number; data: EngineStatusMap } | null = null;
   private inflightEngineScan: Promise<EngineStatusMap> | null = null;
 
-  public getManagedRootDir(): string {
-    if (process.platform === 'win32') {
-      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-      return path.join(localAppData, 'com.vanta.downloadmanager', 'engines');
+  public getInstallRootDir(): string {
+    const override = process.env.VANTA_ENGINE_ROOT?.trim();
+    if (override) {
+      return path.dirname(path.resolve(override));
     }
-    const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-    return path.join(xdgData, 'com.vanta.downloadmanager', 'engines');
+    if (process.platform === 'win32') {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const installedDir = path.join(programFiles, 'VANTA Download Manager');
+      if (fs.existsSync(installedDir)) {
+        return installedDir;
+      }
+      return path.resolve(process.cwd(), '.vanta_install');
+    }
+    return path.resolve(process.cwd(), '.vanta_install');
+  }
+
+  public getManagedRootDir(): string {
+    const override = process.env.VANTA_ENGINE_ROOT?.trim();
+    if (override) {
+      return path.resolve(override);
+    }
+    return path.join(this.getInstallRootDir(), 'Engine');
+  }
+
+  public getYtdlpDir(): string {
+    return path.join(this.getManagedRootDir(), 'yt-dlp');
+  }
+
+  public getSpotdlDir(): string {
+    return path.join(this.getManagedRootDir(), 'spotdl');
+  }
+
+  public getSpotdlVenvDir(): string {
+    return path.join(this.getSpotdlDir(), 'venv');
+  }
+
+  public getSpotdlVenvPython(): string {
+    return process.platform === 'win32'
+      ? path.join(this.getSpotdlVenvDir(), 'Scripts', 'python.exe')
+      : path.join(this.getSpotdlVenvDir(), 'bin', 'python3');
+  }
+
+  public getSpotdlVenvExe(): string {
+    return process.platform === 'win32'
+      ? path.join(this.getSpotdlVenvDir(), 'Scripts', 'spotdl.exe')
+      : path.join(this.getSpotdlVenvDir(), 'bin', 'spotdl');
+  }
+
+  public getFfmpegDir(): string {
+    return path.join(this.getManagedRootDir(), 'ffmpeg', 'bin');
   }
 
   public getManagedBinDir(): string {
-    return path.join(this.getManagedRootDir(), 'bin');
+    return this.getManagedRootDir();
+  }
+
+  public getManifestPath(): string {
+    return path.join(this.getManagedRootDir(), 'manifest.json');
+  }
+
+  private isDirWritable(dir: string): boolean {
+    try {
+      const checkDir = fs.existsSync(dir) ? dir : this.getInstallRootDir();
+      if (!fs.existsSync(checkDir)) {
+        fs.mkdirSync(checkDir, { recursive: true });
+      }
+      const probe = path.join(checkDir, `.vanta_probe_${process.pid}_${Date.now()}`);
+      fs.writeFileSync(probe, 'ok', 'utf-8');
+      fs.unlinkSync(probe);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public findExecutable(name: string): string | null {
     const exeName = process.platform === 'win32' && !name.endsWith('.exe') ? `${name}.exe` : name;
-    const candidates = [
-      path.join(this.getManagedBinDir(), exeName),
+    const candidates: string[] = [];
+
+    if (name === 'yt-dlp') {
+      candidates.push(path.join(this.getYtdlpDir(), exeName));
+    } else if (name === 'ffmpeg' || name === 'ffprobe') {
+      candidates.push(path.join(this.getFfmpegDir(), exeName));
+    } else if (name === 'spotdl') {
+      candidates.push(this.getSpotdlVenvExe());
+      candidates.push(path.join(this.getSpotdlDir(), exeName));
+    }
+
+    candidates.push(
+      path.join(this.getManagedRootDir(), exeName),
       path.resolve(process.cwd(), 'bin', exeName),
       path.resolve(process.cwd(), '.venv', 'bin', exeName),
       `/app/applet/.venv/bin/${name}`,
       `/opt/spotdl-venv/bin/${name}`,
       `/root/.local/bin/${name}`,
       `/usr/local/bin/${name}`,
-      `/usr/bin/${name}`,
-    ];
+      `/usr/bin/${name}`
+    );
 
     for (const p of candidates) {
       if (fs.existsSync(p)) {
@@ -248,11 +367,12 @@ export class EngineManager {
     }
 
     try {
-      const lookupCmd = process.platform === 'win32' ? `where ${exeName}` : `which ${name} 2>/dev/null`;
-      const out = execSync(lookupCmd, {
+      const lookupCmd = process.platform === 'win32' ? 'where' : 'which';
+      const out = execFileSync(lookupCmd, [process.platform === 'win32' ? exeName : name], {
         encoding: 'utf-8',
         windowsHide: true,
         timeout: 2000,
+        stdio: ['ignore', 'pipe', 'ignore'],
       })
         .split(/\r?\n/)[0]
         ?.trim();
@@ -262,6 +382,64 @@ export class EngineManager {
     }
 
     return null;
+  }
+
+  public async resolvePythonForSpotdl(settings?: AppSettings): Promise<string> {
+    const s = settings || getSettings();
+    const configured = (s.python_path || '').trim();
+    if (configured) {
+      const check = await validatePythonExecutable(configured);
+      if (!check.valid) {
+        throw new Error(
+          check.error ||
+            `Configured Python executable '${configured}' is invalid. Fix or clear Python Configuration in Settings.`
+        );
+      }
+      return check.executablePath;
+    }
+
+    const systemNames = process.platform === 'win32' ? ['python.exe', 'python3.exe'] : ['python3', 'python'];
+    for (const candidate of systemNames) {
+      const found = this.findExecutable(candidate.replace(/\.exe$/i, ''));
+      if (found) {
+        const check = await validatePythonExecutable(found);
+        if (check.valid) return check.executablePath;
+      }
+    }
+
+    throw new Error(
+      'No valid Python 3 interpreter found. Configure the Python executable path in Settings > Python Configuration.'
+    );
+  }
+
+  public async resolveSpotdlInvocation(settings?: AppSettings): Promise<{ program: string; leadingArgs: string[] }> {
+    const s = settings || getSettings();
+    if ((s.python_path || '').trim()) {
+      await this.resolvePythonForSpotdl(s);
+    }
+
+    const venvPy = this.getSpotdlVenvPython();
+    if (fs.existsSync(venvPy)) {
+      return { program: venvPy, leadingArgs: ['-m', 'spotdl'] };
+    }
+    const venvExe = this.getSpotdlVenvExe();
+    if (fs.existsSync(venvExe)) {
+      return { program: venvExe, leadingArgs: [] };
+    }
+    const standalone = path.join(
+      this.getSpotdlDir(),
+      process.platform === 'win32' ? 'spotdl.exe' : 'spotdl'
+    );
+    if (fs.existsSync(standalone)) {
+      return { program: standalone, leadingArgs: [] };
+    }
+    const found = this.findExecutable('spotdl');
+    if (found) {
+      return { program: found, leadingArgs: [] };
+    }
+    throw new Error(
+      'spotDL runtime is not installed in Engine/spotdl. Install spotDL from Diagnostics or configure Python 3 in Settings.'
+    );
   }
 
   public async getEngineStatus(forceRefresh = false): Promise<EngineStatusMap> {
@@ -490,10 +668,6 @@ export class EngineManager {
 
     if (engine === 'spotdl') {
       return this.inspectSpotdlUrl(url, requestId, options?.timeoutMs);
-    }
-
-    if (engine === 'direct') {
-      return inspectDirectUrl(url, settings, options?.timeoutMs ?? 15_000);
     }
 
     const ytdlpPath = options?.ytdlpBinary || this.findExecutable('yt-dlp');
@@ -795,10 +969,14 @@ export class EngineManager {
     onComplete: (outputPath: string, extra?: Partial<DownloadTask>) => void,
     onError: (err: string) => void
   ): void {
-    if (task.engine === 'direct') {
-      executeDirectDownload(task, settings, onProgress, onComplete, onError);
-    } else if (task.engine === 'spotdl') {
-      this.executeSpotdlDownload(task, settings, onProgress, onComplete, onError);
+    this.cancelledTasks.delete(task.id);
+    if (task.engine !== 'spotdl' && task.engine !== 'yt-dlp') {
+      return onError(
+        'Generic direct file downloads are not supported. VANTA only downloads video and music URLs via yt-dlp or spotDL.'
+      );
+    }
+    if (task.engine === 'spotdl') {
+      void this.executeSpotdlDownload(task, settings, onProgress, onComplete, onError);
     } else {
       this.executeYtdlpDownload(task, settings, onProgress, onComplete, onError);
     }
@@ -883,10 +1061,17 @@ export class EngineManager {
       '--extractor-retries', '3',
     ];
 
-    if (task.playlist_mode === 'single') {
-      args.push('--no-playlist');
-    } else if (task.playlist_mode === 'playlist') {
+    if (task.playlist_mode === 'playlist') {
       args.push('--yes-playlist');
+      const selectedNums = (task.selected_items || [])
+        .map((item) => Number(item))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      const playlistSpec = formatYtDlpPlaylistItems(selectedNums);
+      if (playlistSpec) {
+        args.push('--playlist-items', playlistSpec);
+      }
+    } else {
+      args.push('--no-playlist');
     }
 
     if (settings.conflict_strategy === 'overwrite') {
@@ -1111,21 +1296,161 @@ export class EngineManager {
     }
   }
 
-  private executeSpotdlDownload(
+  private async executeSpotdlDownload(
     task: DownloadTask,
     settings: AppSettings,
     onProgress: (update: Partial<DownloadTask>) => void,
     onComplete: (outputPath: string, extra?: Partial<DownloadTask>) => void,
     onError: (err: string) => void
-  ): void {
-    const spotdlPath = this.findExecutable('spotdl');
-    if (!spotdlPath) {
-      return onError('spotDL executable not found. Install spotDL in Engines & Diagnostics.');
+  ): Promise<void> {
+    let invocation: { program: string; leadingArgs: string[] };
+    try {
+      invocation = await this.resolveSpotdlInvocation(settings);
+    } catch (err: any) {
+      return onError(err?.message || 'spotDL runtime is not available.');
     }
 
     const outDir = this.resolveOutputDir(task, settings);
     if (!fs.existsSync(outDir)) {
       fs.mkdirSync(outDir, { recursive: true });
+    }
+
+    const format = task.audio_format || settings.default_audio_format || 'mp3';
+    const bitrate = task.audio_bitrate || settings.default_audio_bitrate || '320k';
+    const ffmpegPath = this.findExecutable('ffmpeg');
+    const orderedTracks = Array.isArray(task.selected_items)
+      ? task.selected_items.map((u) => String(u).trim()).filter(Boolean)
+      : [];
+
+    if (orderedTracks.length > 0) {
+      const folderName = sanitizeFilename(task.title || 'Spotify Playlist');
+      const targetDir =
+        (task.content_type === 'playlist' || task.content_type === 'album') && folderName
+          ? path.join(outDir, folderName)
+          : outDir;
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      const startedAtMs = Date.now();
+      let completedCount = 0;
+      let failedCount = 0;
+      let lastErr = '';
+      let lastFile: string | null = null;
+
+      for (let i = 0; i < orderedTracks.length; i += 1) {
+        if (this.cancelledTasks.has(task.id)) return;
+        const trackUrl = orderedTracks[i];
+        const trackStartedAt = Date.now();
+
+        onProgress({
+          status: 'downloading',
+          tracks_requested: orderedTracks.length,
+          tracks_completed: completedCount,
+          tracks_failed: failedCount,
+          percentage_known: true,
+          progress_percentage: Math.round((i / orderedTracks.length) * 100),
+          current_phase: `Downloading track ${i + 1} of ${orderedTracks.length}...`,
+        });
+
+        const prefix = String(i + 1).padStart(2, '0');
+        const outTemplate = path.join(targetDir, `${prefix} - {artists} - {title}.{output-ext}`);
+        const args = [
+          ...invocation.leadingArgs,
+          'download',
+          trackUrl,
+          '--output',
+          outTemplate,
+          '--format',
+          format,
+          '--bitrate',
+          bitrate,
+          '--log-level',
+          'INFO',
+        ];
+        if (ffmpegPath) {
+          args.push('--ffmpeg', ffmpegPath);
+        }
+
+        const res = await new Promise<{ ok: boolean; err: string }>((resolve) => {
+          const proc = spawn(invocation.program, args, {
+            windowsHide: true,
+            detached: process.platform !== 'win32',
+          });
+          this.activeProcesses.set(task.id, proc);
+          let tail = '';
+          proc.stdout?.on('data', (d) => {
+            tail = (tail + d.toString()).slice(-2000);
+          });
+          proc.stderr?.on('data', (d) => {
+            tail = (tail + d.toString()).slice(-2000);
+          });
+          proc.on('error', (err) => {
+            this.activeProcesses.delete(task.id);
+            resolve({ ok: false, err: err.message });
+          });
+          proc.on('close', (code) => {
+            this.activeProcesses.delete(task.id);
+            if (this.cancelledTasks.has(task.id) || code === null) {
+              resolve({ ok: false, err: 'cancelled' });
+            } else if (code === 0) {
+              resolve({ ok: true, err: '' });
+            } else {
+              resolve({ ok: false, err: sanitizeLog(tail || `Exited with code ${code}`) });
+            }
+          });
+        });
+
+        if (this.cancelledTasks.has(task.id)) return;
+        if (res.ok) {
+          const created = this.findRecentlyCreatedFile(targetDir, trackStartedAt, true);
+          if (created) {
+            completedCount += 1;
+            lastFile = created;
+          } else {
+            failedCount += 1;
+            lastErr = `Track ${i + 1} completed without an audio file on disk.`;
+          }
+        } else {
+          failedCount += 1;
+          lastErr = res.err;
+        }
+      }
+
+      onProgress({
+        tracks_requested: orderedTracks.length,
+        tracks_completed: completedCount,
+        tracks_failed: failedCount,
+        progress_percentage: Math.round((completedCount / orderedTracks.length) * 100),
+      });
+
+      if (failedCount > 0 || completedCount < orderedTracks.length) {
+        return onError(
+          `${completedCount} of ${orderedTracks.length} tracks succeeded; ${failedCount} failed. ${lastErr}`.trim()
+        );
+      }
+
+      const finalFile = lastFile || this.findRecentlyCreatedFile(targetDir, startedAtMs, true);
+      if (!finalFile || !fs.existsSync(finalFile)) {
+        return onError('spotDL playlist completed without verified audio files on disk.');
+      }
+      const stat = fs.statSync(finalFile);
+      const mediaInfo = this.verifyMediaFile(finalFile);
+      return onComplete(targetDir, {
+        tracks_requested: orderedTracks.length,
+        tracks_completed: completedCount,
+        tracks_failed: 0,
+        total_bytes: stat.size,
+        downloaded_bytes: stat.size,
+        remaining_bytes: 0,
+        percentage_known: true,
+        ext: format,
+        verified_audio_info: mediaInfo?.audioSummary || undefined,
+        audio_codec: mediaInfo?.audioCodec ?? null,
+        ...buildIdleMetricsPatch(task),
+        current_phase: `Completed (${completedCount}/${orderedTracks.length} tracks)`,
+        eta_str: 'Finished',
+      });
     }
 
     const parsedSpotify = tryParseSpotifyInput(task.url);
@@ -1134,12 +1459,8 @@ export class EngineManager {
     }
 
     const targetUrl =
-      parsedSpotify && parsedSpotify.kind === 'resource'
-        ? parsedSpotify.canonicalUrl
-        : task.url;
+      parsedSpotify && parsedSpotify.kind === 'resource' ? parsedSpotify.canonicalUrl : task.url;
 
-    const format = task.audio_format || settings.default_audio_format || 'mp3';
-    const bitrate = task.audio_bitrate || settings.default_audio_bitrate || '320k';
     const customStem = task.custom_filename?.trim()
       ? sanitizeFilename(task.custom_filename.trim()).replace(/\.[^.]+$/, '')
       : '';
@@ -1150,6 +1471,7 @@ export class EngineManager {
       : path.join(outDir, '{artists} - {title}.{output-ext}');
 
     const args = [
+      ...invocation.leadingArgs,
       'download',
       targetUrl,
       '--output',
@@ -1161,6 +1483,9 @@ export class EngineManager {
       '--log-level',
       'INFO',
     ];
+    if (ffmpegPath) {
+      args.push('--ffmpeg', ffmpegPath);
+    }
 
     const startedAtMs = Date.now();
     onProgress({
@@ -1173,7 +1498,7 @@ export class EngineManager {
     });
 
     try {
-      const proc = spawn(spotdlPath, args, {
+      const proc = spawn(invocation.program, args, {
         windowsHide: true,
         detached: process.platform !== 'win32',
       });
@@ -1211,6 +1536,7 @@ export class EngineManager {
 
       proc.on('close', (code) => {
         this.activeProcesses.delete(task.id);
+        if (this.cancelledTasks.has(task.id)) return;
         if (code === 0) {
           const finalFile = this.findRecentlyCreatedFile(outDir, startedAtMs, true);
           if (!finalFile || !fs.existsSync(finalFile)) {
@@ -1264,10 +1590,8 @@ export class EngineManager {
     }
   }
 
-  public cancelOrPauseProcess(taskId: string, reason: 'paused' | 'cancelled' = 'cancelled'): boolean {
-    if (abortDirectDownload(taskId, reason)) {
-      return true;
-    }
+  public cancelOrPauseProcess(taskId: string, _reason: 'paused' | 'cancelled' = 'cancelled'): boolean {
+    this.cancelledTasks.add(taskId);
     const proc = this.activeProcesses.get(taskId);
     if (proc) {
       killChildProcessTree(proc);
@@ -1295,8 +1619,9 @@ export class EngineManager {
       const stats = fs.statSync(filePath);
       if (!stats.isFile() || stats.size <= 0) return null;
 
-      const jsonStr = execSync(
-        `"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${filePath}"`,
+      const jsonStr = execFileSync(
+        ffprobePath,
+        ['-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', filePath],
         {
           encoding: 'utf-8',
           timeout: 8000,
@@ -1391,107 +1716,7 @@ export class EngineManager {
   }
 
   public async updateEngine(engineName: string): Promise<EngineUpdateResult> {
-    const status = await this.getEngineStatus();
-    const binDir = path.resolve(process.cwd(), 'bin');
-    if (!fs.existsSync(binDir)) {
-      fs.mkdirSync(binDir, { recursive: true });
-    }
-
-    if (engineName === 'ytdlp' || engineName === 'yt-dlp') {
-      const prevVersion = status.ytdlp.version;
-      const targetBin = path.join(binDir, 'yt-dlp');
-      const tempBin = path.join(binDir, 'yt-dlp.tmp');
-      const backupBin = path.join(binDir, 'yt-dlp.bak');
-
-      try {
-        execSync(`curl -L -o "${tempBin}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x "${tempBin}"`, {
-          timeout: 60000,
-          windowsHide: true,
-        });
-
-        const verOutput = execSync(`"${tempBin}" --version`, {
-          encoding: 'utf-8',
-          timeout: 5000,
-          windowsHide: true,
-        }).trim();
-        if (!verOutput) throw new Error('Verification failed: newly downloaded binary returned empty version');
-
-        if (fs.existsSync(targetBin)) {
-          fs.copyFileSync(targetBin, backupBin);
-        }
-
-        fs.renameSync(tempBin, targetBin);
-        fs.chmodSync(targetBin, 0o755);
-
-        return {
-          engine: 'yt-dlp',
-          success: true,
-          previousVersion: prevVersion,
-          currentVersion: verOutput,
-          message: `Successfully upgraded yt-dlp to version ${verOutput}`,
-        };
-      } catch (err: any) {
-        if (fs.existsSync(backupBin) && !fs.existsSync(targetBin)) {
-          fs.copyFileSync(backupBin, targetBin);
-        }
-        if (fs.existsSync(tempBin)) {
-          try { fs.unlinkSync(tempBin); } catch {}
-        }
-        return {
-          engine: 'yt-dlp',
-          success: false,
-          previousVersion: prevVersion,
-          currentVersion: prevVersion,
-          message: `Failed to update yt-dlp: ${err.message}`,
-          rolledBack: true,
-        };
-      }
-    }
-
-    if (engineName === 'spotdl') {
-      const prevVersion = status.spotdl.version;
-      try {
-        execSync(`python3 -m pip install --upgrade --user spotdl`, {
-          encoding: 'utf-8',
-          timeout: 120000,
-          windowsHide: true,
-        });
-
-        const spotdlBin = this.findExecutable('spotdl');
-        const verOutput = spotdlBin
-          ? execSync(`"${spotdlBin}" --version`, {
-              encoding: 'utf-8',
-              timeout: 5000,
-              windowsHide: true,
-            }).trim()
-          : '';
-
-        return {
-          engine: 'spotdl',
-          success: true,
-          previousVersion: prevVersion,
-          currentVersion: verOutput || prevVersion,
-          message: `Successfully upgraded spotDL to ${verOutput || 'latest'}`,
-        };
-      } catch (err: any) {
-        return {
-          engine: 'spotdl',
-          success: false,
-          previousVersion: prevVersion,
-          currentVersion: prevVersion,
-          message: `Failed to update spotDL: ${err.message}`,
-          rolledBack: false,
-        };
-      }
-    }
-
-    return {
-      engine: engineName,
-      success: false,
-      previousVersion: '',
-      currentVersion: '',
-      message: `Engine ${engineName} does not support in-app automated updates.`,
-    };
+    return this.installEngine(engineName, true);
   }
 
   public async getManagedEngineInfo(): Promise<ManagedEngineInfo> {
@@ -1501,9 +1726,18 @@ export class EngineManager {
     if (!engines.ffmpeg.available) missingRequired.push('ffmpeg');
     if (!engines.ffprobe.available) missingRequired.push('ffprobe');
 
+    const writable = this.isDirWritable(this.getManagedRootDir());
+
     return {
-      installDir: this.getManagedBinDir(),
-      manifestPath: path.join(this.getManagedRootDir(), 'manifest.json'),
+      installRoot: this.getInstallRootDir(),
+      installDir: this.getManagedRootDir(),
+      ytdlpDir: this.getYtdlpDir(),
+      spotdlDir: this.getSpotdlDir(),
+      ffmpegDir: this.getFfmpegDir(),
+      manifestPath: this.getManifestPath(),
+      settingsFilePath: getSettingsFilePath(getAppDataDir()),
+      isWritable: writable,
+      requiresElevation: !writable && process.platform === 'win32',
       requiredReady: missingRequired.length === 0,
       missingRequired,
       engines,
@@ -1548,13 +1782,13 @@ export class EngineManager {
     }
 
     if (normalized === 'yt-dlp') {
-      const binDir = this.getManagedBinDir();
-      fs.mkdirSync(binDir, { recursive: true });
+      const ytdlpDir = this.getYtdlpDir();
+      fs.mkdirSync(ytdlpDir, { recursive: true });
       const prevVersion = status.ytdlp.version;
       const assetName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-      const targetBin = path.join(binDir, assetName);
-      const tempBin = path.join(binDir, `${assetName}.part`);
-      const backupBin = path.join(binDir, `${assetName}.bak`);
+      const targetBin = path.join(ytdlpDir, assetName);
+      const tempBin = path.join(ytdlpDir, `${assetName}.part`);
+      const backupBin = path.join(ytdlpDir, `${assetName}.bak`);
 
       try {
         onProgress?.({
@@ -1599,7 +1833,7 @@ export class EngineManager {
         }
 
         if (process.platform !== 'win32') fs.chmodSync(tempBin, 0o755);
-        const verOutput = execSync(`"${tempBin}" --version`, {
+        const verOutput = execFileSync(tempBin, ['--version'], {
           encoding: 'utf-8',
           timeout: 8000,
           windowsHide: true,
@@ -1609,6 +1843,7 @@ export class EngineManager {
         if (fs.existsSync(targetBin)) fs.copyFileSync(targetBin, backupBin);
         fs.renameSync(tempBin, targetBin);
         if (fs.existsSync(backupBin)) fs.unlinkSync(backupBin);
+        this.cachedEngineStatus = null;
 
         onProgress?.({
           engine: 'yt-dlp',
@@ -1652,7 +1887,101 @@ export class EngineManager {
       }
     }
 
-    return this.updateEngine(engineName);
+    if (normalized === 'spotdl') {
+      const prevVersion = status.spotdl.version;
+      try {
+        const pythonExe = await this.resolvePythonForSpotdl();
+        const spotdlDir = this.getSpotdlDir();
+        const venvDir = this.getSpotdlVenvDir();
+        fs.mkdirSync(spotdlDir, { recursive: true });
+
+        onProgress?.({
+          engine: 'spotdl',
+          status: 'installing',
+          phase: 'Creating isolated Engine/spotdl venv...',
+          progressPercentage: 20,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          message: 'Provisioning isolated Python environment under Engine/spotdl/venv...',
+        });
+
+        if (!fs.existsSync(this.getSpotdlVenvPython())) {
+          const mkVenv = await runProcessAsync(pythonExe, ['-m', 'venv', venvDir], 60_000);
+          if (mkVenv.code !== 0) {
+            throw new Error(mkVenv.stderr || mkVenv.stdout || 'Failed creating isolated venv');
+          }
+        }
+
+        const venvPy = this.getSpotdlVenvPython();
+        onProgress?.({
+          engine: 'spotdl',
+          status: 'installing',
+          phase: 'Installing spotDL in isolated venv...',
+          progressPercentage: 60,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          message: 'Installing spotDL without modifying global Python packages...',
+        });
+
+        const pipRes = await runProcessAsync(
+          venvPy,
+          ['-m', 'pip', 'install', '--upgrade', 'spotdl'],
+          120_000
+        );
+        if (pipRes.code !== 0) {
+          throw new Error(pipRes.stderr || pipRes.stdout || 'pip install spotdl failed');
+        }
+
+        const verRes = await runProcessAsync(venvPy, ['-m', 'spotdl', '--version'], 8_000);
+        const verOutput = (verRes.stdout || verRes.stderr || '').trim().split(/\r?\n/)[0] || 'installed';
+        this.cachedEngineStatus = null;
+
+        onProgress?.({
+          engine: 'spotdl',
+          status: 'ready',
+          phase: 'Installed & Verified',
+          progressPercentage: 100,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          message: `spotDL ${verOutput} installed in Engine/spotdl/venv`,
+        });
+
+        return {
+          engine: 'spotdl',
+          success: true,
+          previousVersion: prevVersion,
+          currentVersion: verOutput,
+          message: `Successfully installed isolated spotDL (${verOutput})`,
+        };
+      } catch (err: any) {
+        onProgress?.({
+          engine: 'spotdl',
+          status: 'error',
+          phase: 'Installation failed',
+          progressPercentage: 0,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          message: err.message,
+          error: err.message,
+        });
+        return {
+          engine: 'spotdl',
+          success: false,
+          previousVersion: prevVersion,
+          currentVersion: prevVersion,
+          message: `Failed to install spotDL: ${err.message}`,
+          rolledBack: false,
+        };
+      }
+    }
+
+    return {
+      engine: normalized,
+      success: false,
+      previousVersion: '',
+      currentVersion: '',
+      message: `Engine ${normalized} must be installed via Desktop runtime or bundled packages.`,
+    };
   }
 
   public async installAllEngines(
@@ -1682,11 +2011,19 @@ export class EngineManager {
   } {
     const normalized = engineName.toLowerCase() === 'ytdlp' ? 'yt-dlp' : engineName.toLowerCase();
     const exeName = process.platform === 'win32' && !normalized.endsWith('.exe') ? `${normalized}.exe` : normalized;
-    const managedPath = path.join(this.getManagedBinDir(), exeName);
-    const localBinPath = path.resolve(process.cwd(), 'bin', exeName);
+    const candidates =
+      normalized === 'yt-dlp'
+        ? [path.join(this.getYtdlpDir(), exeName)]
+        : normalized === 'ffmpeg' || normalized === 'ffprobe'
+        ? [path.join(this.getFfmpegDir(), exeName)]
+        : [path.join(this.getManagedRootDir(), exeName)];
 
     let removed = false;
-    for (const candidate of [managedPath, localBinPath]) {
+    if (normalized === 'spotdl' && fs.existsSync(this.getSpotdlVenvDir())) {
+      fs.rmSync(this.getSpotdlVenvDir(), { recursive: true, force: true });
+      removed = true;
+    }
+    for (const candidate of candidates) {
       if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
         fs.unlinkSync(candidate);
         removed = true;
@@ -1697,8 +2034,8 @@ export class EngineManager {
       engine: normalized,
       removed,
       message: removed
-        ? `Removed managed ${normalized} binary.`
-        : `No managed ${normalized} binary found in install directory.`,
+        ? `Removed managed ${normalized} from Engine directory.`
+        : `No managed ${normalized} found in Engine directory.`,
     };
   }
 }

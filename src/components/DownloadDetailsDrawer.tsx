@@ -3,7 +3,6 @@ import {
   X,
   FolderOpen,
   FileCheck2,
-  ShieldCheck,
   Edit3,
   Check,
   Copy,
@@ -11,29 +10,25 @@ import {
   Terminal,
   RefreshCw,
 } from 'lucide-react';
-import { CategoryItem, DownloadTask } from '../types';
+import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { ProgressDisplay } from './ProgressDisplay';
 import { api } from '../services/api';
 
 interface DownloadDetailsDrawerProps {
   task: DownloadTask | null;
-  categories: CategoryItem[];
   onClose: () => void;
   onRetryTask: (id: string) => void;
 }
 
 export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
   task,
-  categories,
   onClose,
   onRetryTask,
 }) => {
   const [renameMode, setRenameMode] = useState(false);
   const [filenameDraft, setFilenameDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
-  const [expectedHash, setExpectedHash] = useState('');
-  const [verifyBusy, setVerifyBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -43,7 +38,6 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
     setRenameMode(false);
     const basename = (task.output_path || '').split(/[\\/]/).pop() || task.custom_filename || task.title;
     setFilenameDraft(basename);
-    setExpectedHash(task.expected_sha256 || '');
     setActionError(null);
     setActionNotice(null);
   }, [task?.id]);
@@ -64,35 +58,6 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
       setActionError(err?.message || 'Failed to rename output file.');
     } finally {
       setRenameBusy(false);
-    }
-  };
-
-  const handleVerifyChecksum = async () => {
-    setVerifyBusy(true);
-    setActionError(null);
-    setActionNotice(null);
-    try {
-      const res = await api.verifyTaskChecksum(task.id, expectedHash.trim() || undefined);
-      if (res.matches === true) {
-        setActionNotice(`SHA-256 matches expected digest (${res.sha256.slice(0, 12)}...).`);
-      } else if (res.matches === false) {
-        setActionError(`SHA-256 mismatch! Computed ${res.sha256}`);
-      } else {
-        setActionNotice(`Computed SHA-256: ${res.sha256}`);
-      }
-    } catch (err: any) {
-      setActionError(err?.message || 'Checksum verification failed.');
-    } finally {
-      setVerifyBusy(false);
-    }
-  };
-
-  const handleCategoryChange = async (nextCategoryId: string) => {
-    setActionError(null);
-    try {
-      await api.updateTaskMeta(task.id, { category_id: nextCategoryId || null });
-    } catch (err: any) {
-      setActionError(err?.message || 'Failed updating category.');
     }
   };
 
@@ -273,28 +238,20 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
                 </dd>
               </div>
             )}
+            {(task.tracks_requested ?? 0) > 0 && (
+              <div className="col-span-2">
+                <dt className="text-[var(--vanta-muted)]">Playlist / Selection Progress</dt>
+                <dd className="text-[var(--vanta-text)]">
+                  {task.tracks_completed ?? 0} of {task.tracks_requested} completed
+                  {(task.tracks_failed ?? 0) > 0 ? ` · ${task.tracks_failed} failed` : ''}
+                </dd>
+              </div>
+            )}
           </dl>
         </div>
 
-        {/* Category & Source Paths */}
+        {/* Source & Destination Paths */}
         <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
-          <div className="space-y-1">
-            <label className="text-[11px] font-medium text-[var(--vanta-muted)] block">
-              Category
-            </label>
-            <select
-              value={task.category_id || ''}
-              onChange={(e) => handleCategoryChange(e.target.value)}
-              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg px-2.5 py-1.5 text-xs text-[var(--vanta-text)]"
-            >
-              <option value="">Uncategorized</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
-              ))}
-            </select>
-          </div>
 
           <div className="space-y-1">
             <div className="flex items-center justify-between">
@@ -324,52 +281,6 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
             </div>
           )}
         </div>
-
-        {/* SHA-256 Checksum Integrity */}
-        {task.status === 'completed' && task.output_path && (
-          <div className="border-t border-[var(--vanta-border)] pt-4 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-[11px] font-mono uppercase tracking-wider text-[var(--vanta-muted)] flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-[#3fb950]" />
-                <span>File Integrity (SHA-256)</span>
-              </h3>
-              {task.checksum_verified === true && (
-                <span className="text-[11px] font-mono text-emerald-700 dark:text-[#3fb950]">
-                  Matched
-                </span>
-              )}
-              {task.checksum_verified === false && (
-                <span className="text-[11px] font-mono text-red-600 dark:text-[#f85149]">
-                  Mismatch
-                </span>
-              )}
-            </div>
-
-            {task.verified_sha256 && (
-              <p className="p-2 rounded-lg bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] font-mono text-[10px] text-[var(--vanta-text-secondary)] break-all">
-                {task.verified_sha256}
-              </p>
-            )}
-
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={expectedHash}
-                onChange={(e) => setExpectedHash(e.target.value)}
-                placeholder="Optional expected SHA-256 hex digest..."
-                className="flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-[var(--vanta-text)]"
-              />
-              <button
-                type="button"
-                disabled={verifyBusy}
-                onClick={handleVerifyChecksum}
-                className="px-3 py-1.5 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-text)] font-medium whitespace-nowrap shrink-0 transition-colors"
-              >
-                {verifyBusy ? 'Hashing...' : 'Verify SHA-256'}
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Sanitized Task Event Log */}
         <div className="border-t border-[var(--vanta-border)] pt-4 space-y-2">

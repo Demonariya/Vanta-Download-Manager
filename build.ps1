@@ -820,6 +820,12 @@ try {
 }
 Write-Ok "Tauri capabilities validated: src-tauri/capabilities/default.json"
 
+$nsisHookPath = Join-Path $script:RepoRoot 'src-tauri/nsis/hooks.nsh'
+if (-not (Test-Path $nsisHookPath)) {
+    Fail-Build -Message "Missing NSIS installer hook script: src-tauri/nsis/hooks.nsh" -Stage 'Asset Validation'
+}
+Write-Ok "NSIS installer hooks validated: src-tauri/nsis/hooks.nsh"
+
 if ($tauriConf.bundle -and $tauriConf.bundle.icon) {
     foreach ($iconRel in $tauriConf.bundle.icon) {
         $iconFull = Join-Path $script:RepoRoot (Join-Path 'src-tauri' $iconRel)
@@ -1045,14 +1051,25 @@ if ($expectedPortable) {
     if (Test-Path $portableStaging) {
         Remove-Item -Path $portableStaging -Recurse -Force
     }
-    New-Item -ItemType Directory -Path (Join-Path $portableStaging 'bin') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $portableStaging 'Engine/yt-dlp') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $portableStaging 'Engine/spotdl') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $portableStaging 'Engine/ffmpeg/bin') -Force | Out-Null
     Copy-Item -Path $mainExePath -Destination (Join-Path $portableStaging 'VANTA.exe') -Force
 
     if (Test-Path $tauriBinDir) {
         Get-ChildItem -Path $tauriBinDir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne '.gitkeep' } |
             ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $portableStaging 'bin') -Force
+                $targetSub = if ($_.Name -like '*yt-dlp*') {
+                    'Engine/yt-dlp'
+                } elseif ($_.Name -like '*ffmpeg*' -or $_.Name -like '*ffprobe*') {
+                    'Engine/ffmpeg/bin'
+                } elseif ($_.Name -like '*spotdl*') {
+                    'Engine/spotdl'
+                } else {
+                    'Engine'
+                }
+                Copy-Item -Path $_.FullName -Destination (Join-Path $portableStaging $targetSub) -Force
             }
     }
 

@@ -15,7 +15,7 @@ import {
   validateNetscapeCookies,
 } from '../src/utils/cookie-validator';
 import { sanitizeLog } from '../src/utils/error-classifier';
-import { getSettings, saveSettings } from './db';
+import { getAppDataDir, getSettings, saveSettings } from './db';
 
 export const SUPPORTED_BROWSERS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'chrome', label: 'Google Chrome' },
@@ -34,7 +34,7 @@ export type ResolvedCookieSource =
 const MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024;
 
 export function getDataDir(): string {
-  const dir = path.resolve(process.cwd(), '.vanta_data');
+  const dir = getAppDataDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

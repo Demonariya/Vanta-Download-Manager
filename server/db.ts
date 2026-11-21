@@ -1,186 +1,388 @@
 import { DatabaseSync } from 'node:sqlite';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   AppSettings,
-  CategoryItem,
   DownloadTask,
   NotificationItem,
   TaskLogEntry,
 } from '../src/types';
-import { DEFAULT_CATEGORIES } from '../src/utils/categories';
 import { sanitizeFilename } from '../src/utils/engine-parser';
 import { DEFAULT_SCHEDULER_SETTINGS } from '../src/utils/scheduler';
 
-const dataDir = path.resolve(process.cwd(), '.vanta_data');
+export const SETTINGS_SCHEMA_VERSION = 1;
+
+export function getAppDataDir(): string {
+  const override = process.env.VANTA_DATA_DIR?.trim();
+  if (override) {
+    return path.resolve(override);
+  }
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'VANTA Download Manager');
+  }
+  if (process.env.XDG_DATA_HOME?.trim()) {
+    return path.join(process.env.XDG_DATA_HOME.trim(), 'vanta-download-manager');
+  }
+  return path.resolve(process.cwd(), '.vanta_data');
+}
+
+function migrateLegacyWindowsDataIfNeeded(targetDir: string): void {
+  if (process.platform !== 'win32') return;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return;
+  const legacyDir = path.join(localAppData, 'com.vanta.downloadmanager');
+  if (legacyDir === targetDir || !fs.existsSync(legacyDir)) return;
+
+  for (const filename of ['vanta.db', 'vanta_native.db', 'cookies.txt']) {
+    const src = path.join(legacyDir, filename);
+    const dst = path.join(targetDir, filename);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      try {
+        fs.copyFileSync(src, dst);
+      } catch {
+        // Non-fatal best-effort migration
+      }
+    }
+  }
+}
+
+export function getSettingsFilePath(dir = getAppDataDir()): string {
+  return path.join(dir, 'settings.v1.json');
+}
+
+export function buildDefaultSettings(): AppSettings {
+  return {
+    schema_version: SETTINGS_SCHEMA_VERSION,
+    download_dir: path.join(os.homedir() || process.cwd(), 'Downloads', 'VANTA'),
+    max_concurrent_downloads: 3,
+    fragment_concurrency: 4,
+    global_bandwidth_limit_kbps: 0,
+    per_task_bandwidth_limit_kbps: 0,
+    max_retries: 3,
+    retry_delay_seconds: 5,
+    default_video_format: 'best',
+    default_audio_format: 'mp3',
+    default_audio_bitrate: '320k',
+    default_audio_sample_rate: undefined,
+    default_audio_bit_depth: undefined,
+    embed_thumbnail: true,
+    embed_metadata: true,
+    filename_template: '%(title)s [%(id)s].%(ext)s',
+    proxy_url: '',
+    floating_notifications_enabled: true,
+    floating_widget_enabled: true,
+    auto_dismiss_seconds: 5,
+    theme: 'dark',
+    auto_retry_failed: true,
+    auto_resume_on_startup: true,
+    clipboard_monitoring: false,
+    conflict_strategy: 'rename',
+    verify_media_on_complete: true,
+    tray_minimize_on_close: true,
+    scheduler: { ...DEFAULT_SCHEDULER_SETTINGS },
+    cookies_browser: 'auto',
+    cookies_profile: undefined,
+    cookies_file: undefined,
+    python_path: '',
+    user_agent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  };
+}
+
+export function validateSettings(settings: AppSettings): void {
+  if (!settings.download_dir || !String(settings.download_dir).trim()) {
+    throw new Error('Download directory cannot be empty.');
+  }
+  if (!Number.isFinite(settings.max_concurrent_downloads) || settings.max_concurrent_downloads < 1 || settings.max_concurrent_downloads > 16) {
+    throw new Error('Max concurrent downloads must be between 1 and 16.');
+  }
+  if (!Number.isFinite(settings.fragment_concurrency) || settings.fragment_concurrency < 1 || settings.fragment_concurrency > 32) {
+    throw new Error('Fragment concurrency must be between 1 and 32.');
+  }
+  if (!Number.isFinite(settings.max_retries) || settings.max_retries < 0 || settings.max_retries > 20) {
+    throw new Error('Max retries must be between 0 and 20.');
+  }
+  if (!Number.isFinite(settings.retry_delay_seconds) || settings.retry_delay_seconds < 1 || settings.retry_delay_seconds > 300) {
+    throw new Error('Retry delay must be between 1 and 300 seconds.');
+  }
+  if (!['rename', 'overwrite', 'skip'].includes(settings.conflict_strategy || 'rename')) {
+    throw new Error('Conflict strategy must be rename, overwrite, or skip.');
+  }
+  if (!['dark', 'light', 'system'].includes(settings.theme)) {
+    throw new Error('Theme must be dark, light, or system.');
+  }
+  if (!settings.filename_template || !String(settings.filename_template).trim()) {
+    throw new Error('Filename template cannot be empty.');
+  }
+  const proxy = (settings.proxy_url || '').trim();
+  if (proxy && !/^(https?|socks4|socks5):\/\//i.test(proxy)) {
+    throw new Error('Proxy URL must begin with http://, https://, socks4://, or socks5://.');
+  }
+  const cookiesFile = (settings.cookies_file || '').trim();
+  if (cookiesFile && !fs.existsSync(cookiesFile)) {
+    throw new Error(`Configured cookies file does not exist: ${cookiesFile}`);
+  }
+}
+
+export function atomicWriteFileSync(targetPath: string, content: string): void {
+  const dir = path.dirname(targetPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`;
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(tmpPath, 'w', 0o600);
+    fs.writeFileSync(fd, content, 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw err;
+  }
+}
+
+export function initializeDatabaseSchema(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      uploader TEXT,
+      duration INTEGER,
+      duration_string TEXT,
+      thumbnail TEXT,
+      engine TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress_percentage REAL DEFAULT 0,
+      speed_str TEXT DEFAULT '0 B/s',
+      speed_bytes_per_sec REAL DEFAULT 0,
+      downloaded_bytes INTEGER DEFAULT 0,
+      total_bytes INTEGER DEFAULT 0,
+      eta_str TEXT DEFAULT '--',
+      current_phase TEXT DEFAULT 'queued',
+      format_id TEXT DEFAULT 'best',
+      format_note TEXT,
+      ext TEXT DEFAULT 'mp4',
+      is_audio_only INTEGER DEFAULT 0,
+      audio_format TEXT,
+      audio_bitrate TEXT,
+      output_path TEXT NOT NULL,
+      error_message TEXT,
+      priority TEXT DEFAULT 'normal',
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      retries INTEGER DEFAULT 0,
+      max_retries INTEGER DEFAULT 3
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      task_id TEXT
+    );
+  `);
+
+  const migrations = [
+    'ALTER TABLE tasks ADD COLUMN audio_sample_rate INTEGER',
+    'ALTER TABLE tasks ADD COLUMN audio_bit_depth INTEGER',
+    'ALTER TABLE tasks ADD COLUMN audio_channels INTEGER',
+    'ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT',
+    'ALTER TABLE tasks ADD COLUMN album TEXT',
+    'ALTER TABLE tasks ADD COLUMN content_type TEXT',
+    'ALTER TABLE tasks ADD COLUMN remaining_bytes INTEGER DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN percentage_known INTEGER DEFAULT 1',
+    'ALTER TABLE tasks ADD COLUMN avg_speed_bytes_per_sec REAL DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN eta_seconds INTEGER',
+    'ALTER TABLE tasks ADD COLUMN elapsed_seconds INTEGER DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN active_connections INTEGER DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN last_progress_at TEXT',
+    'ALTER TABLE tasks ADD COLUMN video_codec TEXT',
+    'ALTER TABLE tasks ADD COLUMN audio_codec TEXT',
+    'ALTER TABLE tasks ADD COLUMN resolution_label TEXT',
+    'ALTER TABLE tasks ADD COLUMN custom_filename TEXT',
+    'ALTER TABLE tasks ADD COLUMN playlist_mode TEXT',
+    'ALTER TABLE tasks ADD COLUMN selected_items_json TEXT',
+    'ALTER TABLE tasks ADD COLUMN tracks_requested INTEGER',
+    'ALTER TABLE tasks ADD COLUMN tracks_completed INTEGER',
+    'ALTER TABLE tasks ADD COLUMN tracks_failed INTEGER',
+    'ALTER TABLE tasks ADD COLUMN logs_json TEXT',
+    'ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0',
+    'ALTER TABLE tasks ADD COLUMN started_at TEXT',
+  ];
+
+  for (const sql of migrations) {
+    try {
+      database.exec(sql);
+    } catch {
+      // column already exists
+    }
+  }
+
+  try {
+    database.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
+  } catch {}
+}
+
+function hydrateSettingsObject(rawObj: Record<string, any>, dataRoot: string): AppSettings {
+  const defaults = buildDefaultSettings();
+  const merged: any = { ...defaults, ...rawObj, schema_version: SETTINGS_SCHEMA_VERSION };
+  delete merged.cookies_content;
+  delete merged.enable_adult_sites;
+  delete merged.bypass_age_gate;
+
+  if (!merged.download_dir || !String(merged.download_dir).trim()) {
+    merged.download_dir = defaults.download_dir;
+  }
+  if (merged.cookies_file && typeof merged.cookies_file === 'string' && !fs.existsSync(merged.cookies_file)) {
+    if (merged.cookies_file === path.resolve(dataRoot, 'cookies.txt')) {
+      merged.cookies_file = undefined;
+    }
+  }
+  if (!merged.scheduler || typeof merged.scheduler !== 'object') {
+    merged.scheduler = { ...DEFAULT_SCHEDULER_SETTINGS };
+  }
+  merged.python_path = typeof merged.python_path === 'string' ? merged.python_path : '';
+  return merged as AppSettings;
+}
+
+export function readSettingsFromStorage(database: DatabaseSync, dataRoot: string): AppSettings {
+  const settingsFile = getSettingsFilePath(dataRoot);
+  if (fs.existsSync(settingsFile)) {
+    try {
+      const rawText = fs.readFileSync(settingsFile, 'utf-8');
+      const parsed = JSON.parse(rawText);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Settings file root is not a JSON object');
+      }
+      return hydrateSettingsObject(parsed, dataRoot);
+    } catch (err) {
+      const corruptPath = path.join(dataRoot, `settings.corrupt.${Date.now()}.json`);
+      try {
+        fs.renameSync(settingsFile, corruptPath);
+      } catch {}
+      console.warn(`Recovered corrupt settings file to ${corruptPath}:`, err);
+      const defaults = buildDefaultSettings();
+      writeSettingsToStorage(database, dataRoot, defaults);
+      return defaults;
+    }
+  }
+
+  const rows = database.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+  const rawFromDb: Record<string, any> = {};
+  for (const row of rows) {
+    if (row.key === 'cookies_content' || row.key === 'enable_adult_sites' || row.key === 'bypass_age_gate') {
+      continue;
+    }
+    try {
+      rawFromDb[row.key] = JSON.parse(row.value);
+    } catch {
+      rawFromDb[row.key] = row.value;
+    }
+  }
+
+  const hydrated = hydrateSettingsObject(rawFromDb, dataRoot);
+  try {
+    writeSettingsToStorage(database, dataRoot, hydrated);
+  } catch {
+    // Non-fatal if read-only on first read
+  }
+  return hydrated;
+}
+
+export function writeSettingsToStorage(
+  database: DatabaseSync,
+  dataRoot: string,
+  nextSettings: AppSettings
+): AppSettings {
+  const normalized: any = hydrateSettingsObject(nextSettings as any, dataRoot);
+  validateSettings(normalized as AppSettings);
+
+  atomicWriteFileSync(getSettingsFilePath(dataRoot), JSON.stringify(normalized, null, 2));
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
+    const insert = database.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    const remove = database.prepare('DELETE FROM settings WHERE key = ?');
+    for (const [key, val] of Object.entries(normalized)) {
+      if (val === undefined) {
+        remove.run(key);
+      } else {
+        insert.run(key, JSON.stringify(val));
+      }
+    }
+    database.exec('COMMIT');
+  } catch (err) {
+    try { database.exec('ROLLBACK'); } catch {}
+    throw err;
+  }
+
+  return normalized as AppSettings;
+}
+
+export function resetSettingsInStorage(database: DatabaseSync, dataRoot: string): AppSettings {
+  const defaults = buildDefaultSettings();
+  if (!fs.existsSync(defaults.download_dir)) {
+    try { fs.mkdirSync(defaults.download_dir, { recursive: true }); } catch {}
+  }
+  atomicWriteFileSync(getSettingsFilePath(dataRoot), JSON.stringify(defaults, null, 2));
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec('DELETE FROM settings');
+    const insert = database.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    for (const [key, val] of Object.entries(defaults)) {
+      if (val !== undefined) {
+        insert.run(key, JSON.stringify(val));
+      }
+    }
+    database.exec('COMMIT');
+  } catch (err) {
+    try { database.exec('ROLLBACK'); } catch {}
+    throw err;
+  }
+  return defaults;
+}
+
+const dataDir = getAppDataDir();
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
+migrateLegacyWindowsDataIfNeeded(dataDir);
 
 const dbPath = path.join(dataDir, 'vanta.db');
 const db = new DatabaseSync(dbPath);
+initializeDatabaseSchema(db);
 
-// Initialize core schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    url TEXT NOT NULL,
-    title TEXT NOT NULL,
-    uploader TEXT,
-    duration INTEGER,
-    duration_string TEXT,
-    thumbnail TEXT,
-    engine TEXT NOT NULL,
-    status TEXT NOT NULL,
-    progress_percentage REAL DEFAULT 0,
-    speed_str TEXT DEFAULT '0 B/s',
-    speed_bytes_per_sec REAL DEFAULT 0,
-    downloaded_bytes INTEGER DEFAULT 0,
-    total_bytes INTEGER DEFAULT 0,
-    eta_str TEXT DEFAULT '--',
-    current_phase TEXT DEFAULT 'queued',
-    format_id TEXT DEFAULT 'best',
-    format_note TEXT,
-    ext TEXT DEFAULT 'mp4',
-    is_audio_only INTEGER DEFAULT 0,
-    audio_format TEXT,
-    audio_bitrate TEXT,
-    output_path TEXT NOT NULL,
-    error_message TEXT,
-    priority TEXT DEFAULT 'normal',
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    retries INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS notifications (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    title TEXT NOT NULL,
-    message TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    task_id TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS categories (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    color TEXT NOT NULL,
-    extensions_json TEXT NOT NULL,
-    destination_dir TEXT,
-    created_at TEXT NOT NULL
-  );
-`);
-
-// Safe column migrations for extended telemetry & lifecycle metadata
-const migrations = [
-  'ALTER TABLE tasks ADD COLUMN audio_sample_rate INTEGER',
-  'ALTER TABLE tasks ADD COLUMN audio_bit_depth INTEGER',
-  'ALTER TABLE tasks ADD COLUMN audio_channels INTEGER',
-  'ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT',
-  'ALTER TABLE tasks ADD COLUMN album TEXT',
-  'ALTER TABLE tasks ADD COLUMN content_type TEXT',
-  'ALTER TABLE tasks ADD COLUMN remaining_bytes INTEGER DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN percentage_known INTEGER DEFAULT 1',
-  'ALTER TABLE tasks ADD COLUMN avg_speed_bytes_per_sec REAL DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN eta_seconds INTEGER',
-  'ALTER TABLE tasks ADD COLUMN elapsed_seconds INTEGER DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN active_connections INTEGER DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN last_progress_at TEXT',
-  'ALTER TABLE tasks ADD COLUMN video_codec TEXT',
-  'ALTER TABLE tasks ADD COLUMN audio_codec TEXT',
-  'ALTER TABLE tasks ADD COLUMN resolution_label TEXT',
-  'ALTER TABLE tasks ADD COLUMN verified_sha256 TEXT',
-  'ALTER TABLE tasks ADD COLUMN expected_sha256 TEXT',
-  'ALTER TABLE tasks ADD COLUMN checksum_verified INTEGER',
-  'ALTER TABLE tasks ADD COLUMN custom_filename TEXT',
-  'ALTER TABLE tasks ADD COLUMN category_id TEXT',
-  'ALTER TABLE tasks ADD COLUMN playlist_mode TEXT',
-  'ALTER TABLE tasks ADD COLUMN logs_json TEXT',
-  'ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0',
-  'ALTER TABLE tasks ADD COLUMN started_at TEXT',
-];
-
-for (const sql of migrations) {
+// Ensure default download directory exists
+const initialSettings = readSettingsFromStorage(db, dataDir);
+if (initialSettings.download_dir && !fs.existsSync(initialSettings.download_dir)) {
   try {
-    db.exec(sql);
+    fs.mkdirSync(initialSettings.download_dir, { recursive: true });
   } catch {
-    // column already exists
+    // non-fatal if custom path unreachable at boot
   }
 }
 
-// Seed default categories once when table is empty
-const categoryCountRow = db.prepare('SELECT COUNT(*) as cnt FROM categories').get() as { cnt: number };
-if (!categoryCountRow || categoryCountRow.cnt === 0) {
-  const insertCat = db.prepare(`
-    INSERT OR IGNORE INTO categories (id, name, color, extensions_json, destination_dir, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-  for (const cat of DEFAULT_CATEGORIES) {
-    insertCat.run(
-      cat.id,
-      cat.name,
-      cat.color,
-      JSON.stringify(cat.extensions),
-      cat.destination_dir ?? null,
-      cat.created_at
-    );
-  }
-}
-
-// Remove legacy plaintext cookie/circumvention settings from DB
-try {
-  db.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
-} catch {}
-
-const DEFAULT_SETTINGS: AppSettings = {
-  download_dir: path.resolve(process.cwd(), 'downloads'),
-  max_concurrent_downloads: 3,
-  fragment_concurrency: 4,
-  global_bandwidth_limit_kbps: 0,
-  per_task_bandwidth_limit_kbps: 0,
-  max_retries: 3,
-  retry_delay_seconds: 5,
-  default_video_format: 'best',
-  default_audio_format: 'mp3',
-  default_audio_bitrate: '320k',
-  default_audio_sample_rate: undefined,
-  default_audio_bit_depth: undefined,
-  embed_thumbnail: true,
-  embed_metadata: true,
-  filename_template: '%(title)s [%(id)s].%(ext)s',
-  proxy_url: '',
-  floating_notifications_enabled: true,
-  floating_widget_enabled: true,
-  auto_dismiss_seconds: 5,
-  theme: 'dark',
-  auto_retry_failed: true,
-  auto_resume_on_startup: true,
-  clipboard_monitoring: false,
-  conflict_strategy: 'rename',
-  verify_media_on_complete: true,
-  tray_minimize_on_close: true,
-  scheduler: DEFAULT_SCHEDULER_SETTINGS,
-  cookies_browser: 'auto',
-  cookies_profile: undefined,
-  cookies_file: undefined,
-  user_agent:
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-};
-
-if (!fs.existsSync(DEFAULT_SETTINGS.download_dir)) {
-  fs.mkdirSync(DEFAULT_SETTINGS.download_dir, { recursive: true });
-}
-
-function hydrateTaskRow(r: any): DownloadTask {
+export function hydrateTaskRow(r: any): DownloadTask {
   let logs: TaskLogEntry[] = [];
   if (typeof r.logs_json === 'string' && r.logs_json) {
     try {
@@ -191,58 +393,77 @@ function hydrateTaskRow(r: any): DownloadTask {
     }
   }
 
+  let selectedItems: string[] | null = null;
+  if (typeof r.selected_items_json === 'string' && r.selected_items_json) {
+    try {
+      const parsed = JSON.parse(r.selected_items_json);
+      if (Array.isArray(parsed)) selectedItems = parsed.map((v) => String(v));
+    } catch {
+      selectedItems = null;
+    }
+  }
+
   return {
-    ...r,
-    is_audio_only: Boolean(r.is_audio_only),
-    is_lossy_source: Boolean(r.is_lossy_source),
-    percentage_known: r.percentage_known === undefined || r.percentage_known === null ? true : Boolean(r.percentage_known),
-    checksum_verified:
-      r.checksum_verified === null || r.checksum_verified === undefined
-        ? null
-        : Boolean(r.checksum_verified),
+    id: r.id,
+    url: r.url,
+    title: r.title,
+    uploader: r.uploader ?? undefined,
+    duration: r.duration ?? undefined,
+    duration_string: r.duration_string ?? undefined,
+    thumbnail: r.thumbnail ?? undefined,
+    album: r.album ?? undefined,
+    content_type: r.content_type ?? undefined,
+    engine: r.engine,
+    status: r.status,
     progress_percentage: Number(r.progress_percentage || 0),
+    percentage_known: r.percentage_known === undefined || r.percentage_known === null ? true : Boolean(r.percentage_known),
+    speed_str: r.speed_str ?? '0 B/s',
     speed_bytes_per_sec: Number(r.speed_bytes_per_sec || 0),
     avg_speed_bytes_per_sec: Number(r.avg_speed_bytes_per_sec || 0),
     downloaded_bytes: Number(r.downloaded_bytes || 0),
     total_bytes: Number(r.total_bytes || 0),
     remaining_bytes: Number(r.remaining_bytes || 0),
+    eta_str: r.eta_str ?? '--',
     eta_seconds: r.eta_seconds === null || r.eta_seconds === undefined ? null : Number(r.eta_seconds),
     elapsed_seconds: Number(r.elapsed_seconds || 0),
     active_connections: Number(r.active_connections || 0),
+    last_progress_at: r.last_progress_at ?? undefined,
+    current_phase: r.current_phase ?? 'Queued',
+    format_id: r.format_id ?? 'best',
+    format_note: r.format_note ?? undefined,
+    ext: r.ext ?? 'mp4',
+    video_codec: r.video_codec ?? null,
+    audio_codec: r.audio_codec ?? null,
+    resolution_label: r.resolution_label ?? null,
+    is_audio_only: Boolean(r.is_audio_only),
+    audio_format: r.audio_format ?? undefined,
+    audio_bitrate: r.audio_bitrate ?? undefined,
+    audio_sample_rate: r.audio_sample_rate ?? undefined,
+    audio_bit_depth: r.audio_bit_depth ?? undefined,
+    audio_channels: r.audio_channels ?? undefined,
+    is_lossy_source: Boolean(r.is_lossy_source),
+    verified_audio_info: r.verified_audio_info ?? undefined,
+    output_path: r.output_path ?? '',
+    custom_filename: r.custom_filename ?? null,
+    playlist_mode: r.playlist_mode ?? null,
+    selected_items: selectedItems ?? undefined,
+    tracks_requested: r.tracks_requested ?? undefined,
+    tracks_completed: r.tracks_completed ?? undefined,
+    tracks_failed: r.tracks_failed ?? undefined,
+    error_message: r.error_message ?? undefined,
+    logs,
+    priority: r.priority ?? 'normal',
     queue_order: Number(r.queue_order || 0),
+    created_at: r.created_at,
+    started_at: r.started_at ?? null,
+    completed_at: r.completed_at ?? null,
     retries: Number(r.retries || 0),
     max_retries: Number(r.max_retries || 3),
-    logs,
   };
 }
 
 export function getSettings(): AppSettings {
-  const stmt = db.prepare('SELECT key, value FROM settings');
-  const rows = stmt.all() as { key: string; value: string }[];
-  const settings: any = { ...DEFAULT_SETTINGS };
-
-  for (const row of rows) {
-    if (
-      row.key === 'cookies_content' ||
-      row.key === 'enable_adult_sites' ||
-      row.key === 'bypass_age_gate'
-    ) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(row.value);
-      if (row.key === 'cookies_file' && parsed && typeof parsed === 'string' && !fs.existsSync(parsed)) {
-        if (parsed === path.resolve(dataDir, 'cookies.txt')) {
-          continue;
-        }
-      }
-      settings[row.key] = parsed;
-    } catch {
-      settings[row.key] = row.value;
-    }
-  }
-
-  return settings as AppSettings;
+  return readSettingsFromStorage(db, dataDir);
 }
 
 export function saveSettings(settings: Partial<AppSettings>): AppSettings {
@@ -252,24 +473,16 @@ export function saveSettings(settings: Partial<AppSettings>): AppSettings {
   delete sanitizedPatch.enable_adult_sites;
   delete sanitizedPatch.bypass_age_gate;
 
-  const updated: any = { ...current, ...sanitizedPatch };
-  delete updated.cookies_content;
-  delete updated.enable_adult_sites;
-  delete updated.bypass_age_gate;
+  const updated: AppSettings = {
+    ...current,
+    ...sanitizedPatch,
+    schema_version: SETTINGS_SCHEMA_VERSION,
+  };
+  return writeSettingsToStorage(db, dataDir, updated);
+}
 
-  db.exec("DELETE FROM settings WHERE key IN ('cookies_content', 'enable_adult_sites', 'bypass_age_gate')");
-  const insert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-  const remove = db.prepare('DELETE FROM settings WHERE key = ?');
-
-  for (const [key, val] of Object.entries(updated)) {
-    if (val === undefined) {
-      remove.run(key);
-    } else {
-      insert.run(key, JSON.stringify(val));
-    }
-  }
-
-  return updated as AppSettings;
+export function resetSettings(): AppSettings {
+  return resetSettingsInStorage(db, dataDir);
 }
 
 export function getAllTasks(): DownloadTask[] {
@@ -294,9 +507,9 @@ export function upsertTask(task: DownloadTask): void {
       active_connections, last_progress_at, current_phase, format_id, format_note, ext,
       video_codec, audio_codec, resolution_label, is_audio_only, audio_format,
       audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
-      verified_audio_info, verified_sha256, expected_sha256, checksum_verified,
-      output_path, custom_filename, category_id, playlist_mode, error_message, logs_json,
-      priority, queue_order, created_at, started_at, completed_at, retries, max_retries
+      verified_audio_info, output_path, custom_filename, playlist_mode,
+      selected_items_json, tracks_requested, tracks_completed, tracks_failed,
+      error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
@@ -305,8 +518,8 @@ export function upsertTask(task: DownloadTask): void {
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `);
 
@@ -350,17 +563,13 @@ export function upsertTask(task: DownloadTask): void {
     task.audio_channels ?? null,
     task.is_lossy_source ? 1 : 0,
     task.verified_audio_info ?? null,
-    task.verified_sha256 ?? null,
-    task.expected_sha256 ?? null,
-    task.checksum_verified === null || task.checksum_verified === undefined
-      ? null
-      : task.checksum_verified
-      ? 1
-      : 0,
     task.output_path ?? '',
     task.custom_filename ?? null,
-    task.category_id ?? null,
     task.playlist_mode ?? null,
+    task.selected_items && task.selected_items.length > 0 ? JSON.stringify(task.selected_items) : null,
+    task.tracks_requested ?? null,
+    task.tracks_completed ?? null,
+    task.tracks_failed ?? null,
     task.error_message ?? null,
     JSON.stringify((task.logs || []).slice(-100)),
     task.priority ?? 'normal',
@@ -517,99 +726,6 @@ export function renameTaskFileInDb(taskId: string, newFilename: string): Downloa
 
   upsertTask(task);
   return task;
-}
-
-export async function verifyTaskChecksumInDb(
-  taskId: string,
-  expectedSha256?: string
-): Promise<{ task: DownloadTask; sha256: string; matches: boolean | null }> {
-  const task = getTaskById(taskId);
-  if (!task) {
-    throw new Error('Task not found.');
-  }
-  if (!task.output_path || !fs.existsSync(task.output_path) || !fs.statSync(task.output_path).isFile()) {
-    throw new Error('Output file does not exist on disk yet.');
-  }
-
-  const sha256 = await new Promise<string>((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const rs = fs.createReadStream(task.output_path);
-    rs.on('data', (chunk) => hash.update(chunk));
-    rs.on('end', () => resolve(hash.digest('hex')));
-    rs.on('error', reject);
-  });
-
-  const normalizedExpected = (expectedSha256 ?? task.expected_sha256 ?? '').trim().toLowerCase();
-  const matches = normalizedExpected ? normalizedExpected === sha256.toLowerCase() : null;
-
-  task.verified_sha256 = sha256;
-  if (expectedSha256 !== undefined) {
-    task.expected_sha256 = normalizedExpected || null;
-  }
-  task.checksum_verified = matches;
-  task.logs = [
-    ...(task.logs || []),
-    {
-      timestamp: new Date().toISOString(),
-      level: matches === false ? ('error' as const) : ('info' as const),
-      message:
-        matches === null
-          ? `Computed SHA-256: ${sha256}`
-          : matches
-          ? `SHA-256 verified OK (${sha256.slice(0, 12)}...)`
-          : `SHA-256 mismatch! Expected ${normalizedExpected.slice(0, 12)}..., got ${sha256.slice(0, 12)}...`,
-    },
-  ].slice(-100);
-
-  upsertTask(task);
-  return { task, sha256, matches };
-}
-
-export function getCategories(): CategoryItem[] {
-  const rows = db.prepare('SELECT * FROM categories ORDER BY created_at ASC').all() as any[];
-  return rows.map((r) => {
-    let extensions: string[] = [];
-    try {
-      const parsed = JSON.parse(r.extensions_json);
-      if (Array.isArray(parsed)) extensions = parsed;
-    } catch {
-      extensions = [];
-    }
-    return {
-      id: r.id,
-      name: r.name,
-      color: r.color,
-      extensions,
-      destination_dir: r.destination_dir || undefined,
-      created_at: r.created_at,
-    };
-  });
-}
-
-export function saveCategory(category: Partial<CategoryItem> & { name: string }): CategoryItem {
-  const id = category.id?.trim() || `cat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const createdAt = category.created_at || new Date().toISOString();
-  const color = category.color || '#58a6ff';
-  const extensions = Array.isArray(category.extensions) ? category.extensions : [];
-  const destDir = category.destination_dir?.trim() || null;
-
-  db.prepare(`
-    INSERT OR REPLACE INTO categories (id, name, color, extensions_json, destination_dir, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, category.name.trim(), color, JSON.stringify(extensions), destDir, createdAt);
-
-  return {
-    id,
-    name: category.name.trim(),
-    color,
-    extensions,
-    destination_dir: destDir || undefined,
-    created_at: createdAt,
-  };
-}
-
-export function deleteCategory(id: string): void {
-  db.prepare('DELETE FROM categories WHERE id = ?').run(id);
 }
 
 export function addNotification(notification: NotificationItem): void {

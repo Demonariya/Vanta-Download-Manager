@@ -37,22 +37,14 @@ const STREAMING_SITE_HOST_HINTS = [
   'reddit.com',
   'rumble.com',
   'kick.com',
-  'pornhub.com',
-  'xvideos.com',
-  'xnxx.com',
-  'spankbang.com',
-  'redtube.com',
-  'youporn.com',
 ];
 
-const DIRECT_FILE_EXTENSIONS = new Set([
-  'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'zst',
-  'iso', 'img', 'dmg', 'exe', 'msi', 'msix', 'appimage', 'deb', 'rpm', 'apk',
-  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv', 'txt', 'json', 'xml', 'epub',
-  'mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'flv',
-  'mp3', 'flac', 'wav', 'm4a', 'aac', 'opus', 'ogg',
-  'png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif',
-  'bin', 'dat', 'wasm',
+export const UNSUPPORTED_NON_MEDIA_EXTENSIONS = new Set([
+  'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'zst', 'tgz', 'tbz2', 'txz',
+  'iso', 'img', 'dmg', 'exe', 'msi', 'msix', 'appimage', 'deb', 'rpm', 'apk', 'cab', 'pkg',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv', 'txt', 'rtf', 'odt', 'epub', 'mobi',
+  'png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif', 'bmp', 'ico', 'tiff',
+  'bin', 'dat', 'wasm', 'dll', 'so', 'dylib', 'torrent', 'json', 'xml', 'yaml', 'yml', 'md', 'html', 'htm', 'css', 'js',
 ]);
 
 export function parseBytes(str: string | undefined | null): number {
@@ -112,42 +104,105 @@ export function formatDuration(seconds: number | undefined | null): string {
 }
 
 /**
- * Classifies a media or file URL into the correct download provider.
+ * Returns the unsupported non-media file extension if the URL targets a generic archive,
+ * installer, document, image, or binary rather than audio/video media.
+ */
+export function getUnsupportedNonMediaExtension(rawUrl: string): string | null {
+  try {
+    const parsed = new URL((rawUrl || '').trim());
+    const host = parsed.hostname.toLowerCase();
+    const isKnownStreamingHost = STREAMING_SITE_HOST_HINTS.some(
+      (h) => host === h || host.endsWith(`.${h}`)
+    );
+    if (isKnownStreamingHost || isSpotifyUrl(rawUrl)) {
+      return null;
+    }
+    const pathLower = parsed.pathname.toLowerCase();
+    const lastSegment = pathLower.split('/').filter(Boolean).pop() || '';
+    const dotIdx = lastSegment.lastIndexOf('.');
+    if (dotIdx > 0 && dotIdx < lastSegment.length - 1) {
+      const ext = lastSegment.slice(dotIdx + 1);
+      if (UNSUPPORTED_NON_MEDIA_EXTENSIONS.has(ext)) {
+        return ext;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function isUnsupportedGenericFileUrl(url: string): boolean {
+  return getUnsupportedNonMediaExtension(url) !== null;
+}
+
+/**
+ * Validates and classifies a media URL strictly for VANTA's two engines: yt-dlp and spotDL.
+ */
+export function validateMediaUrl(
+  rawUrl: string
+): { valid: true; normalized: string; engine: EngineType } | { valid: false; error: string } {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) {
+    return { valid: false, error: 'Please enter a valid video or music URL.' };
+  }
+  if (/[\s\u0000-\u001F\u007F]/.test(trimmed)) {
+    return { valid: false, error: 'Invalid URL: remove spaces or control characters.' };
+  }
+  if (trimmed.startsWith('-')) {
+    return { valid: false, error: 'Invalid URL: must start with http://, https://, or spotify:.' };
+  }
+
+  const spotifyParsed = tryParseSpotifyInput(trimmed);
+  if (spotifyParsed) {
+    if (spotifyParsed.kind === 'invalid') {
+      return { valid: false, error: spotifyParsed.error };
+    }
+    return { valid: true, normalized: trimmed, engine: 'spotdl' };
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        valid: false,
+        error: 'Unsupported URL scheme. Only http://, https://, and spotify: media links are supported.',
+      };
+    }
+    if (!parsed.hostname || parsed.hostname.startsWith('.')) {
+      return { valid: false, error: 'Invalid URL host. Please check the URL and try again.' };
+    }
+  } catch {
+    return {
+      valid: false,
+      error: 'Invalid URL format. Include http://, https://, or a valid spotify: URI.',
+    };
+  }
+
+  const unsupportedExt = getUnsupportedNonMediaExtension(trimmed);
+  if (unsupportedExt) {
+    return {
+      valid: false,
+      error: `VANTA downloads music and video only (yt-dlp / spotDL). Generic ".${unsupportedExt}" files are not supported.`,
+    };
+  }
+
+  return { valid: true, normalized: trimmed, engine: 'yt-dlp' };
+}
+
+/**
+ * Classifies a supported media URL into its execution engine (spotDL or yt-dlp).
  */
 export function determineEngineForUrl(url: string): EngineType {
   if (isSpotifyUrl(url)) {
     return 'spotdl';
   }
-  try {
-    const parsed = new URL(url.trim());
-    const host = parsed.hostname.toLowerCase();
-    const isKnownStreamingHost = STREAMING_SITE_HOST_HINTS.some(
-      (h) => host === h || host.endsWith(`.${h}`)
-    );
-    if (!isKnownStreamingHost) {
-      const pathLower = parsed.pathname.toLowerCase();
-      const lastSegment = pathLower.split('/').filter(Boolean).pop() || '';
-      const dotIdx = lastSegment.lastIndexOf('.');
-      if (dotIdx > 0 && dotIdx < lastSegment.length - 1) {
-        const ext = lastSegment.slice(dotIdx + 1);
-        if (DIRECT_FILE_EXTENSIONS.has(ext)) {
-          return 'direct';
-        }
-      }
-    }
-  } catch {
-    // Fallback to yt-dlp
-  }
   return 'yt-dlp';
-}
-
-export function isDirectFileUrl(url: string): boolean {
-  return determineEngineForUrl(url) === 'direct';
 }
 
 export function isPlaylistCandidateUrl(url: string): boolean {
   const trimmed = (url || '').trim();
-  if (!trimmed) return false;
+  if (!trimmed || isUnsupportedGenericFileUrl(trimmed)) return false;
   if (isSpotifyUrl(trimmed)) {
     const parsed = tryParseSpotifyInput(trimmed);
     return Boolean(
@@ -171,6 +226,18 @@ export function isPlaylistCandidateUrl(url: string): boolean {
   }
 }
 
+export function formatYtDlpPlaylistItems(indices: number[]): string {
+  const cleaned: number[] = [];
+  const seen = new Set<number>();
+  for (const idx of indices) {
+    if (Number.isInteger(idx) && idx > 0 && !seen.has(idx)) {
+      seen.add(idx);
+      cleaned.push(idx);
+    }
+  }
+  return cleaned.join(',');
+}
+
 export function sanitizeFilename(name: string): string {
   return name
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
@@ -192,36 +259,10 @@ export function parseBatchUrls(rawText: string): BatchUrlValidationResult {
     const trimmed = rawLine.trim();
     if (!trimmed) return;
 
-    if (/[\s\u0000-\u001F\u007F]/.test(trimmed)) {
-      invalid.push({ line: lineNum, input: trimmed, reason: 'Contains whitespace or control chars' });
+    const checked = validateMediaUrl(trimmed);
+    if (!checked.valid) {
+      invalid.push({ line: lineNum, input: trimmed, reason: checked.error });
       return;
-    }
-    if (trimmed.startsWith('-')) {
-      invalid.push({ line: lineNum, input: trimmed, reason: 'URL cannot begin with a dash' });
-      return;
-    }
-
-    const spotifyParsed = tryParseSpotifyInput(trimmed);
-    if (spotifyParsed) {
-      if (spotifyParsed.kind === 'invalid') {
-        invalid.push({ line: lineNum, input: trimmed, reason: spotifyParsed.error });
-        return;
-      }
-    } else {
-      try {
-        const parsed = new URL(trimmed);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          invalid.push({ line: lineNum, input: trimmed, reason: 'Unsupported URL scheme' });
-          return;
-        }
-        if (!parsed.hostname || parsed.hostname.startsWith('.')) {
-          invalid.push({ line: lineNum, input: trimmed, reason: 'Invalid host' });
-          return;
-        }
-      } catch {
-        invalid.push({ line: lineNum, input: trimmed, reason: 'Malformed URL' });
-        return;
-      }
     }
 
     if (seen.has(trimmed)) {

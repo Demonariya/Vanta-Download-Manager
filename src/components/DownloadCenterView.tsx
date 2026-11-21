@@ -16,7 +16,6 @@ import {
   Download,
 } from 'lucide-react';
 import {
-  CategoryItem,
   DownloadTask,
   EngineInstallProgress,
   EngineStatusMap,
@@ -34,16 +33,21 @@ import { ProgressDisplay, getStatusLabel, getStatusColorClass } from './Progress
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../services/api';
 
-export type QueueScopeFilter = 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed';
+export type QueueScopeFilter =
+  | 'all'
+  | 'active'
+  | 'queued'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'audio'
+  | 'video';
 
 interface DownloadCenterViewProps {
   tasks: DownloadTask[];
-  categories: CategoryItem[];
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
   setScopeFilter: (scope: QueueScopeFilter) => void;
-  selectedCategoryId: string | null;
-  setSelectedCategoryId: (id: string | null) => void;
   searchQuery: string;
   selectedTaskId: string | null;
   onSelectTask: (task: DownloadTask) => void;
@@ -65,12 +69,9 @@ interface DownloadCenterViewProps {
 
 export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   tasks,
-  categories,
   engineStatus,
   scopeFilter,
   setScopeFilter,
-  selectedCategoryId,
-  setSelectedCategoryId,
   searchQuery,
   selectedTaskId,
   onSelectTask,
@@ -104,12 +105,11 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     () =>
       filterAndSortTasks(tasks, {
         statusFilter: scopeFilter,
-        categoryId: selectedCategoryId,
         searchQuery,
         sortField,
         sortDirection,
       }),
-    [tasks, scopeFilter, selectedCategoryId, searchQuery, sortField, sortDirection]
+    [tasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
   const activeCount = useMemo(() => getActiveDownloadCount(tasks), [tasks]);
@@ -118,6 +118,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const pausedCount = tasks.filter((t) => t.status === 'paused').length;
   const completedCount = tasks.filter((t) => t.status === 'completed').length;
   const failedCount = tasks.filter((t) => t.status === 'failed').length;
+  const audioCount = tasks.filter((t) => t.is_audio_only || t.engine === 'spotdl').length;
+  const videoCount = tasks.filter((t) => !t.is_audio_only && t.engine !== 'spotdl').length;
 
   const missingRequiredEngines = useMemo(() => {
     if (!engineStatus) return [];
@@ -173,6 +175,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     { id: 'paused', label: 'Paused', count: pausedCount },
     { id: 'completed', label: 'Completed', count: completedCount },
     { id: 'failed', label: 'Failed', count: failedCount },
+    { id: 'audio', label: 'Audio', count: audioCount },
+    { id: 'video', label: 'Video', count: videoCount },
   ];
 
   return (
@@ -219,7 +223,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               </p>
               <p className="text-[11px] text-[var(--vanta-muted)]">
                 {engineInstallError ||
-                  'Direct HTTP file downloads work immediately; install managed engines for streaming extraction and muxing.'}
+                  'Install managed engines (yt-dlp and FFmpeg) to download and mux video or music.'}
               </p>
             </div>
           </div>
@@ -266,22 +270,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
           })}
         </div>
 
-        {/* Category + Sort + Queue Controls */}
+        {/* Sort + Queue Controls */}
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            aria-label="Filter by category"
-            value={selectedCategoryId || ''}
-            onChange={(e) => setSelectedCategoryId(e.target.value || null)}
-            className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--vanta-text)] focus:outline-none focus:border-[var(--vanta-accent)]"
-          >
-            <option value="">All Categories</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-
           <select
             aria-label="Sort downloads"
             value={`${sortField}:${sortDirection}`}
@@ -419,14 +409,14 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             <Download className="w-9 h-9 text-[var(--vanta-muted)]/60 mx-auto" />
             <div>
               <p className="text-sm font-medium text-[var(--vanta-text)]">
-                {searchQuery || selectedCategoryId || scopeFilter !== 'all'
+                {searchQuery || scopeFilter !== 'all'
                   ? 'No matching transfers found'
                   : 'Download queue is empty'}
               </p>
               <p className="text-xs text-[var(--vanta-muted)] mt-1">
-                {searchQuery || selectedCategoryId || scopeFilter !== 'all'
+                {searchQuery || scopeFilter !== 'all'
                   ? 'Clear your active filter or search term to view all transfers.'
-                  : 'Paste a video, playlist, Spotify, or direct file URL to inspect and start downloading.'}
+                  : 'Paste a YouTube, video, playlist, or Spotify music URL to inspect and start downloading.'}
               </p>
             </div>
             <button
@@ -443,7 +433,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             {visibleTasks.map((task) => {
               const isSelectedRow = selectedTaskId === task.id;
               const isChecked = selectedIds.includes(task.id);
-              const category = categories.find((c) => c.id === task.category_id);
               const isRunning =
                 task.status === 'downloading' ||
                 task.status === 'connecting' ||
@@ -516,11 +505,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                               {task.ext.toUpperCase()}
                               {task.resolution_label ? ` (${task.resolution_label})` : ''}
                             </span>
-                            {category && (
+                            {(task.tracks_requested ?? 0) > 0 && (
                               <>
                                 <span aria-hidden="true">·</span>
-                                <span className="text-[var(--vanta-text-secondary)]">
-                                  {category.name}
+                                <span className="tabular-nums text-[var(--vanta-text-secondary)]">
+                                  {task.tracks_completed ?? 0}/{task.tracks_requested} tracks
+                                  {(task.tracks_failed ?? 0) > 0 ? (
+                                    <span className="text-red-600 dark:text-[#f85149]">
+                                      {' '}({task.tracks_failed} failed)
+                                    </span>
+                                  ) : null}
                                 </span>
                               </>
                             )}

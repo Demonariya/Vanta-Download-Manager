@@ -6,6 +6,15 @@ use vanta_lib::logging;
 use vanta_lib::AppState;
 
 fn main() {
+    let cli_args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = cli_args.iter().position(|a| a == "--engine-admin") {
+        if let Some(op_path) = cli_args.get(pos + 1) {
+            let code = vanta_lib::engines::EngineManager::run_engine_admin_cli(op_path);
+            std::process::exit(code);
+        }
+        std::process::exit(2);
+    }
+
     logging::install_panic_hook();
     logging::info("startup", "Starting VANTA Download Manager desktop runtime.");
 
@@ -54,13 +63,12 @@ fn main() {
             move_task,
             update_task_meta,
             rename_task_file,
-            verify_task_checksum,
             bulk_task_action,
-            get_categories,
-            save_category,
-            delete_category,
             get_settings,
             save_settings,
+            reset_settings,
+            validate_python_executable,
+            browse_python_executable,
             get_notifications,
             clear_notifications,
             get_engine_status,

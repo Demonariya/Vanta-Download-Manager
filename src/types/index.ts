@@ -1,4 +1,4 @@
-export type EngineType = 'direct' | 'yt-dlp' | 'spotdl' | 'ffmpeg';
+export type EngineType = 'yt-dlp' | 'spotdl';
 
 export type TaskStatus =
   | 'queued'
@@ -26,15 +26,6 @@ export interface TaskLogEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
   message: string;
-}
-
-export interface CategoryItem {
-  id: string;
-  name: string;
-  color: string;
-  extensions: string[];
-  destination_dir?: string;
-  created_at: string;
 }
 
 export interface SchedulerSettings {
@@ -115,11 +106,6 @@ export interface MediaMetadata {
   total_tracks?: number;
   partial_tracks?: boolean;
   metadata_source?: string;
-  is_direct_file?: boolean;
-  direct_file_size?: number;
-  direct_mime_type?: string;
-  direct_filename?: string;
-  accepts_ranges?: boolean;
 }
 
 export interface DownloadTask {
@@ -162,13 +148,13 @@ export interface DownloadTask {
   audio_channels?: number;
   is_lossy_source?: boolean;
   verified_audio_info?: string;
-  verified_sha256?: string | null;
-  expected_sha256?: string | null;
-  checksum_verified?: boolean | null;
   output_path: string;
   custom_filename?: string | null;
-  category_id?: string | null;
   playlist_mode?: 'single' | 'playlist';
+  selected_items?: string[];
+  tracks_requested?: number;
+  tracks_completed?: number;
+  tracks_failed?: number;
   error_message?: string;
   logs?: TaskLogEntry[];
   priority: TaskPriority;
@@ -265,8 +251,19 @@ export interface DiagnosticLogInfo {
   recentLines: string[];
 }
 
+export interface PythonValidationResult {
+  valid: boolean;
+  executablePath: string;
+  version?: string | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: string | null;
+}
+
 export interface AppSettings {
+  schema_version?: number;
   download_dir: string;
+  python_path?: string;
   max_concurrent_downloads: number;
   fragment_concurrency: number;
   global_bandwidth_limit_kbps: number;
@@ -332,8 +329,15 @@ export interface EngineInstallProgress {
 }
 
 export interface ManagedEngineInfo {
+  installRoot: string;
   installDir: string;
+  ytdlpDir: string;
+  spotdlDir: string;
+  ffmpegDir: string;
   manifestPath: string;
+  settingsFilePath?: string;
+  isWritable?: boolean;
+  requiresElevation?: boolean;
   requiredReady: boolean;
   missingRequired: string[];
   engines: EngineStatusMap;

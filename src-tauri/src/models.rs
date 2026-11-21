@@ -120,17 +120,6 @@ pub struct TaskLogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CategoryItem {
-    pub id: String,
-    pub name: String,
-    pub color: String,
-    pub extensions: Vec<String>,
-    #[serde(default)]
-    pub destination_dir: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SchedulerSettings {
     pub enabled: bool,
@@ -205,19 +194,19 @@ pub struct DownloadTask {
     pub audio_channels: Option<u32>,
     pub is_lossy_source: Option<bool>,
     pub verified_audio_info: Option<String>,
-    #[serde(default)]
-    pub verified_sha256: Option<String>,
-    #[serde(default)]
-    pub expected_sha256: Option<String>,
-    #[serde(default)]
-    pub checksum_verified: Option<bool>,
     pub output_path: String,
     #[serde(default)]
     pub custom_filename: Option<String>,
     #[serde(default)]
-    pub category_id: Option<String>,
-    #[serde(default)]
     pub playlist_mode: Option<String>,
+    #[serde(default)]
+    pub selected_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub tracks_requested: Option<u32>,
+    #[serde(default)]
+    pub tracks_completed: Option<u32>,
+    #[serde(default)]
+    pub tracks_failed: Option<u32>,
     pub error_message: Option<String>,
     #[serde(default)]
     pub logs: Vec<TaskLogEntry>,
@@ -259,9 +248,8 @@ pub struct CreateTaskPayload {
     pub output_path: Option<String>,
     pub priority: Option<TaskPriority>,
     pub custom_filename: Option<String>,
-    pub category_id: Option<String>,
     pub playlist_mode: Option<String>,
-    pub expected_sha256: Option<String>,
+    pub selected_items: Option<Vec<String>>,
     pub total_bytes: Option<u64>,
 }
 
@@ -363,16 +351,6 @@ pub struct MediaMetadata {
     pub partial_tracks: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_direct_file: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_file_size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_mime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_filename: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accepts_ranges: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,11 +413,29 @@ pub struct EngineInstallProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedEngineInfo {
+    pub install_root: String,
     pub install_dir: String,
+    pub ytdlp_dir: String,
+    pub spotdl_dir: String,
+    pub ffmpeg_dir: String,
     pub manifest_path: String,
+    pub settings_file_path: String,
+    pub is_writable: bool,
+    pub requires_elevation: bool,
     pub required_ready: bool,
     pub missing_required: Vec<String>,
     pub engines: EngineStatusMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonValidationResult {
+    pub valid: bool,
+    pub executable_path: String,
+    pub version: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -536,10 +532,12 @@ pub struct NotificationItem {
     pub task_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppSettings {
+    pub schema_version: u32,
     pub download_dir: String,
+    pub python_path: Option<String>,
     pub max_concurrent_downloads: u32,
     pub fragment_concurrency: u32,
     pub global_bandwidth_limit_kbps: u64,
@@ -572,6 +570,26 @@ pub struct AppSettings {
     pub user_agent: Option<String>,
 }
 
+impl Default for SchedulerSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.start_time == other.start_time
+            && self.stop_time == other.stop_time
+            && self.pause_on_stop == other.pause_on_stop
+            && self.days == other.days
+    }
+}
+
+impl PartialEq for SchedulerSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.start_time == other.start_time
+            && self.stop_time == other.stop_time
+            && self.pause_on_stop == other.pause_on_stop
+            && self.days == other.days
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         let default_download_dir = default_downloads_path()
@@ -579,7 +597,9 @@ impl Default for AppSettings {
             .to_string();
 
         Self {
+            schema_version: 1,
             download_dir: default_download_dir,
+            python_path: None,
             max_concurrent_downloads: 3,
             fragment_concurrency: 4,
             global_bandwidth_limit_kbps: 0,
@@ -632,54 +652,6 @@ pub fn default_downloads_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_media_metadata_direct_file_and_playlist_roundtrip() {
-        let direct = MediaMetadata {
-            url: "https://cdn.example.com/archive.zip".to_string(),
-            id: "abcdef123456".to_string(),
-            title: "archive.zip".to_string(),
-            uploader: Some("cdn.example.com".to_string()),
-            formats: vec![FormatOption {
-                format_id: "direct".to_string(),
-                ext: "zip".to_string(),
-                resolution: None,
-                width: None,
-                height: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                filesize: Some(4096),
-                filesize_approx: None,
-                format_note: Some("Direct HTTP (Resumable)".to_string()),
-                tbr: None,
-                abr: None,
-                is_audio_only: false,
-                is_video_only: false,
-            }],
-            is_playlist: false,
-            extractor: "direct-http".to_string(),
-            is_direct_file: Some(true),
-            direct_file_size: Some(4096),
-            direct_mime_type: Some("application/zip".to_string()),
-            direct_filename: Some("archive.zip".to_string()),
-            accepts_ranges: Some(true),
-            ..MediaMetadata::default()
-        };
-
-        let json = serde_json::to_value(&direct).unwrap();
-        assert_eq!(json["is_direct_file"], true);
-        assert_eq!(json["direct_file_size"], 4096);
-        assert_eq!(json["direct_mime_type"], "application/zip");
-        assert_eq!(json["direct_filename"], "archive.zip");
-        assert_eq!(json["accepts_ranges"], true);
-        assert!(json["entries"].is_null());
-        assert!(json["formats"][0].get("tbr").is_none());
-        assert!(json["formats"][0].get("abr").is_none());
-
-        let decoded: MediaMetadata = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded, direct);
-    }
 
     #[test]
     fn test_media_metadata_video_audio_formats_and_entries_roundtrip() {
@@ -767,11 +739,16 @@ mod tests {
         let parsed: MediaMetadata = serde_json::from_str(minimal_json).unwrap();
         assert_eq!(parsed.title, "Minimal");
         assert!(parsed.entries.is_none());
-        assert!(parsed.is_direct_file.is_none());
-        assert!(parsed.direct_file_size.is_none());
-        assert!(parsed.direct_mime_type.is_none());
-        assert!(parsed.direct_filename.is_none());
-        assert!(parsed.accepts_ranges.is_none());
+    }
+
+    #[test]
+    fn test_app_settings_defaults_include_schema_version_and_python_path() {
+        let partial = r#"{"download_dir": "D:\\Media", "max_concurrent_downloads": 5}"#;
+        let parsed: AppSettings = serde_json::from_str(partial).unwrap();
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.download_dir, "D:\\Media");
+        assert_eq!(parsed.max_concurrent_downloads, 5);
+        assert!(parsed.python_path.is_none());
     }
 
     #[test]
@@ -805,4 +782,3 @@ mod tests {
         assert_eq!(update_json["updateAvailable"], true);
     }
 }
-

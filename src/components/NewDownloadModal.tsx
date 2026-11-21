@@ -15,17 +15,18 @@ import {
   RotateCw,
   Disc,
   ListMusic,
-  FileDown,
-  ShieldCheck,
   AlertTriangle,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 import {
   AppSettings,
-  CategoryItem,
   CookieStatus,
   CookieValidationResult,
   DownloadTask,
   MediaMetadata,
+  PlaylistEntry,
+  SpotifyTrackItem,
   TaskPriority,
 } from '../types';
 import { api } from '../services/api';
@@ -35,15 +36,13 @@ import { describeCookieStatus } from '../utils/cookie-status-ui';
 import { InspectionController } from '../utils/inspection-controller';
 import { isSpotifyUrl } from '../utils/spotify';
 import { buildCuratedVideoOptions } from '../utils/media-formats';
-import { formatBytes, parseBatchUrls } from '../utils/engine-parser';
-import { matchCategoryForTask } from '../utils/categories';
+import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialUrl?: string;
   tasks: DownloadTask[];
-  categories: CategoryItem[];
   settings: AppSettings | null;
   onTaskCreated: () => void;
   onOpenCookieSettings?: () => void;
@@ -51,11 +50,11 @@ interface NewDownloadModalProps {
 
 const SAMPLE_URLS = [
   {
-    name: 'Big Buck Bunny 1080p MP4',
+    name: 'Big Buck Bunny 1080p MP4 (yt-dlp)',
     url: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4',
   },
   {
-    name: 'SoundHelix CC MP3',
+    name: 'SoundHelix CC MP3 (yt-dlp)',
     url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
   },
 ];
@@ -65,7 +64,6 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   onClose,
   initialUrl = '',
   tasks,
-  categories,
   settings,
   onTaskCreated,
   onOpenCookieSettings,
@@ -78,7 +76,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [extractError, setExtractError] = useState<string | null>(null);
   const [isTimeoutError, setIsTimeoutError] = useState(false);
 
-  // Playlist selection
+  // Ordered playlist & track selection state
+  const [orderedEntries, setOrderedEntries] = useState<PlaylistEntry[]>([]);
+  const [orderedSpotifyTracks, setOrderedSpotifyTracks] = useState<SpotifyTrackItem[]>([]);
   const [selectedPlaylistKeys, setSelectedPlaylistKeys] = useState<Record<string, boolean>>({});
   const [includePlaylistMode, setIncludePlaylistMode] = useState(true);
 
@@ -102,9 +102,11 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [selectedSampleRate, setSelectedSampleRate] = useState<number>(48000);
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [customFilename, setCustomFilename] = useState('');
-  const [categoryId, setCategoryId] = useState<string>('');
-  const [expectedSha256, setExpectedSha256] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const entryKey = (e: PlaylistEntry) => `entry-${e.index}-${e.id}`;
+  const trackKey = (t: SpotifyTrackItem, fallbackIdx: number) =>
+    `track-${t.track_number ?? fallbackIdx + 1}-${t.id}`;
 
   const applyInspectionPatch = (
     patch: Partial<{
@@ -121,27 +123,31 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         if (patch.metadata.extractor === 'spotdl') {
           setSelectedTab('audio');
         }
-        if (patch.metadata.is_direct_file && patch.metadata.direct_filename) {
-          setCustomFilename(patch.metadata.direct_filename);
-          const ext = patch.metadata.direct_filename.split('.').pop()?.toLowerCase();
-          const matchedCat = matchCategoryForTask(ext, false, categories);
-          if (matchedCat) setCategoryId(matchedCat.id);
-        }
         if (patch.metadata.entries && patch.metadata.entries.length > 0) {
+          setOrderedEntries([...patch.metadata.entries]);
+          setOrderedSpotifyTracks([]);
           const initMap: Record<string, boolean> = {};
-          patch.metadata.entries.forEach((e, idx) => {
-            initMap[`entry-${idx}-${e.id}`] = true;
+          patch.metadata.entries.forEach((e) => {
+            initMap[entryKey(e)] = true;
           });
           setSelectedPlaylistKeys(initMap);
         } else if (patch.metadata.tracks && patch.metadata.tracks.length > 0) {
+          setOrderedSpotifyTracks([...patch.metadata.tracks]);
+          setOrderedEntries([]);
           const initMap: Record<string, boolean> = {};
           patch.metadata.tracks.forEach((t, idx) => {
-            initMap[`track-${idx}-${t.id}`] = true;
+            initMap[trackKey(t, idx)] = true;
           });
           setSelectedPlaylistKeys(initMap);
         } else {
+          setOrderedEntries([]);
+          setOrderedSpotifyTracks([]);
           setSelectedPlaylistKeys({});
         }
+      } else {
+        setOrderedEntries([]);
+        setOrderedSpotifyTracks([]);
+        setSelectedPlaylistKeys({});
       }
     }
     if (patch.extractError !== undefined) setExtractError(patch.extractError);
@@ -188,6 +194,17 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   }, []);
 
   useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleCloseModal();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen]);
+
+  useEffect(() => {
     if (isOpen) {
       refreshCookies();
       if (settings) {
@@ -201,7 +218,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         setMode('single');
         setUrl(initialUrl);
         setCustomFilename('');
-        setExpectedSha256('');
+        if (isSpotifyUrl(initialUrl)) {
+          setSelectedTab('audio');
+        }
         inspect(initialUrl);
       }
     } else {
@@ -239,7 +258,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   if (!isOpen) return null;
 
   const cookieBadge = describeCookieStatus(cookieStatus);
-  const isDirect = Boolean(metadata?.is_direct_file);
+  const isSpotifyContent = metadata?.extractor === 'spotdl' || isSpotifyUrl(url.trim());
 
   const handlePasteClipboard = async () => {
     try {
@@ -256,16 +275,35 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   const handleToggleAllPlaylist = (checked: boolean) => {
     const next: Record<string, boolean> = {};
-    if (metadata?.entries) {
-      metadata.entries.forEach((e, idx) => {
-        next[`entry-${idx}-${e.id}`] = checked;
-      });
-    } else if (metadata?.tracks) {
-      metadata.tracks.forEach((t, idx) => {
-        next[`track-${idx}-${t.id}`] = checked;
-      });
-    }
+    orderedEntries.forEach((e) => {
+      next[entryKey(e)] = checked;
+    });
+    orderedSpotifyTracks.forEach((t, idx) => {
+      next[trackKey(t, idx)] = checked;
+    });
     setSelectedPlaylistKeys(next);
+  };
+
+  const moveEntry = (idx: number, direction: -1 | 1) => {
+    const target = idx + direction;
+    if (target < 0 || target >= orderedEntries.length) return;
+    setOrderedEntries((prev) => {
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
+  };
+
+  const moveSpotifyTrack = (idx: number, direction: -1 | 1) => {
+    const target = idx + direction;
+    if (target < 0 || target >= orderedSpotifyTracks.length) return;
+    setOrderedSpotifyTracks((prev) => {
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
   };
 
   const handleSubmit = async (quickDownload = false) => {
@@ -274,15 +312,16 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     if (mode === 'batch') {
       if (batchValidation.valid.length === 0) return;
       setIsSubmitting(true);
+      setExtractError(null);
       try {
         for (const line of batchValidation.valid) {
           const lineIsSpotify = isSpotifyUrl(line);
           const isAudioOnly = selectedTab === 'audio' || lineIsSpotify;
           const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
-          const autoCat = categoryId || matchCategoryForTask(ext, isAudioOnly, categories)?.id || undefined;
           await api.createTask({
             url: line,
-            title: lineIsSpotify ? undefined : `Batch Item: ${line.substring(0, 48)}`,
+            title: lineIsSpotify ? undefined : `Batch Media: ${line.substring(0, 48)}`,
+            engine: lineIsSpotify ? 'spotdl' : 'yt-dlp',
             format_id: isAudioOnly ? 'bestaudio' : 'best',
             ext,
             is_audio_only: isAudioOnly,
@@ -291,7 +330,6 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
             audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
             is_lossy_source: isLikelyLossySource(line),
-            category_id: autoCat,
             priority,
           });
         }
@@ -307,115 +345,120 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
     const trimmedUrl = url.trim();
     if (!trimmedUrl) return;
+
+    const checked = validateMediaUrl(trimmedUrl);
+    if (!checked.valid) {
+      setExtractError(checked.error);
+      setIsTimeoutError(false);
+      return;
+    }
+
+    setExtractError(null);
     setIsSubmitting(true);
     try {
-      // Playlist multi-track selection submission
-      if (metadata?.entries && metadata.entries.length > 0 && !quickDownload) {
-        const pickedEntries = metadata.entries.filter(
-          (e, idx) => selectedPlaylistKeys[`entry-${idx}-${e.id}`] !== false
-        );
-        if (pickedEntries.length > 0 && pickedEntries.length <= metadata.entries.length) {
-          const isAudioOnly = selectedTab === 'audio';
-          const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
-          const autoCat =
-            categoryId || matchCategoryForTask(ext, isAudioOnly, categories)?.id || undefined;
-          for (const entry of pickedEntries) {
-            await api.createTask({
-              url: entry.url,
-              title: entry.title,
-              uploader: entry.uploader || metadata.uploader,
-              duration: entry.duration,
-              duration_string: entry.duration_string,
-              thumbnail: entry.thumbnail || metadata.thumbnail,
-              format_id: isAudioOnly ? 'bestaudio' : selectedFormatId,
-              ext,
-              is_audio_only: isAudioOnly,
-              audio_format: selectedAudioFormat,
-              audio_bitrate: selectedAudioBitrate,
-              audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
-              audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
-              is_lossy_source: isLikelyLossySource(entry.url, metadata.extractor),
-              category_id: autoCat,
-              playlist_mode: 'single',
-              priority,
-            });
-          }
-          handleCloseModal();
-          onTaskCreated();
-          return;
-        }
-      }
-
-      if (metadata?.tracks && metadata.tracks.length > 0 && !quickDownload) {
-        const pickedTracks = metadata.tracks.filter(
-          (t, idx) => selectedPlaylistKeys[`track-${idx}-${t.id}`] !== false
-        );
-        const tracksWithUrls = pickedTracks.filter((t) => Boolean(t.url));
-        if (tracksWithUrls.length > 0 && pickedTracks.length < metadata.tracks.length) {
-          const autoCat =
-            categoryId ||
-            matchCategoryForTask(selectedAudioFormat, true, categories)?.id ||
-            undefined;
-          for (const tr of tracksWithUrls) {
-            await api.createTask({
-              url: tr.url!,
-              title: tr.title,
-              uploader: tr.artists.join(', ') || metadata.uploader,
-              duration: tr.duration,
-              duration_string: tr.duration_string,
-              thumbnail: tr.artwork || metadata.album_artwork || metadata.thumbnail,
-              album: tr.album || metadata.album,
-              content_type: 'track',
-              engine: 'spotdl',
-              format_id: 'bestaudio',
-              ext: selectedAudioFormat,
-              is_audio_only: true,
-              audio_format: selectedAudioFormat,
-              audio_bitrate: selectedAudioBitrate,
-              audio_sample_rate: isLossless ? selectedSampleRate : undefined,
-              audio_bit_depth: isLossless ? selectedBitDepth : undefined,
-              is_lossy_source: true,
-              category_id: autoCat,
-              playlist_mode: 'single',
-              priority,
-            });
-          }
-          handleCloseModal();
-          onTaskCreated();
-          return;
-        }
-      }
-
-      const urlIsSpotify = metadata?.extractor === 'spotdl' || isSpotifyUrl(trimmedUrl);
-      const directExt = metadata?.direct_filename?.split('.').pop()?.toLowerCase();
-      const isAudioOnly = isDirect ? false : selectedTab === 'audio' || urlIsSpotify;
+      const urlIsSpotify = metadata?.extractor === 'spotdl' || checked.engine === 'spotdl';
+      const isAudioOnly = selectedTab === 'audio' || urlIsSpotify;
       const chosenFormatId = quickDownload ? (isAudioOnly ? 'bestaudio' : 'best') : selectedFormatId;
-      const ext = isDirect
-        ? directExt || 'bin'
-        : isAudioOnly
-        ? selectedAudioFormat
-        : selectedContainer;
-      const autoCat = categoryId || matchCategoryForTask(ext, isAudioOnly, categories)?.id || undefined;
-      const isSourceLossy = isLikelyLossySource(trimmedUrl, metadata?.extractor);
+      const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
+      const isSourceLossy = isLikelyLossySource(checked.normalized, metadata?.extractor);
       const resolvedUploader =
         metadata?.artists && metadata.artists.length > 0
           ? metadata.artists.join(', ')
           : metadata?.owner || metadata?.uploader;
       const resolvedArtwork = metadata?.album_artwork || metadata?.thumbnail;
 
+      // Playlist / Album selection + custom ordering for yt-dlp
+      if (orderedEntries.length > 0 && !quickDownload) {
+        const pickedEntries = orderedEntries.filter(
+          (e) => selectedPlaylistKeys[entryKey(e)] !== false
+        );
+        if (pickedEntries.length === 0) {
+          setExtractError('Select at least one playlist item to download.');
+          setIsSubmitting(false);
+          return;
+        }
+        await api.createTask({
+          url: checked.normalized,
+          title: metadata?.title || 'Media Playlist',
+          uploader: resolvedUploader,
+          duration: metadata?.duration,
+          duration_string: metadata?.duration_string,
+          thumbnail: resolvedArtwork,
+          engine: 'yt-dlp',
+          format_id: isAudioOnly ? 'bestaudio' : chosenFormatId,
+          ext,
+          is_audio_only: isAudioOnly,
+          audio_format: selectedAudioFormat,
+          audio_bitrate: selectedAudioBitrate,
+          audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
+          audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
+          is_lossy_source: isSourceLossy,
+          custom_filename: customFilename.trim() || undefined,
+          playlist_mode: 'playlist',
+          selected_items: pickedEntries.map((e) => String(e.index)),
+          tracks_requested: pickedEntries.length,
+          priority,
+        });
+        handleCloseModal();
+        onTaskCreated();
+        return;
+      }
+
+      // Spotify album / playlist track selection + custom ordering for spotDL
+      if (orderedSpotifyTracks.length > 0 && !quickDownload) {
+        const pickedTracks = orderedSpotifyTracks.filter(
+          (t, idx) => selectedPlaylistKeys[trackKey(t, idx)] !== false
+        );
+        if (pickedTracks.length === 0) {
+          setExtractError('Select at least one track to download.');
+          setIsSubmitting(false);
+          return;
+        }
+        const trackUrls = pickedTracks
+          .map((t) => t.url)
+          .filter((u): u is string => Boolean(u && u.trim()));
+
+        await api.createTask({
+          url: checked.normalized,
+          title: metadata?.title,
+          uploader: resolvedUploader,
+          duration: metadata?.duration,
+          duration_string: metadata?.duration_string,
+          thumbnail: resolvedArtwork,
+          album: metadata?.album,
+          content_type: metadata?.content_type,
+          engine: 'spotdl',
+          format_id: 'bestaudio',
+          ext: selectedAudioFormat,
+          is_audio_only: true,
+          audio_format: selectedAudioFormat,
+          audio_bitrate: selectedAudioBitrate,
+          audio_sample_rate: isLossless ? selectedSampleRate : undefined,
+          audio_bit_depth: isLossless ? selectedBitDepth : undefined,
+          is_lossy_source: true,
+          custom_filename: customFilename.trim() || undefined,
+          playlist_mode: trackUrls.length === 1 && !metadata?.is_playlist ? 'single' : 'playlist',
+          selected_items: trackUrls.length > 0 ? trackUrls : undefined,
+          tracks_requested: trackUrls.length > 0 ? trackUrls.length : undefined,
+          priority,
+        });
+        handleCloseModal();
+        onTaskCreated();
+        return;
+      }
+
       await api.createTask({
-        url: trimmedUrl,
-        title: metadata?.title || (urlIsSpotify ? undefined : 'Download Task'),
+        url: checked.normalized,
+        title: metadata?.title || (urlIsSpotify ? undefined : 'Media Download'),
         uploader: resolvedUploader,
         duration: metadata?.duration,
         duration_string: metadata?.duration_string,
         thumbnail: resolvedArtwork,
         album: metadata?.album,
         content_type: metadata?.content_type,
-        engine: isDirect ? 'direct' : urlIsSpotify ? 'spotdl' : undefined,
-        format_id: isDirect ? 'direct' : chosenFormatId,
+        engine: urlIsSpotify ? 'spotdl' : 'yt-dlp',
+        format_id: isAudioOnly ? 'bestaudio' : chosenFormatId,
         ext,
-        total_bytes: metadata?.direct_file_size || 0,
         is_audio_only: isAudioOnly,
         audio_format: selectedAudioFormat,
         audio_bitrate: selectedAudioBitrate,
@@ -423,9 +466,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
         is_lossy_source: isSourceLossy,
         custom_filename: customFilename.trim() || undefined,
-        category_id: autoCat,
-        expected_sha256: expectedSha256.trim() || undefined,
-        playlist_mode: includePlaylistMode ? 'playlist' : 'single',
+        playlist_mode: includePlaylistMode && metadata?.is_playlist ? 'playlist' : 'single',
         priority,
       });
 
@@ -438,6 +479,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     }
   };
 
+  const selectedEntryCount = orderedEntries.filter(
+    (e) => selectedPlaylistKeys[entryKey(e)] !== false
+  ).length;
+  const selectedTrackCount = orderedSpotifyTracks.filter(
+    (t, idx) => selectedPlaylistKeys[trackKey(t, idx)] !== false
+  ).length;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/70 backdrop-blur-xs select-none">
       <div className="relative w-full max-w-2xl bg-[var(--vanta-surface)] border border-[var(--vanta-border-strong)] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
@@ -445,7 +493,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
           <div className="flex items-center gap-2">
             <Download className="w-4 h-4 text-[var(--vanta-accent)]" />
-            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">New Download</h2>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">New Media Download</h2>
           </div>
           <button
             type="button"
@@ -470,7 +518,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
               }`}
             >
-              Single URL
+              Single URL / Playlist
             </button>
             <button
               type="button"
@@ -484,7 +532,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
               }`}
             >
-              Batch URLs
+              Batch Media URLs
             </button>
           </div>
 
@@ -493,7 +541,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-[var(--vanta-text-secondary)]">
-                    Media, Spotify, or Direct File URL
+                    Video or Music URL (YouTube, Spotify, etc.)
                   </label>
                   <label className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vanta-muted)] cursor-pointer">
                     <input
@@ -510,7 +558,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   <div className="relative flex-1 min-w-0">
                     <input
                       type="text"
-                      placeholder="https://... or https://open.spotify.com/track/..."
+                      placeholder="https://www.youtube.com/watch?v=... or https://open.spotify.com/..."
                       value={url}
                       onChange={(e) => {
                         const nextVal = e.target.value;
@@ -520,7 +568,11 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                           setExtractError(null);
                           setIsTimeoutError(false);
                         }
-                        if (metadata) setMetadata(null);
+                        if (metadata) {
+                          setMetadata(null);
+                          setOrderedEntries([]);
+                          setOrderedSpotifyTracks([]);
+                        }
                       }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -563,6 +615,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                         handleCancelInspection();
                         setUrl('');
                         setMetadata(null);
+                        setOrderedEntries([]);
+                        setOrderedSpotifyTracks([]);
                         setExtractError(null);
                         setIsTimeoutError(false);
                       }}
@@ -576,9 +630,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               </div>
 
-              {/* Sample Test Presets */}
+              {/* Sample Media Presets */}
               <div className="flex items-center gap-2 flex-wrap text-[11px]">
-                <span className="text-[var(--vanta-muted)]">Test presets:</span>
+                <span className="text-[var(--vanta-muted)]">Media presets:</span>
                 {SAMPLE_URLS.map((sample) => (
                   <button
                     key={sample.name}
@@ -624,11 +678,11 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           ) : (
             <div className="space-y-2">
               <label className="text-xs font-medium text-[var(--vanta-text-secondary)] block">
-                Batch URL List (one URL per line)
+                Batch Media URL List (one video/music URL per line)
               </label>
               <textarea
                 rows={5}
-                placeholder="https://...&#10;https://...&#10;https://..."
+                placeholder="https://www.youtube.com/watch?v=...&#10;https://open.spotify.com/track/..."
                 value={batchUrls}
                 onChange={(e) => setBatchUrls(e.target.value)}
                 className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs p-3 text-[var(--vanta-text)] font-mono placeholder-[var(--vanta-muted)]"
@@ -636,8 +690,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               {batchUrls.trim() && (
                 <div className="text-[11px] font-mono tabular-nums space-y-1">
                   <p className="text-[var(--vanta-text-secondary)]">
-                    Valid URLs: <span className="text-emerald-700 dark:text-[#3fb950] font-semibold">{batchValidation.valid.length}</span>
-                    {batchValidation.duplicatesRemoved > 0 && ` · Duplicates skipped: ${batchValidation.duplicatesRemoved}`}
+                    Valid URLs:{' '}
+                    <span className="text-emerald-700 dark:text-[#3fb950] font-semibold">
+                      {batchValidation.valid.length}
+                    </span>
+                    {batchValidation.duplicatesRemoved > 0 &&
+                      ` · Duplicates skipped: ${batchValidation.duplicatesRemoved}`}
                     {batchValidation.invalid.length > 0 && (
                       <span className="text-red-600 dark:text-[#f85149]">
                         {' '}· Invalid lines: {batchValidation.invalid.length}
@@ -664,7 +722,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     Inspecting URL metadata &amp; streams...
                   </p>
                   <p className="text-[11px] text-[var(--vanta-muted)] truncate">
-                    Timeout protection active. Cancel anytime or use Quick Download.
+                    Timeout protection active. Cancel anytime or use Quick Queue.
                   </p>
                 </div>
               </div>
@@ -678,7 +736,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
           )}
 
-          {/* Extraction Error Notice */}
+          {/* Extraction / Validation Error Notice */}
           {extractError && (
             <div
               className={`p-3 rounded-lg border space-y-2 ${
@@ -691,37 +749,41 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span className="whitespace-pre-line break-words flex-1">{extractError}</span>
               </div>
-              <div className="flex flex-wrap items-center gap-2 pt-1.5 border-t border-current/20">
-                <button
-                  type="button"
-                  onClick={() => inspect(url)}
-                  disabled={!url.trim()}
-                  className="px-2.5 py-1 bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] font-medium rounded flex items-center gap-1"
-                >
-                  <RotateCw className="w-3 h-3" />
-                  <span>Retry</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowInlineCookieImport(true)}
-                  className="px-2.5 py-1 bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] font-medium rounded flex items-center gap-1"
-                >
-                  <Cookie className="w-3 h-3" />
-                  <span>Import cookies.txt</span>
-                </button>
-                {onOpenCookieSettings && (
+              {!/music and video only|files are not supported|Invalid URL|Unsupported URL scheme/i.test(
+                extractError
+              ) && (
+                <div className="flex flex-wrap items-center gap-2 pt-1.5 border-t border-current/20">
                   <button
                     type="button"
-                    onClick={() => {
-                      handleCloseModal();
-                      onOpenCookieSettings();
-                    }}
-                    className="px-2.5 py-1 text-[var(--vanta-accent)] text-[11px] font-medium hover:underline"
+                    onClick={() => inspect(url)}
+                    disabled={!url.trim()}
+                    className="px-2.5 py-1 bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] font-medium rounded flex items-center gap-1"
                   >
-                    Open Cookie Settings
+                    <RotateCw className="w-3 h-3" />
+                    <span>Retry</span>
                   </button>
-                )}
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowInlineCookieImport(true)}
+                    className="px-2.5 py-1 bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] font-medium rounded flex items-center gap-1"
+                  >
+                    <Cookie className="w-3 h-3" />
+                    <span>Import cookies.txt</span>
+                  </button>
+                  {onOpenCookieSettings && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleCloseModal();
+                        onOpenCookieSettings();
+                      }}
+                      className="px-2.5 py-1 text-[var(--vanta-accent)] text-[11px] font-medium hover:underline"
+                    >
+                      Open Cookie Settings
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -854,9 +916,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   />
                 ) : (
                   <div className="w-16 h-16 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)] flex items-center justify-center shrink-0 text-[var(--vanta-muted)]">
-                    {metadata.is_direct_file ? (
-                      <FileDown className="w-6 h-6 text-[var(--vanta-accent)]" />
-                    ) : metadata.extractor === 'spotdl' ? (
+                    {metadata.extractor === 'spotdl' ? (
                       <Disc className="w-6 h-6 text-emerald-600 dark:text-[#3fb950]" />
                     ) : (
                       <Video className="w-6 h-6" />
@@ -874,94 +934,21 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                         {metadata.artists?.length ? metadata.artists.join(', ') : metadata.uploader}
                       </span>
                     )}
+                    {metadata.album && <span>· {metadata.album}</span>}
                     {metadata.duration_string && <span>· {metadata.duration_string}</span>}
-                    {metadata.is_direct_file && (
-                      <>
-                        <span>· {metadata.direct_file_size ? formatBytes(metadata.direct_file_size) : 'Unknown size'}</span>
-                        {metadata.direct_mime_type && <span>· {metadata.direct_mime_type}</span>}
-                        <span>· {metadata.accepts_ranges ? 'Resumable (Ranges)' : 'Single-stream'}</span>
-                      </>
-                    )}
                     <span>· {metadata.extractor}</span>
                   </div>
                 </div>
               </div>
 
-              {/* Generic yt-dlp Playlist Track Picker */}
-              {metadata.entries && metadata.entries.length > 0 && (
+              {/* yt-dlp Playlist Selection & Ordering */}
+              {orderedEntries.length > 0 && (
                 <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-medium text-[var(--vanta-text)] flex items-center gap-1.5">
                       <ListMusic className="w-3.5 h-3.5 text-[var(--vanta-accent)]" />
-                      <span>Playlist Items ({metadata.entries.length})</span>
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleAllPlaylist(true)}
-                        className="text-[var(--vanta-accent)] hover:underline"
-                      >
-                        Select all
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleAllPlaylist(false)}
-                        className="text-[var(--vanta-muted)] hover:underline"
-                      >
-                        None
-                      </button>
-                    </div>
-                  </div>
-                  <div className="max-h-40 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {metadata.entries.map((entry, idx) => {
-                      const key = `entry-${idx}-${entry.id}`;
-                      const checked = selectedPlaylistKeys[key] !== false;
-                      return (
-                        <label
-                          key={key}
-                          className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer hover:bg-[var(--vanta-surface-hover)]/50"
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={(e) =>
-                                setSelectedPlaylistKeys((prev) => ({
-                                  ...prev,
-                                  [key]: e.target.checked,
-                                }))
-                              }
-                              className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
-                            />
-                            <span className="font-mono tabular-nums text-[var(--vanta-muted)] w-5 shrink-0">
-                              {entry.index}
-                            </span>
-                            <span className="text-[var(--vanta-text)] truncate">{entry.title}</span>
-                          </div>
-                          {entry.duration_string && (
-                            <span className="font-mono tabular-nums text-[var(--vanta-muted)] shrink-0">
-                              {entry.duration_string}
-                            </span>
-                          )}
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Spotify Tracklist Picker */}
-              {metadata.tracks && metadata.tracks.length > 0 && (
-                <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="font-medium text-[var(--vanta-text)] flex items-center gap-1.5">
-                      <ListMusic className="w-3.5 h-3.5 text-emerald-600 dark:text-[#3fb950]" />
                       <span>
-                        Tracklist ({metadata.tracks.length}
-                        {metadata.partial_tracks && metadata.total_tracks
-                          ? ` of ${metadata.total_tracks}`
-                          : ''}
-                        )
+                        Playlist Items ({selectedEntryCount}/{orderedEntries.length} selected · download order)
                       </span>
                     </span>
                     <div className="flex items-center gap-2">
@@ -981,16 +968,105 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                       </button>
                     </div>
                   </div>
-                  <div className="max-h-40 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {metadata.tracks.map((track, idx) => {
-                      const key = `track-${idx}-${track.id}`;
+                  <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+                    {orderedEntries.map((entry, idx) => {
+                      const key = entryKey(entry);
                       const checked = selectedPlaylistKeys[key] !== false;
                       return (
-                        <label
+                        <div
                           key={key}
-                          className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer hover:bg-[var(--vanta-surface-hover)]/50"
+                          className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] hover:bg-[var(--vanta-surface-hover)]/50"
                         >
-                          <div className="flex items-center gap-2 min-w-0">
+                          <label className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) =>
+                                setSelectedPlaylistKeys((prev) => ({
+                                  ...prev,
+                                  [key]: e.target.checked,
+                                }))
+                              }
+                              className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
+                            />
+                            <span className="font-mono tabular-nums text-[var(--vanta-muted)] w-5 shrink-0">
+                              {entry.index}
+                            </span>
+                            <span className="text-[var(--vanta-text)] truncate">{entry.title}</span>
+                          </label>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {entry.duration_string && (
+                              <span className="font-mono tabular-nums text-[var(--vanta-muted)] mr-1">
+                                {entry.duration_string}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => moveEntry(idx, -1)}
+                              aria-label={`Move ${entry.title} up`}
+                              className="p-0.5 rounded text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] disabled:opacity-30"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === orderedEntries.length - 1}
+                              onClick={() => moveEntry(idx, 1)}
+                              aria-label={`Move ${entry.title} down`}
+                              className="p-0.5 rounded text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] disabled:opacity-30"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Spotify Tracklist Selection & Ordering */}
+              {orderedSpotifyTracks.length > 0 && (
+                <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-medium text-[var(--vanta-text)] flex items-center gap-1.5">
+                      <ListMusic className="w-3.5 h-3.5 text-emerald-600 dark:text-[#3fb950]" />
+                      <span>
+                        Tracklist ({selectedTrackCount}/{orderedSpotifyTracks.length} selected
+                        {metadata.partial_tracks && metadata.total_tracks
+                          ? ` of ${metadata.total_tracks}`
+                          : ''}
+                        {' '}· download order)
+                      </span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAllPlaylist(true)}
+                        className="text-[var(--vanta-accent)] hover:underline"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAllPlaylist(false)}
+                        className="text-[var(--vanta-muted)] hover:underline"
+                      >
+                        None
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+                    {orderedSpotifyTracks.map((track, idx) => {
+                      const key = trackKey(track, idx);
+                      const checked = selectedPlaylistKeys[key] !== false;
+                      return (
+                        <div
+                          key={key}
+                          className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] hover:bg-[var(--vanta-surface-hover)]/50"
+                        >
+                          <label className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer">
                             <input
                               type="checkbox"
                               checked={checked}
@@ -1015,13 +1091,33 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                                 </span>
                               )}
                             </div>
+                          </label>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {track.duration_string && (
+                              <span className="font-mono tabular-nums text-[var(--vanta-muted)] mr-1">
+                                {track.duration_string}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => moveSpotifyTrack(idx, -1)}
+                              aria-label={`Move ${track.title} up`}
+                              className="p-0.5 rounded text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] disabled:opacity-30"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === orderedSpotifyTracks.length - 1}
+                              onClick={() => moveSpotifyTrack(idx, 1)}
+                              aria-label={`Move ${track.title} down`}
+                              className="p-0.5 rounded text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] disabled:opacity-30"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
                           </div>
-                          {track.duration_string && (
-                            <span className="font-mono tabular-nums text-[var(--vanta-muted)] shrink-0">
-                              {track.duration_string}
-                            </span>
-                          )}
-                        </label>
+                        </div>
                       );
                     })}
                   </div>
@@ -1030,14 +1126,14 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
           )}
 
-          {/* Output Workflow (hidden for direct non-media HTTP downloads, where SHA-256 & Filename are shown instead) */}
-          {!isDirect ? (
-            <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-[var(--vanta-text-secondary)]">
-                  Output Workflow
-                </span>
-                <div className="flex items-center gap-1 p-0.5 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
+          {/* Output Workflow */}
+          <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-[var(--vanta-text-secondary)]">
+                Output Workflow
+              </span>
+              <div className="flex items-center gap-1 p-0.5 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
+                {!isSpotifyContent && (
                   <button
                     type="button"
                     onClick={() => setSelectedTab('video')}
@@ -1050,157 +1146,145 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     <Video className="w-3.5 h-3.5" />
                     <span>Video + Audio</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTab('audio')}
-                    className={`px-3 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 ${
-                      selectedTab === 'audio'
-                        ? 'bg-[var(--vanta-surface)] text-[var(--vanta-accent)] border border-[var(--vanta-border)]'
-                        : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
-                    }`}
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedTab('audio')}
+                  className={`px-3 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 ${
+                    selectedTab === 'audio' || isSpotifyContent
+                      ? 'bg-[var(--vanta-surface)] text-[var(--vanta-accent)] border border-[var(--vanta-border)]'
+                      : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
+                  }`}
+                >
+                  <Music className="w-3.5 h-3.5" />
+                  <span>Audio Only</span>
+                </button>
+              </div>
+            </div>
+
+            {selectedTab === 'video' && !isSpotifyContent ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                    Video Quality (with Audio Mux)
+                  </label>
+                  <select
+                    value={selectedFormatId}
+                    onChange={(e) => setSelectedFormatId(e.target.value)}
+                    className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
                   >
-                    <Music className="w-3.5 h-3.5" />
-                    <span>Audio Only</span>
-                  </button>
+                    {curatedVideoOptions.map((opt) => (
+                      <option key={opt.id} value={opt.formatSelector}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                    Container Format
+                  </label>
+                  <select
+                    value={selectedContainer}
+                    onChange={(e) => setSelectedContainer(e.target.value)}
+                    className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                  >
+                    <option value="mp4">MP4 (Universal)</option>
+                    <option value="mkv">MKV (Matroska Subtitles/Streams)</option>
+                    <option value="webm">WebM (VP9 / AV1)</option>
+                  </select>
                 </div>
               </div>
-
-              {selectedTab === 'video' ? (
+            ) : (
+              <div className="space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                      Video Quality (with Audio Mux)
+                      Audio Codec
                     </label>
                     <select
-                      value={selectedFormatId}
-                      onChange={(e) => setSelectedFormatId(e.target.value)}
+                      value={selectedAudioFormat}
+                      onChange={(e) => setSelectedAudioFormat(e.target.value)}
                       className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
                     >
-                      {curatedVideoOptions.map((opt) => (
-                        <option key={opt.id} value={opt.formatSelector}>
-                          {opt.label}
-                        </option>
-                      ))}
+                      <option value="mp3">MP3</option>
+                      <option value="m4a">M4A / AAC</option>
+                      <option value="opus">OPUS</option>
+                      <option value="flac">FLAC (Lossless Container)</option>
+                      <option value="wav">WAV (PCM Container)</option>
                     </select>
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                      Container Format
-                    </label>
-                    <select
-                      value={selectedContainer}
-                      onChange={(e) => setSelectedContainer(e.target.value)}
-                      className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                    >
-                      <option value="mp4">MP4 (Universal)</option>
-                      <option value="mkv">MKV (Matroska Subtitles/Streams)</option>
-                      <option value="webm">WebM (VP9 / AV1)</option>
-                    </select>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav' ? (
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                        Audio Codec
+                        PCM Bit Depth
                       </label>
                       <select
-                        value={selectedAudioFormat}
-                        onChange={(e) => setSelectedAudioFormat(e.target.value)}
+                        value={selectedBitDepth}
+                        onChange={(e) => setSelectedBitDepth(parseInt(e.target.value, 10))}
                         className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
                       >
-                        <option value="mp3">MP3</option>
-                        <option value="m4a">M4A / AAC</option>
-                        <option value="opus">OPUS</option>
-                        <option value="flac">FLAC (Lossless Container)</option>
-                        <option value="wav">WAV (PCM Container)</option>
+                        <option value={16}>16-bit</option>
+                        <option value={24}>24-bit</option>
                       </select>
                     </div>
-
-                    {selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav' ? (
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                          PCM Bit Depth
-                        </label>
-                        <select
-                          value={selectedBitDepth}
-                          onChange={(e) => setSelectedBitDepth(parseInt(e.target.value, 10))}
-                          className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                        >
-                          <option value={16}>16-bit</option>
-                          <option value={24}>24-bit</option>
-                        </select>
-                      </div>
-                    ) : (
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                          Bitrate
-                        </label>
-                        <select
-                          value={selectedAudioBitrate}
-                          onChange={(e) => setSelectedAudioBitrate(e.target.value)}
-                          className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                        >
-                          <option value="320k">320 kbps</option>
-                          <option value="256k">256 kbps</option>
-                          <option value="192k">192 kbps</option>
-                          <option value="128k">128 kbps</option>
-                        </select>
-                      </div>
-                    )}
-                  </div>
-
-                  {(selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav') && (
-                    <>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                          Sampling Rate
-                        </label>
-                        <select
-                          value={selectedSampleRate}
-                          onChange={(e) => setSelectedSampleRate(parseInt(e.target.value, 10))}
-                          className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                        >
-                          <option value={44100}>44.1 kHz</option>
-                          <option value={48000}>48.0 kHz</option>
-                          <option value={96000}>96.0 kHz</option>
-                        </select>
-                      </div>
-                      {isLikelyLossySource(url, metadata?.extractor) && (
-                        <div className="p-2.5 rounded-lg border border-blue-500/30 bg-blue-500/10 flex items-start gap-2 text-[11px] text-[var(--vanta-text-secondary)]">
-                          <Info className="w-3.5 h-3.5 text-[var(--vanta-accent)] shrink-0 mt-0.5" />
-                          <span>
-                            Source stream is lossy web audio (Opus/AAC). Exporting to {selectedAudioFormat.toUpperCase()} preserves current quality without restoring lost frequencies.
-                          </span>
-                        </div>
-                      )}
-                    </>
+                  ) : (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                        Bitrate
+                      </label>
+                      <select
+                        value={selectedAudioBitrate}
+                        onChange={(e) => setSelectedAudioBitrate(e.target.value)}
+                        className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                      >
+                        <option value="320k">320 kbps</option>
+                        <option value="256k">256 kbps</option>
+                        <option value="192k">192 kbps</option>
+                        <option value="128k">128 kbps</option>
+                      </select>
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2.5 pt-2 border-t border-[var(--vanta-border)]">
-              <label className="text-[11px] font-medium text-[var(--vanta-muted)] flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-[#3fb950]" />
-                <span>Expected SHA-256 Checksum (Optional verification on completion)</span>
-              </label>
-              <input
-                type="text"
-                value={expectedSha256}
-                onChange={(e) => setExpectedSha256(e.target.value)}
-                placeholder="64-character hex SHA-256 digest..."
-                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs p-2 font-mono text-[var(--vanta-text)]"
-              />
-            </div>
-          )}
 
-          {/* Filename, Category & Priority Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[var(--vanta-border)]">
+                {(selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav') && (
+                  <>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                        Sampling Rate
+                      </label>
+                      <select
+                        value={selectedSampleRate}
+                        onChange={(e) => setSelectedSampleRate(parseInt(e.target.value, 10))}
+                        className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                      >
+                        <option value={44100}>44.1 kHz</option>
+                        <option value={48000}>48.0 kHz</option>
+                        <option value={96000}>96.0 kHz</option>
+                      </select>
+                    </div>
+                    {isLikelyLossySource(url, metadata?.extractor) && (
+                      <div className="p-2.5 rounded-lg border border-blue-500/30 bg-blue-500/10 flex items-start gap-2 text-[11px] text-[var(--vanta-text-secondary)]">
+                        <Info className="w-3.5 h-3.5 text-[var(--vanta-accent)] shrink-0 mt-0.5" />
+                        <span>
+                          Source stream is lossy web audio (Opus/AAC). Exporting to{' '}
+                          {selectedAudioFormat.toUpperCase()} preserves current quality without
+                          restoring lost frequencies.
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Filename & Priority Row */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--vanta-border)]">
             {mode === 'single' && (
-              <div className="space-y-1 sm:col-span-1">
+              <div className="space-y-1">
                 <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
                   Custom Filename (Optional)
                 </label>
@@ -1213,21 +1297,6 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 />
               </div>
             )}
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-[var(--vanta-muted)]">Category</label>
-              <select
-                value={categoryId}
-                onChange={(e) => setCategoryId(e.target.value)}
-                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-              >
-                <option value="">Auto-Detect</option>
-                {categories.map((cat) => (
-                  <option key={cat.id} value={cat.id}>
-                    {cat.name}
-                  </option>
-                ))}
-              </select>
-            </div>
             <div className="space-y-1">
               <label className="text-[11px] font-medium text-[var(--vanta-muted)]">Priority</label>
               <select

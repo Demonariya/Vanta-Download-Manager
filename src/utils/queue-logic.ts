@@ -91,7 +91,6 @@ export function filterAndSortTasks(
   tasks: DownloadTask[],
   opts: {
     statusFilter?: 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed' | 'audio' | 'video';
-    categoryId?: string | null;
     searchQuery?: string;
     sortField?: SortField;
     sortDirection?: SortDirection;
@@ -109,10 +108,6 @@ export function filterAndSortTasks(
       } else if (opts.statusFilter !== t.status) {
         return false;
       }
-    }
-
-    if (opts.categoryId && t.category_id !== opts.categoryId) {
-      return false;
     }
 
     if (query) {

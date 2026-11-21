@@ -72,7 +72,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   const handleExportCsv = () => {
     const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = [
-      ['id', 'title', 'url', 'engine', 'status', 'ext', 'bytes', 'sha256', 'completed_at'].join(','),
+      ['id', 'title', 'url', 'engine', 'status', 'ext', 'bytes', 'completed_at'].join(','),
       ...historyTasks.map((t) =>
         [
           esc(t.id),
@@ -82,7 +82,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           esc(t.status),
           esc(t.ext),
           t.total_bytes || t.downloaded_bytes || 0,
-          esc(t.verified_sha256 || ''),
           esc(t.completed_at || t.created_at),
         ].join(',')
       ),

@@ -2,16 +2,15 @@ use crate::cookies;
 use crate::engines::EngineManager;
 use crate::logging;
 use crate::models::{
-    AppSettings, CategoryItem, CookieStatus, CookieTestResult, CookieValidationResult,
-    CreateTaskPayload, DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask,
-    EngineStatusMap, EngineUpdateInfo, EngineUpdateResult, ManagedEngineInfo, MediaMetadata,
-    NotificationItem, TaskLogEntry, TaskPriority, TaskStatus,
+    AppSettings, CookieStatus, CookieTestResult, CookieValidationResult, CreateTaskPayload,
+    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask, EngineStatusMap,
+    EngineUpdateInfo, EngineUpdateResult, ManagedEngineInfo, MediaMetadata, NotificationItem,
+    PythonValidationResult, TaskLogEntry, TaskPriority, TaskStatus,
 };
 use crate::process;
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
@@ -54,47 +53,6 @@ fn format_duration_rust(sec: u64) -> String {
     }
 }
 
-fn resolve_unique_dest(dir: &Path, filename: &str, strategy: &str) -> (PathBuf, bool) {
-    let safe_name = crate::sanitize_filename(filename);
-    let final_name = if safe_name.trim().is_empty() {
-        format!("download_{}.bin", chrono::Utc::now().timestamp())
-    } else {
-        safe_name
-    };
-    let candidate = dir.join(&final_name);
-    if !candidate.exists() || strategy == "overwrite" {
-        return (candidate, false);
-    }
-    if strategy == "skip" {
-        if let Ok(meta) = fs::metadata(&candidate) {
-            if meta.is_file() && meta.len() > 0 {
-                return (candidate, true);
-            }
-        }
-        return (candidate, false);
-    }
-
-    let stem = candidate
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("download");
-    let ext = candidate
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|e| format!(".{}", e))
-        .unwrap_or_default();
-    for i in 1..=999 {
-        let next = dir.join(format!("{} ({}){}", stem, i, ext));
-        if !next.exists() {
-            return (next, false);
-        }
-    }
-    (
-        dir.join(format!("{}_{}{}", stem, chrono::Utc::now().timestamp(), ext)),
-        false,
-    )
-}
-
 #[tauri::command]
 pub fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
     Ok(state.get_tasks())
@@ -107,23 +65,21 @@ pub async fn create_task(
     payload: CreateTaskPayload,
 ) -> Result<DownloadTask, String> {
     let settings = state.get_settings();
-    let trimmed_url = payload.url.trim().to_string();
+    let trimmed_url = EngineManager::validate_inspection_url(&payload.url)?;
     let is_spotify = crate::spotify::is_spotify_url(&trimmed_url);
-    let is_direct = !is_spotify && EngineManager::is_direct_file_url(&trimmed_url);
     let is_audio = payload.is_audio_only.unwrap_or(is_spotify);
 
-    if !is_direct {
-        let requires_ffmpeg = is_audio
-            || settings.embed_thumbnail
-            || settings.embed_metadata
-            || payload.format_id.as_deref().unwrap_or("best") == "best";
+    let requires_ffmpeg = is_audio
+        || is_spotify
+        || settings.embed_thumbnail
+        || settings.embed_metadata
+        || payload.format_id.as_deref().unwrap_or("best") == "best";
 
-        tokio::task::spawn_blocking(move || {
-            EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)
-        })
-        .await
-        .map_err(|e| format!("Engine preflight failed: {}", e))??;
-    }
+    tokio::task::spawn_blocking(move || {
+        EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)
+    })
+    .await
+    .map_err(|e| format!("Engine preflight failed: {}", e))??;
 
     let mut resolved_url = trimmed_url.clone();
     let mut resolved_title = payload.title.clone().unwrap_or_default().trim().to_string();
@@ -198,8 +154,6 @@ pub async fn create_task(
 
     let engine = if is_spotify {
         "spotdl".to_string()
-    } else if is_direct {
-        "direct".to_string()
     } else {
         "yt-dlp".to_string()
     };
@@ -207,32 +161,25 @@ pub async fn create_task(
     let ext = payload.ext.unwrap_or_else(|| {
         if is_audio {
             settings.default_audio_format.clone()
-        } else if is_direct {
-            Path::new(&trimmed_url)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("bin")
-                .split('?')
-                .next()
-                .unwrap_or("bin")
-                .to_lowercase()
         } else {
             "mp4".to_string()
         }
     });
 
-    let categories = state.get_categories();
-    let matched_cat = payload
-        .category_id
-        .clone()
-        .and_then(|cid| categories.iter().find(|c| c.id == cid).cloned())
-        .or_else(|| {
-            let clean_ext = ext.to_lowercase();
-            categories
-                .iter()
-                .find(|c| c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&clean_ext)))
-                .cloned()
-        });
+    let selected_items: Option<Vec<String>> = payload.selected_items.map(|items| {
+        items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    }).filter(|v| !v.is_empty());
+
+    let tracks_requested = selected_items
+        .as_ref()
+        .map(|v| v.len() as u32)
+        .filter(|&n| n > 0);
+    let tracks_completed = tracks_requested.map(|_| 0u32);
+    let tracks_failed = tracks_requested.map(|_| 0u32);
 
     let max_order = state
         .get_tasks()
@@ -292,16 +239,16 @@ pub async fn create_task(
         audio_channels: payload.audio_channels,
         is_lossy_source: payload.is_lossy_source.or(Some(is_spotify)),
         verified_audio_info: None,
-        verified_sha256: None,
-        expected_sha256: payload.expected_sha256,
-        checksum_verified: None,
         output_path: payload
             .output_path
-            .or_else(|| matched_cat.as_ref().and_then(|c| c.destination_dir.clone()))
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| settings.download_dir.clone()),
         custom_filename: payload.custom_filename,
-        category_id: matched_cat.map(|c| c.id),
         playlist_mode: payload.playlist_mode,
+        selected_items,
+        tracks_requested,
+        tracks_completed,
+        tracks_failed,
         error_message: None,
         logs: vec![TaskLogEntry {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -328,7 +275,6 @@ pub async fn create_task(
 
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.trigger_direct_cancel(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -370,7 +316,6 @@ pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
 
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.trigger_direct_cancel(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -424,7 +369,6 @@ pub fn delete_task(
     id: String,
     delete_file: Option<bool>,
 ) -> Result<(), String> {
-    state.trigger_direct_cancel(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -465,15 +409,6 @@ pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
     };
     for pid in pids {
         process::kill_process_tree(pid);
-    }
-    {
-        let mut directs = state
-            .active_direct_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for (_id, flag) in directs.drain() {
-            flag.store(true, Ordering::SeqCst);
-        }
     }
 
     let tasks = state.get_tasks();
@@ -559,7 +494,6 @@ pub fn update_task_meta(
     state: State<'_, AppState>,
     id: String,
     priority: Option<TaskPriority>,
-    category_id: Option<String>,
     custom_filename: Option<String>,
 ) -> Result<DownloadTask, String> {
     let mut task = state
@@ -567,9 +501,6 @@ pub fn update_task_meta(
         .ok_or_else(|| "Task not found".to_string())?;
     if let Some(p) = priority {
         task.priority = p;
-    }
-    if category_id.is_some() {
-        task.category_id = category_id.filter(|s| !s.trim().is_empty());
     }
     if custom_filename.is_some() {
         task.custom_filename = custom_filename.filter(|s| !s.trim().is_empty());
@@ -589,22 +520,6 @@ pub fn rename_task_file(
     let updated = state.rename_task_file(&id, &filename)?;
     let _ = app.emit("task_updated", &updated);
     Ok(updated)
-}
-
-#[tauri::command]
-pub fn verify_task_checksum(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    expected_sha256: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let (task, sha256, matches) = state.verify_task_checksum(&id, expected_sha256)?;
-    let _ = app.emit("task_updated", &task);
-    Ok(serde_json::json!({
-        "task": task,
-        "sha256": sha256,
-        "matches": matches
-    }))
 }
 
 #[tauri::command]
@@ -639,25 +554,6 @@ pub fn bulk_task_action(
 }
 
 #[tauri::command]
-pub fn get_categories(state: State<'_, AppState>) -> Result<Vec<CategoryItem>, String> {
-    Ok(state.get_categories())
-}
-
-#[tauri::command]
-pub fn save_category(
-    state: State<'_, AppState>,
-    category: CategoryItem,
-) -> Result<CategoryItem, String> {
-    Ok(state.save_category(category))
-}
-
-#[tauri::command]
-pub fn delete_category(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.delete_category(&id);
-    Ok(())
-}
-
-#[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.get_settings())
 }
@@ -668,9 +564,25 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    state.save_settings(&settings);
-    let _ = app.emit("settings_updated", &settings);
-    Ok(settings)
+    let saved = state.save_settings(&settings)?;
+    let _ = app.emit("settings_updated", &saved);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn reset_settings(app: AppHandle, state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let saved = state.reset_settings()?;
+    let _ = app.emit("settings_updated", &saved);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn validate_python_executable(
+    python_path: String,
+) -> Result<PythonValidationResult, String> {
+    tokio::task::spawn_blocking(move || EngineManager::validate_python_executable(&python_path))
+        .await
+        .map_err(|e| format!("Python validation failed: {}", e))
 }
 
 #[tauri::command]
@@ -879,9 +791,6 @@ pub async fn inspect_url(
     }
 
     let settings = state.get_settings();
-    if EngineManager::is_direct_file_url(&validated_url) {
-        return EngineManager::inspect_direct_url_async(&validated_url, &settings).await;
-    }
 
     tokio::task::spawn_blocking(move || {
         EngineManager::inspect_url_with_tracking_opts(
@@ -1024,9 +933,172 @@ pub fn open_file_or_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn win32_wide_null(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn win32_from_wide_buf(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end]).trim().to_string()
+}
+
 #[tauri::command]
-pub fn select_directory() -> Result<Option<String>, String> {
-    Ok(None)
+pub async fn select_directory() -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(|| -> Result<Option<String>, String> {
+        #[cfg(target_os = "windows")]
+        {
+            #[repr(C)]
+            struct BrowseInfoW {
+                hwnd_owner: *mut core::ffi::c_void,
+                pidl_root: *mut core::ffi::c_void,
+                psz_display_name: *mut u16,
+                lpsz_title: *const u16,
+                ul_flags: u32,
+                lpfn: *const core::ffi::c_void,
+                l_param: isize,
+                i_image: i32,
+            }
+            #[link(name = "shell32")]
+            extern "system" {
+                fn SHBrowseForFolderW(lpbi: *mut BrowseInfoW) -> *mut core::ffi::c_void;
+                fn SHGetPathFromIDListW(pidl: *const core::ffi::c_void, pszPath: *mut u16) -> i32;
+            }
+            #[link(name = "ole32")]
+            extern "system" {
+                fn CoInitializeEx(pvReserved: *mut core::ffi::c_void, dwCoInit: u32) -> i32;
+                fn CoTaskMemFree(pv: *mut core::ffi::c_void);
+            }
+
+            unsafe {
+                let _ = CoInitializeEx(std::ptr::null_mut(), 0x2); // COINIT_APARTMENTTHREADED
+                let mut display_buf = vec![0u16; 260];
+                let title_w = win32_wide_null("Select Download Folder");
+                let mut bi = BrowseInfoW {
+                    hwnd_owner: std::ptr::null_mut(),
+                    pidl_root: std::ptr::null_mut(),
+                    psz_display_name: display_buf.as_mut_ptr(),
+                    lpsz_title: title_w.as_ptr(),
+                    ul_flags: 0x0000_0040 | 0x0000_0001, // BIF_NEWDIALOGSTYLE | BIF_RETURNONLYFSDIRS
+                    lpfn: std::ptr::null(),
+                    l_param: 0,
+                    i_image: 0,
+                };
+                let pidl = SHBrowseForFolderW(&mut bi);
+                if pidl.is_null() {
+                    return Ok(None);
+                }
+                let mut path_buf = vec![0u16; 32768];
+                let ok = SHGetPathFromIDListW(pidl, path_buf.as_mut_ptr());
+                CoTaskMemFree(pidl);
+                if ok == 0 {
+                    return Ok(None);
+                }
+                let selected = win32_from_wide_buf(&path_buf);
+                if selected.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(selected));
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| format!("Directory picker failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn browse_python_executable() -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(|| -> Result<Option<String>, String> {
+        #[cfg(target_os = "windows")]
+        {
+            #[repr(C)]
+            struct OpenFileNameW {
+                l_struct_size: u32,
+                hwnd_owner: *mut core::ffi::c_void,
+                h_instance: *mut core::ffi::c_void,
+                lpstr_filter: *const u16,
+                lpstr_custom_filter: *mut u16,
+                n_max_cust_filter: u32,
+                n_filter_index: u32,
+                lpstr_file: *mut u16,
+                n_max_file: u32,
+                lpstr_file_title: *mut u16,
+                n_max_file_title: u32,
+                lpstr_initial_dir: *const u16,
+                lpstr_title: *const u16,
+                flags: u32,
+                n_file_offset: u16,
+                n_file_extension: u16,
+                lpstr_def_ext: *const u16,
+                l_cust_data: isize,
+                lpfn_hook: *const core::ffi::c_void,
+                lp_template_name: *const u16,
+                pv_reserved: *mut core::ffi::c_void,
+                dw_reserved: u32,
+                flags_ex: u32,
+            }
+            #[link(name = "comdlg32")]
+            extern "system" {
+                fn GetOpenFileNameW(lpofn: *mut OpenFileNameW) -> i32;
+            }
+
+            let filter_raw: Vec<u16> = "Python Executable (python.exe)\0python.exe;*.exe\0All Files (*.*)\0*.*\0\0"
+                .encode_utf16()
+                .collect();
+            let title_w = win32_wide_null("Select Python Executable");
+            let mut file_buf = vec![0u16; 32768];
+            let mut ofn = OpenFileNameW {
+                l_struct_size: std::mem::size_of::<OpenFileNameW>() as u32,
+                hwnd_owner: std::ptr::null_mut(),
+                h_instance: std::ptr::null_mut(),
+                lpstr_filter: filter_raw.as_ptr(),
+                lpstr_custom_filter: std::ptr::null_mut(),
+                n_max_cust_filter: 0,
+                n_filter_index: 1,
+                lpstr_file: file_buf.as_mut_ptr(),
+                n_max_file: file_buf.len() as u32,
+                lpstr_file_title: std::ptr::null_mut(),
+                n_max_file_title: 0,
+                lpstr_initial_dir: std::ptr::null(),
+                lpstr_title: title_w.as_ptr(),
+                flags: 0x0008_0000 | 0x0000_1000 | 0x0000_0800 | 0x0000_0008, // OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+                n_file_offset: 0,
+                n_file_extension: 0,
+                lpstr_def_ext: std::ptr::null(),
+                l_cust_data: 0,
+                lpfn_hook: std::ptr::null(),
+                lp_template_name: std::ptr::null(),
+                pv_reserved: std::ptr::null_mut(),
+                dw_reserved: 0,
+                flags_ex: 0,
+            };
+
+            let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+            if ok == 0 {
+                return Ok(None);
+            }
+            let selected = win32_from_wide_buf(&file_buf);
+            if selected.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(selected));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| format!("Python file picker failed: {}", e))?
 }
 
 #[tauri::command]
@@ -1101,353 +1173,15 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 }
 
 async fn run_download_task(app: AppHandle, task_id: String) {
-    let is_direct = {
-        let state = app.state::<AppState>();
-        state
-            .get_task_by_id(&task_id)
-            .map(|t| t.engine == "direct")
-            .unwrap_or(false)
-    };
-
-    if is_direct {
-        run_direct_download_task(&app, &task_id).await;
-    } else {
-        let app_for_blocking = app.clone();
-        let tid_for_blocking = task_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            run_download_task_blocking(&app_for_blocking, &tid_for_blocking);
-        })
-        .await;
-    }
+    let app_for_blocking = app.clone();
+    let tid_for_blocking = task_id.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        run_download_task_blocking(&app_for_blocking, &tid_for_blocking);
+    })
+    .await;
 
     let state = app.state::<AppState>();
     schedule_next(&app, &state);
-}
-
-async fn run_direct_download_task(app: &AppHandle, task_id: &str) {
-    let state = app.state::<AppState>();
-    let mut task = match state.get_task_by_id(task_id) {
-        Some(t) => t,
-        None => return,
-    };
-
-    let settings = state.get_settings();
-    let cancel_flag = state.register_direct_cancel(task_id);
-
-    let out_dir = PathBuf::from(&task.output_path);
-    if let Err(e) = fs::create_dir_all(&out_dir) {
-        task.status = TaskStatus::Failed;
-        task.current_phase = "Failed".to_string();
-        task.error_message = Some(format!("Failed creating output directory: {}", e));
-        state.remove_direct_cancel(task_id);
-        state.upsert_task(&task);
-        let _ = app.emit("task_updated", &task);
-        return;
-    }
-
-    let preferred_name = task
-        .custom_filename
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            if task.title.contains('.') {
-                task.title.clone()
-            } else {
-                format!("{}.{}", task.title, task.ext)
-            }
-        });
-
-    let (dest_path, skipped) =
-        resolve_unique_dest(&out_dir, &preferred_name, &settings.conflict_strategy);
-
-    if skipped {
-        let size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
-        task.status = TaskStatus::Completed;
-        task.progress_percentage = 100.0;
-        task.percentage_known = true;
-        task.downloaded_bytes = size;
-        task.total_bytes = size;
-        task.remaining_bytes = 0;
-        task.output_path = dest_path.to_string_lossy().to_string();
-        task.completed_at = Some(chrono::Utc::now().to_rfc3339());
-        task.eta_str = "Finished".to_string();
-        task.current_phase = "Completed (existing file skipped)".to_string();
-        state.remove_direct_cancel(task_id);
-        state.upsert_task(&task);
-        let _ = app.emit("task_updated", &task);
-        return;
-    }
-
-    let part_path = PathBuf::from(format!("{}.part", dest_path.to_string_lossy()));
-    let existing_offset = fs::metadata(&part_path)
-        .ok()
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    let ua = settings
-        .user_agent
-        .clone()
-        .unwrap_or_else(|| "Mozilla/5.0".to_string());
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .user_agent(ua)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            task.status = TaskStatus::Failed;
-            task.error_message = Some(format!("HTTP client error: {}", e));
-            state.remove_direct_cancel(task_id);
-            state.upsert_task(&task);
-            let _ = app.emit("task_updated", &task);
-            return;
-        }
-    };
-
-    let mut req = client.get(&task.url);
-    if existing_offset > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={}-", existing_offset));
-    }
-
-    let mut res = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            task.status = TaskStatus::Failed;
-            task.current_phase = "Failed".to_string();
-            task.error_message = Some(format!("Network error: {}", e));
-            state.remove_direct_cancel(task_id);
-            state.upsert_task(&task);
-            let _ = app.emit("task_updated", &task);
-            return;
-        }
-    };
-
-    let status_code = res.status().as_u16();
-    if !res.status().is_success() {
-        task.status = TaskStatus::Failed;
-        task.current_phase = "Failed".to_string();
-        task.error_message = Some(format!("HTTP {} returned from remote server.", status_code));
-        state.remove_direct_cancel(task_id);
-        state.upsert_task(&task);
-        let _ = app.emit("task_updated", &task);
-        return;
-    }
-
-    let is_partial = status_code == 206;
-    let mut downloaded = if is_partial { existing_offset } else { 0 };
-    let mut total_bytes: u64 = 0;
-    if is_partial {
-        if let Some(cr) = res
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some((_, tot)) = cr.rsplit_once('/') {
-                total_bytes = tot.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    if total_bytes == 0 {
-        if let Some(cl) = res
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-        {
-            let cl_val: u64 = cl.trim().parse().unwrap_or(0);
-            total_bytes = if is_partial { downloaded + cl_val } else { cl_val };
-        }
-    }
-
-    let mut file = match fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(is_partial)
-        .truncate(!is_partial)
-        .open(&part_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            task.status = TaskStatus::Failed;
-            task.error_message = Some(format!("Failed opening part file: {}", e));
-            state.remove_direct_cancel(task_id);
-            state.upsert_task(&task);
-            let _ = app.emit("task_updated", &task);
-            return;
-        }
-    };
-
-    if !is_partial {
-        let _ = file.seek(SeekFrom::Start(0));
-    }
-
-    let started = Instant::now();
-    let mut last_sample_time = Instant::now();
-    let mut last_sample_bytes = downloaded;
-    let mut ema_speed: f64 = 0.0;
-    let mut last_emit = Instant::now();
-
-    loop {
-        if cancel_flag.load(Ordering::SeqCst) || state.is_shutting_down.load(Ordering::SeqCst) {
-            state.remove_direct_cancel(task_id);
-            return;
-        }
-
-        match res.chunk().await {
-            Ok(Some(chunk)) => {
-                if let Err(e) = file.write_all(&chunk) {
-                    task.status = TaskStatus::Failed;
-                    task.error_message = Some(format!("Disk write error: {}", e));
-                    state.remove_direct_cancel(task_id);
-                    state.upsert_task(&task);
-                    let _ = app.emit("task_updated", &task);
-                    return;
-                }
-                downloaded += chunk.len() as u64;
-
-                if last_emit.elapsed() >= Duration::from_millis(250) {
-                    let dt = last_sample_time.elapsed().as_secs_f64().max(0.05);
-                    let inst = (downloaded.saturating_sub(last_sample_bytes) as f64) / dt;
-                    ema_speed = if ema_speed == 0.0 {
-                        inst
-                    } else {
-                        0.3 * inst + 0.7 * ema_speed
-                    };
-                    last_sample_time = Instant::now();
-                    last_sample_bytes = downloaded;
-                    last_emit = Instant::now();
-
-                    let elapsed = started.elapsed().as_secs();
-                    let remaining = total_bytes.saturating_sub(downloaded);
-                    let pct_known = total_bytes > 0;
-                    let pct = if total_bytes > 0 {
-                        ((downloaded as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
-                    } else {
-                        0.0
-                    };
-                    let eta_sec = if total_bytes > 0 && ema_speed >= 1.0 && remaining > 0 {
-                        Some((remaining as f64 / ema_speed).ceil() as u64)
-                    } else {
-                        None
-                    };
-
-                    task.status = TaskStatus::Downloading;
-                    task.current_phase = "Downloading".to_string();
-                    task.downloaded_bytes = downloaded;
-                    task.total_bytes = total_bytes;
-                    task.remaining_bytes = remaining;
-                    task.percentage_known = pct_known;
-                    task.progress_percentage = pct;
-                    task.speed_bytes_per_sec = ema_speed;
-                    task.avg_speed_bytes_per_sec = if elapsed > 0 {
-                        downloaded as f64 / elapsed as f64
-                    } else {
-                        ema_speed
-                    };
-                    task.speed_str = format!("{}/s", format_bytes_rust(ema_speed));
-                    task.eta_seconds = eta_sec;
-                    task.eta_str = eta_sec
-                        .map(format_duration_rust)
-                        .unwrap_or_else(|| "--".to_string());
-                    task.elapsed_seconds = elapsed;
-                    task.active_connections = 1;
-                    task.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
-                    state.upsert_task(&task);
-                    let _ = app.emit("task_updated", &task);
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                task.status = TaskStatus::Failed;
-                task.error_message = Some(format!("Stream read error: {}", e));
-                state.remove_direct_cancel(task_id);
-                state.upsert_task(&task);
-                let _ = app.emit("task_updated", &task);
-                return;
-            }
-        }
-    }
-
-    let _ = file.flush();
-    drop(file);
-    state.remove_direct_cancel(task_id);
-
-    if cancel_flag.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let part_size = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
-    if part_size == 0 || (total_bytes > 0 && part_size < total_bytes) {
-        task.status = TaskStatus::Failed;
-        task.current_phase = "Failed".to_string();
-        task.error_message = Some("Downloaded file incomplete or empty (0 bytes).".to_string());
-        state.upsert_task(&task);
-        let _ = app.emit("task_updated", &task);
-        return;
-    }
-
-    if settings.conflict_strategy == "overwrite" && dest_path.exists() {
-        let _ = fs::remove_file(&dest_path);
-    }
-    if let Err(e) = fs::rename(&part_path, &dest_path) {
-        task.status = TaskStatus::Failed;
-        task.error_message = Some(format!("Failed finalizing output file: {}", e));
-        state.upsert_task(&task);
-        let _ = app.emit("task_updated", &task);
-        return;
-    }
-
-    task.output_path = dest_path.to_string_lossy().to_string();
-    task.status = TaskStatus::Verifying;
-    task.current_phase = "Verifying SHA-256 integrity...".to_string();
-    state.upsert_task(&task);
-    let _ = app.emit("task_updated", &task);
-
-    if let Ok((verified_task, _sha, matches)) = state.verify_task_checksum(task_id, None) {
-        task = verified_task;
-        if matches == Some(false) {
-            task.status = TaskStatus::Failed;
-            task.current_phase = "Checksum verification failed".to_string();
-            task.error_message = Some("SHA-256 checksum mismatch against expected value.".to_string());
-            state.upsert_task(&task);
-            let _ = app.emit("task_updated", &task);
-            return;
-        }
-    }
-
-    let total_elapsed = started.elapsed().as_secs();
-    task.status = TaskStatus::Completed;
-    task.progress_percentage = 100.0;
-    task.percentage_known = true;
-    task.downloaded_bytes = part_size;
-    task.total_bytes = part_size;
-    task.remaining_bytes = 0;
-    task.elapsed_seconds = total_elapsed;
-    task.speed_bytes_per_sec = 0.0;
-    task.avg_speed_bytes_per_sec = if total_elapsed > 0 {
-        part_size as f64 / total_elapsed as f64
-    } else {
-        part_size as f64
-    };
-    task.speed_str = "0 B/s".to_string();
-    task.eta_seconds = Some(0);
-    task.eta_str = "Finished".to_string();
-    task.active_connections = 0;
-    task.current_phase = "Completed".to_string();
-    task.completed_at = Some(chrono::Utc::now().to_rfc3339());
-    state.upsert_task(&task);
-    let _ = app.emit("task_updated", &task);
-
-    let notif = NotificationItem {
-        id: format!("notif_{}", chrono::Utc::now().timestamp_millis()),
-        r#type: "success".to_string(),
-        title: "Download Complete".to_string(),
-        message: format!("'{}' downloaded successfully.", task.title),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        task_id: Some(task.id.clone()),
-    };
-    state.add_notification(&notif);
-    let _ = app.emit("notification", &notif);
 }
 
 fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> Option<PathBuf> {
@@ -1513,6 +1247,18 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     }
 
     let settings = state.get_settings();
+    if task.engine == "direct" {
+        task.status = TaskStatus::Failed;
+        task.current_phase = "Unsupported engine".to_string();
+        task.error_message = Some(
+            "Generic direct file downloads have been removed. VANTA only downloads video and music URLs via yt-dlp or spotDL."
+                .to_string(),
+        );
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        return;
+    }
+
     let is_spotdl = task.engine == "spotdl" || crate::spotify::is_spotify_url(&task.url);
     let requires_ffmpeg = task.is_audio_only
         || is_spotdl
@@ -1553,12 +1299,223 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 .to_string()
         });
 
-    let (exec_path, args) = if is_spotdl {
-        let spotdl_path = match EngineManager::find_executable("spotdl") {
-            Some(p) => p,
-            None => {
+    if is_spotdl {
+        let (exec_path, leading_args) = match EngineManager::resolve_spotdl_invocation(&settings) {
+            Ok(pair) => pair,
+            Err(e) => {
                 task.status = TaskStatus::Failed;
-                task.error_message = Some("spotDL executable not found.".to_string());
+                task.current_phase = "Failed".to_string();
+                task.error_message = Some(e);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                return;
+            }
+        };
+
+        let ordered_tracks: Vec<String> = task
+            .selected_items
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if !ordered_tracks.is_empty() {
+            let total_tracks = ordered_tracks.len() as u32;
+            let format = task
+                .audio_format
+                .clone()
+                .unwrap_or_else(|| settings.default_audio_format.clone());
+            let bitrate = task
+                .audio_bitrate
+                .clone()
+                .unwrap_or_else(|| settings.default_audio_bitrate.clone());
+
+            let list_folder_name = crate::sanitize_filename(&task.title);
+            let track_dir = if !list_folder_name.is_empty()
+                && matches!(
+                    task.content_type.as_deref(),
+                    Some("album") | Some("playlist")
+                ) {
+                out_dir.join(list_folder_name)
+            } else {
+                out_dir.clone()
+            };
+            let _ = fs::create_dir_all(&track_dir);
+
+            let ffmpeg_bin = EngineManager::find_executable("ffmpeg");
+            let started_unix = chrono::Utc::now().timestamp();
+            let mut completed_count = 0u32;
+            let mut failed_count = 0u32;
+            let mut last_error = String::new();
+            let mut last_output_file: Option<PathBuf> = None;
+
+            for (idx, track_url) in ordered_tracks.iter().enumerate() {
+                if state.is_shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(cur) = state.get_task_by_id(task_id) {
+                    if matches!(cur.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                        return;
+                    }
+                }
+
+                let track_started_unix = chrono::Utc::now().timestamp();
+                let mut cur = state.get_task_by_id(task_id).unwrap_or_else(|| task.clone());
+                cur.status = TaskStatus::Downloading;
+                cur.tracks_requested = Some(total_tracks);
+                cur.tracks_completed = Some(completed_count);
+                cur.tracks_failed = Some(failed_count);
+                cur.percentage_known = true;
+                cur.progress_percentage = ((idx as f64) / (total_tracks as f64)) * 100.0;
+                cur.current_phase = format!("Downloading track {} of {}...", idx + 1, total_tracks);
+                state.upsert_task(&cur);
+                let _ = app.emit("task_updated", &cur);
+
+                let output_template = track_dir.join(format!("{:02} - {{artists}} - {{title}}.{{output-ext}}", idx + 1));
+                let mut args = leading_args.clone();
+                args.extend([
+                    "download".to_string(),
+                    track_url.clone(),
+                    "--output".to_string(),
+                    output_template.to_string_lossy().to_string(),
+                    "--format".to_string(),
+                    format.clone(),
+                    "--bitrate".to_string(),
+                    bitrate.clone(),
+                    "--log-level".to_string(),
+                    "INFO".to_string(),
+                ]);
+                if let Some(ref ff) = ffmpeg_bin {
+                    args.push("--ffmpeg".to_string());
+                    args.push(ff.to_string_lossy().to_string());
+                }
+
+                let mut cmd = Command::new(&exec_path);
+                cmd.args(&args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                EngineManager::apply_engine_env(&mut cmd);
+                process::configure_background_command(&mut cmd);
+
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        {
+                            let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+                            procs.insert(task_id.to_string(), pid);
+                        }
+                        let stream_res = process::stream_child_lines(child, |_line| {
+                            if state.is_shutting_down.load(Ordering::SeqCst) {
+                                process::kill_process_tree(pid);
+                                return false;
+                            }
+                            if let Some(c) = state.get_task_by_id(task_id) {
+                                if matches!(c.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                                    process::kill_process_tree(pid);
+                                    return false;
+                                }
+                            }
+                            true
+                        });
+                        {
+                            let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+                            procs.remove(task_id);
+                        }
+                        if let Some(c) = state.get_task_by_id(task_id) {
+                            if matches!(c.status, TaskStatus::Paused | TaskStatus::Cancelled)
+                                || state.is_shutting_down.load(Ordering::SeqCst)
+                            {
+                                return;
+                            }
+                        }
+                        match stream_res {
+                            Ok((st, _)) if st.success() => {
+                                if let Some(found) = find_recent_output_file(&track_dir, track_started_unix, true) {
+                                    completed_count += 1;
+                                    last_output_file = Some(found);
+                                } else {
+                                    failed_count += 1;
+                                    last_error = format!("Track {} exited without an output file", idx + 1);
+                                }
+                            }
+                            Ok((st, err_txt)) => {
+                                failed_count += 1;
+                                last_error = logging::redact_secrets(&err_txt);
+                                if last_error.is_empty() {
+                                    last_error = format!("Track {} exited with code {:?}", idx + 1, st.code());
+                                }
+                            }
+                            Err(e) => {
+                                failed_count += 1;
+                                last_error = logging::redact_secrets(&e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        last_error = format!("Failed to spawn spotDL for track {}: {}", idx + 1, e);
+                    }
+                }
+            }
+
+            let mut final_t = state.get_task_by_id(task_id).unwrap_or(task);
+            final_t.tracks_requested = Some(total_tracks);
+            final_t.tracks_completed = Some(completed_count);
+            final_t.tracks_failed = Some(failed_count);
+            final_t.active_connections = 0;
+            final_t.speed_bytes_per_sec = 0.0;
+            final_t.speed_str = "0 B/s".to_string();
+
+            if failed_count > 0 || completed_count < total_tracks {
+                final_t.status = TaskStatus::Failed;
+                final_t.current_phase = format!(
+                    "Partial completion ({}/{} tracks completed, {} failed)",
+                    completed_count, total_tracks, failed_count
+                );
+                final_t.percentage_known = true;
+                final_t.progress_percentage = ((completed_count as f64) / (total_tracks as f64)) * 100.0;
+                final_t.error_message = Some(format!(
+                    "{} of {} tracks succeeded; {} failed. {}",
+                    completed_count, total_tracks, failed_count, last_error
+                ));
+                if let Some(ref p) = last_output_file {
+                    final_t.output_path = p.parent().unwrap_or(&track_dir).to_string_lossy().to_string();
+                }
+                state.upsert_task(&final_t);
+                let _ = app.emit("task_updated", &final_t);
+            } else {
+                let final_file = last_output_file
+                    .or_else(|| find_recent_output_file(&track_dir, started_unix, true));
+                if let Some(ref fp) = final_file {
+                    if let Some((audio_sum, acodec, _vcodec, _res)) = EngineManager::verify_media_file(fp) {
+                        final_t.verified_audio_info = audio_sum;
+                        final_t.audio_codec = acodec;
+                    }
+                    final_t.output_path = track_dir.to_string_lossy().to_string();
+                }
+                final_t.status = TaskStatus::Completed;
+                final_t.progress_percentage = 100.0;
+                final_t.percentage_known = true;
+                final_t.eta_seconds = Some(0);
+                final_t.eta_str = "Finished".to_string();
+                final_t.current_phase = format!("Completed ({}/{} tracks)", completed_count, total_tracks);
+                final_t.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                state.upsert_task(&final_t);
+                let _ = app.emit("task_updated", &final_t);
+            }
+            return;
+        }
+    }
+
+    let (exec_path, args) = if is_spotdl {
+        let (spotdl_prog, leading_args) = match EngineManager::resolve_spotdl_invocation(&settings) {
+            Ok(pair) => pair,
+            Err(e) => {
+                task.status = TaskStatus::Failed;
+                task.error_message = Some(e);
                 state.upsert_task(&task);
                 let _ = app.emit("task_updated", &task);
                 return;
@@ -1601,7 +1558,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             out_dir.join("{artists} - {title}.{output-ext}")
         };
 
-        let args = vec![
+        let mut args = leading_args;
+        args.extend([
             "download".to_string(),
             target_url,
             "--output".to_string(),
@@ -1612,8 +1570,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             bitrate,
             "--log-level".to_string(),
             "INFO".to_string(),
-        ];
-        (spotdl_path, args)
+        ]);
+        if let Some(ff) = EngineManager::find_executable("ffmpeg") {
+            args.push("--ffmpeg".to_string());
+            args.push(ff.to_string_lossy().to_string());
+        }
+        (spotdl_prog, args)
     } else {
         let ytdlp_path = match EngineManager::find_executable("yt-dlp") {
             Some(p) => p,
@@ -1651,10 +1613,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "30".to_string(),
         ];
 
-        if task.playlist_mode.as_deref() == Some("single") {
-            args.push("--no-playlist".to_string());
-        } else if task.playlist_mode.as_deref() == Some("playlist") {
+        if task.playlist_mode.as_deref() == Some("playlist") {
             args.push("--yes-playlist".to_string());
+            if let Some(ref items) = task.selected_items {
+                let cleaned: Vec<String> = items
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !cleaned.is_empty() {
+                    args.push("--playlist-items".to_string());
+                    args.push(cleaned.join(","));
+                }
+            }
+        } else {
+            args.push("--no-playlist".to_string());
         }
 
         if settings.conflict_strategy == "overwrite" {

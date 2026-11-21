@@ -8,7 +8,6 @@ import {
   isTerminalTaskStatus,
 } from './download-core';
 import { resolveVideoFormatSelector, buildCuratedVideoOptions } from './media-formats';
-import { DEFAULT_CATEGORIES, matchCategoryForTask } from './categories';
 import { isWithinSchedulerWindow } from './scheduler';
 import { DownloadTask } from '../types';
 
@@ -85,12 +84,7 @@ test('resolveVideoFormatSelector and buildCuratedVideoOptions always pair video-
   assert.ok(curated.some((o) => o.formatSelector === '137+bestaudio/best' && o.needsMux));
 });
 
-test('Categories and Scheduler evaluate rules deterministically', () => {
-  assert.equal(matchCategoryForTask('mp4', false, DEFAULT_CATEGORIES)?.id, 'cat_video');
-  assert.equal(matchCategoryForTask('mp3', true, DEFAULT_CATEGORIES)?.id, 'cat_music');
-  assert.equal(matchCategoryForTask('zip', false, DEFAULT_CATEGORIES)?.id, 'cat_archives');
-
-  // Overnight window 23:00 -> 06:00
+test('Scheduler evaluates overnight and active download windows deterministically', () => {
   const overnight = {
     enabled: true,
     start_time: '23:00',

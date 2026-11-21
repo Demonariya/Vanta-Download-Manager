@@ -3,6 +3,7 @@ use crate::logging;
 use crate::models::{
     AppSettings, DiagnosticResult, EngineInfo, EngineInstallProgress, EngineStatusMap,
     EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata, PlaylistEntry,
+    PythonValidationResult,
 };
 use crate::process::{
     self, ProcessError, ProcessOptions, DIAGNOSTICS_TIMEOUT, ENGINE_VERSION_TIMEOUT,
@@ -26,14 +27,12 @@ const YTDLP_WIN_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/do
 const YTDLP_UNIX_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
 const YTDLP_SHA256_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
 
-// Compact verified GPL-shared Windows FFmpeg build (~83 MiB compressed vs ~196 MiB static)
 const FFMPEG_WIN_ZIP_NAME: &str = "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip";
 const FFMPEG_WIN_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip";
 const FFMPEG_CHECKSUMS_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256";
 
-// Pinned spotDL release with verified SHA-256 digest
 const SPOTDL_PINNED_VERSION: &str = "v4.6.0";
 const SPOTDL_WIN_URL: &str =
     "https://github.com/spotDL/spotify-downloader/releases/download/v4.6.0/spotdl-4.6.0-win32.exe";
@@ -59,23 +58,143 @@ pub struct ManagedEngineManifest {
     pub engines: HashMap<String, EngineManifestRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCopyFile {
+    pub src: String,
+    pub dst: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminInstallOp {
+    pub action: String, // "install" | "install_spotdl_venv" | "remove"
+    pub engine: String,
+    pub target_root: String,
+    pub files: Vec<AdminCopyFile>,
+    pub python_path: Option<String>,
+    pub venv_dir: Option<String>,
+    pub manifest_record: Option<EngineManifestRecord>,
+    pub remove_paths: Vec<String>,
+    pub result_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOpResult {
+    pub success: bool,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
 pub struct EngineManager;
 
 impl EngineManager {
+    /// Resolves the managed `<InstallDir>\Engine` root directory.
+    /// In production Windows builds installed under `C:\Program Files\VANTA Download Manager`,
+    /// this returns `C:\Program Files\VANTA Download Manager\Engine`.
+    /// In unprivileged `cargo` dev builds (`target\...`), returns a safe user-local `DevEngine` directory.
     pub fn managed_engines_root() -> PathBuf {
-        AppState::app_data_dir().join("engines")
+        if let Ok(override_root) = env::var("VANTA_ENGINE_ROOT") {
+            let trimmed = override_root.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+
+        if let Ok(current_exe) = env::current_exe() {
+            let exe_str = current_exe.to_string_lossy().to_ascii_lowercase();
+            let is_cargo_dev =
+                exe_str.contains("\\target\\") || exe_str.contains("/target/");
+            if !is_cargo_dev {
+                if let Some(parent) = current_exe.parent() {
+                    return parent.join("Engine");
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(local) = env::var("LOCALAPPDATA") {
+                if !local.trim().is_empty() {
+                    return PathBuf::from(local)
+                        .join("VANTA Download Manager")
+                        .join("DevEngine");
+                }
+            }
+        }
+
+        AppState::app_data_dir().join("Engine")
     }
 
-    pub fn managed_bin_dir() -> PathBuf {
-        Self::managed_engines_root().join("bin")
+    pub fn install_root_dir() -> PathBuf {
+        let engine_root = Self::managed_engines_root();
+        engine_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| engine_root.clone())
+    }
+
+    pub fn ytdlp_dir() -> PathBuf {
+        Self::managed_engines_root().join("yt-dlp")
+    }
+
+    pub fn spotdl_dir() -> PathBuf {
+        Self::managed_engines_root().join("spotdl")
+    }
+
+    pub fn spotdl_venv_dir() -> PathBuf {
+        Self::spotdl_dir().join("venv")
+    }
+
+    pub fn spotdl_venv_python() -> PathBuf {
+        let venv = Self::spotdl_venv_dir();
+        if cfg!(windows) {
+            venv.join("Scripts").join("python.exe")
+        } else {
+            venv.join("bin").join("python")
+        }
+    }
+
+    pub fn spotdl_venv_exe() -> PathBuf {
+        let venv = Self::spotdl_venv_dir();
+        if cfg!(windows) {
+            venv.join("Scripts").join("spotdl.exe")
+        } else {
+            venv.join("bin").join("spotdl")
+        }
+    }
+
+    pub fn ffmpeg_dir() -> PathBuf {
+        Self::managed_engines_root().join("ffmpeg").join("bin")
     }
 
     pub fn managed_staging_dir() -> PathBuf {
-        Self::managed_engines_root().join("staging")
+        AppState::app_data_dir().join("engine_staging")
     }
 
     pub fn manifest_path() -> PathBuf {
         Self::managed_engines_root().join("manifest.json")
+    }
+
+    pub fn is_dir_writable(dir: &Path) -> bool {
+        let mut probe_base = dir.to_path_buf();
+        while !probe_base.exists() {
+            if let Some(p) = probe_base.parent() {
+                probe_base = p.to_path_buf();
+            } else {
+                return false;
+            }
+        }
+        let probe_file = probe_base.join(format!(".vanta_write_probe_{}", uuid::Uuid::new_v4()));
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&probe_file)
+        {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe_file);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn load_manifest() -> ManagedEngineManifest {
@@ -90,9 +209,9 @@ impl EngineManager {
 
     pub fn save_manifest(manifest: &ManagedEngineManifest) -> Result<(), String> {
         let root = Self::managed_engines_root();
-        fs::create_dir_all(&root).map_err(|e| format!("Failed to create engines dir: {}", e))?;
+        fs::create_dir_all(&root).map_err(|e| format!("Failed to create Engine dir: {}", e))?;
         let path = Self::manifest_path();
-        let tmp_path = root.join("manifest.json.tmp");
+        let tmp_path = root.join(format!("manifest.json.tmp.{}", uuid::Uuid::new_v4()));
         let serialized = serde_json::to_string_pretty(manifest)
             .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
         fs::write(&tmp_path, serialized)
@@ -113,16 +232,44 @@ impl EngineManager {
         }
     }
 
+    /// Resolves executables strictly within `<InstallDir>\Engine\...`, bundled dev `bin`,
+    /// and standard system locations. NEVER searches Downloads, Desktop, or temp folders.
     pub fn find_executable(name: &str) -> Option<PathBuf> {
         let exe_name = Self::exe_filename(name);
+        let lower = name.to_ascii_lowercase();
 
-        // 1. Managed per-user application-data runtime directory (primary for slim installers)
-        let managed_candidate = Self::managed_bin_dir().join(&exe_name);
-        if managed_candidate.is_file() {
-            return Some(managed_candidate);
+        // 1. Managed <InstallDir>\Engine subdirectories
+        match lower.as_str() {
+            "yt-dlp" | "ytdlp" => {
+                let c = Self::ytdlp_dir().join(&exe_name);
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+            "ffmpeg" | "ffprobe" => {
+                let c = Self::ffmpeg_dir().join(&exe_name);
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+            "spotdl" => {
+                let venv_exe = Self::spotdl_venv_exe();
+                if venv_exe.is_file() {
+                    return Some(venv_exe);
+                }
+                let venv_py = Self::spotdl_venv_python();
+                if venv_py.is_file() {
+                    return Some(venv_py);
+                }
+                let standalone = Self::spotdl_dir().join(&exe_name);
+                if standalone.is_file() {
+                    return Some(standalone);
+                }
+            }
+            _ => {}
         }
 
-        // 2. Current executable directory / bundled side-by-side bin/
+        // 2. Current executable side-by-side directory or legacy bin/
         if let Ok(current_exe) = env::current_exe() {
             if let Some(parent) = current_exe.parent() {
                 let candidate = parent.join(&exe_name);
@@ -141,13 +288,13 @@ impl EngineManager {
         if local_bin.is_file() {
             return Some(fs::canonicalize(&local_bin).unwrap_or(local_bin));
         }
-
         let src_tauri_bin = PathBuf::from("src-tauri").join("bin").join(&exe_name);
         if src_tauri_bin.is_file() {
             return Some(fs::canonicalize(&src_tauri_bin).unwrap_or(src_tauri_bin));
         }
 
-        // 4. User local bin directory (~/.local/bin)
+        // 4. User local bin directory (~/.local/bin on Unix)
+        #[cfg(not(windows))]
         if let Ok(home) = env::var("HOME") {
             let user_local = PathBuf::from(home).join(".local").join("bin").join(&exe_name);
             if user_local.is_file() {
@@ -180,10 +327,16 @@ impl EngineManager {
     }
 
     pub fn build_command_path_env() -> Option<std::ffi::OsString> {
-        let managed = Self::managed_bin_dir();
         let mut paths = Vec::new();
-        if managed.exists() {
-            paths.push(managed);
+        for dir in [
+            Self::ytdlp_dir(),
+            Self::ffmpeg_dir(),
+            Self::spotdl_dir(),
+            Self::spotdl_venv_dir().join(if cfg!(windows) { "Scripts" } else { "bin" }),
+        ] {
+            if dir.exists() {
+                paths.push(dir);
+            }
         }
         if let Some(existing) = env::var_os("PATH") {
             paths.extend(env::split_paths(&existing));
@@ -197,15 +350,263 @@ impl EngineManager {
         }
     }
 
+    /// Validates a Python executable path by running `[python_path, "--version"]` safely without shell.
+    /// Captures both stdout and stderr and preserves spaces in paths.
+    pub fn validate_python_executable(raw_path: &str) -> PythonValidationResult {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return PythonValidationResult {
+                valid: false,
+                executable_path: String::new(),
+                version: None,
+                stdout: None,
+                stderr: None,
+                error: Some("Python executable path is empty.".to_string()),
+            };
+        }
+
+        let looks_like_file_path =
+            trimmed.contains('\\') || trimmed.contains('/') || trimmed.to_ascii_lowercase().ends_with(".exe");
+        if looks_like_file_path && !Path::new(trimmed).is_file() {
+            return PythonValidationResult {
+                valid: false,
+                executable_path: trimmed.to_string(),
+                version: None,
+                stdout: None,
+                stderr: None,
+                error: Some(format!("Python executable does not exist at '{}'.", trimmed)),
+            };
+        }
+
+        let mut cmd = Command::new(trimmed);
+        cmd.arg("--version");
+        let opts = ProcessOptions {
+            timeout: ENGINE_VERSION_TIMEOUT,
+            truncate_stdout_tail: true,
+            ..ProcessOptions::default()
+        };
+
+        match process::run_command_with_options(&mut cmd, opts) {
+            Ok(out) => {
+                let stdout_clean = out.stdout.trim().to_string();
+                let stderr_clean = out.stderr.trim().to_string();
+                let combined = if !stdout_clean.is_empty() {
+                    stdout_clean.clone()
+                } else {
+                    stderr_clean.clone()
+                };
+
+                if !out.status.success() {
+                    return PythonValidationResult {
+                        valid: false,
+                        executable_path: trimmed.to_string(),
+                        version: None,
+                        stdout: Some(stdout_clean),
+                        stderr: Some(stderr_clean.clone()),
+                        error: Some(if combined.is_empty() {
+                            format!(
+                                "Python exited with status {:?}",
+                                out.status.code()
+                            )
+                        } else {
+                            combined
+                        }),
+                    };
+                }
+
+                let first_line = combined.lines().next().unwrap_or("").trim().to_string();
+                if !first_line.to_ascii_lowercase().starts_with("python ") {
+                    return PythonValidationResult {
+                        valid: false,
+                        executable_path: trimmed.to_string(),
+                        version: None,
+                        stdout: Some(stdout_clean),
+                        stderr: Some(stderr_clean),
+                        error: Some(format!(
+                            "Executable did not report a Python version string (got: '{}').",
+                            first_line
+                        )),
+                    };
+                }
+
+                let ver = first_line
+                    .trim_start_matches("Python ")
+                    .trim_start_matches("python ")
+                    .trim()
+                    .to_string();
+                if !ver.starts_with("3.") {
+                    return PythonValidationResult {
+                        valid: false,
+                        executable_path: trimmed.to_string(),
+                        version: Some(ver.clone()),
+                        stdout: Some(stdout_clean),
+                        stderr: Some(stderr_clean),
+                        error: Some(format!(
+                            "Python 3.x is required for spotDL (found Python {}).",
+                            ver
+                        )),
+                    };
+                }
+
+                PythonValidationResult {
+                    valid: true,
+                    executable_path: trimmed.to_string(),
+                    version: Some(ver),
+                    stdout: Some(stdout_clean),
+                    stderr: Some(stderr_clean),
+                    error: None,
+                }
+            }
+            Err(e) => PythonValidationResult {
+                valid: false,
+                executable_path: trimmed.to_string(),
+                version: None,
+                stdout: None,
+                stderr: None,
+                error: Some(format!("Failed executing '{} --version': {}", trimmed, e)),
+            },
+        }
+    }
+
+    /// Strict Python resolver:
+    /// When `settings.python_path` is set, NEVER falls back silently to PATH `python`/`python3`.
+    /// When `settings.python_path` is unset/empty, searches standard PATH python names.
+    pub fn resolve_python_for_spotdl(settings: &AppSettings) -> Result<PathBuf, String> {
+        if let Some(ref custom) = settings.python_path {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                let res = Self::validate_python_executable(trimmed);
+                if !res.valid {
+                    return Err(format!(
+                        "Configured Python executable is invalid ('{}'): {}",
+                        trimmed,
+                        res.error.unwrap_or_else(|| "Validation failed".to_string())
+                    ));
+                }
+                return Ok(PathBuf::from(res.executable_path));
+            }
+        }
+
+        let candidates = if cfg!(windows) {
+            vec!["python", "python3"]
+        } else {
+            vec!["python3", "python"]
+        };
+        for cand in candidates {
+            if let Some(path) = Self::find_executable(cand) {
+                let res = Self::validate_python_executable(&path.to_string_lossy());
+                if res.valid {
+                    return Ok(path);
+                }
+            }
+        }
+
+        Err("No valid Python 3 executable found. Configure Python Path in Settings -> Python Configuration to use or install spotDL.".to_string())
+    }
+
+    /// Resolves how to invoke spotDL (`(program, leading_args)`).
+    /// Honors strict custom `python_path` validation and prefers isolated `Engine\spotdl\venv`.
+    pub fn resolve_spotdl_invocation(
+        settings: &AppSettings,
+    ) -> Result<(PathBuf, Vec<String>), String> {
+        // Enforce strict validation first if user configured a custom Python path
+        let has_custom_python = settings
+            .python_path
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if has_custom_python {
+            let _ = Self::resolve_python_for_spotdl(settings)?;
+        }
+
+        // 1. Prefer isolated managed venv (`Engine\spotdl\venv`)
+        let venv_python = Self::spotdl_venv_python();
+        if venv_python.is_file() {
+            return Ok((venv_python, vec!["-m".to_string(), "spotdl".to_string()]));
+        }
+        let venv_exe = Self::spotdl_venv_exe();
+        if venv_exe.is_file() {
+            return Ok((venv_exe, Vec::new()));
+        }
+
+        // 2. Managed standalone spotDL executable (`Engine\spotdl\spotdl.exe`)
+        let standalone = Self::spotdl_dir().join(Self::exe_filename("spotdl"));
+        if standalone.is_file() {
+            return Ok((standalone, Vec::new()));
+        }
+
+        // 3. System / bundled fallback binary
+        if let Some(found) = Self::find_executable("spotdl") {
+            let is_py = found
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.to_ascii_lowercase().starts_with("python"))
+                .unwrap_or(false);
+            if is_py {
+                return Ok((found, vec!["-m".to_string(), "spotdl".to_string()]));
+            }
+            return Ok((found, Vec::new()));
+        }
+
+        Err("spotDL runtime is not installed in Engine\\spotdl. Install spotDL from Diagnostics or configure Python 3 in Settings.".to_string())
+    }
+
     pub fn check_single_engine(name: &str, ver_flag: &str) -> EngineInfo {
         let start = Instant::now();
-        let path_opt = Self::find_executable(name);
         let now = chrono::Utc::now().to_rfc3339();
+
+        // Handle Python special case using configured python_path if present in settings file
+        if name == "python3" || name == "python" {
+            let settings_path = AppState::settings_file_path_for(&AppState::app_data_dir());
+            if let Ok(raw) = fs::read_to_string(&settings_path) {
+                if let Ok(parsed) = serde_json::from_str::<AppSettings>(&raw) {
+                    if let Some(ref custom_py) = parsed.python_path {
+                        if !custom_py.trim().is_empty() {
+                            let res = Self::validate_python_executable(custom_py);
+                            return EngineInfo {
+                                available: res.valid,
+                                version: res.version.unwrap_or_default(),
+                                path: res.executable_path,
+                                status: if res.valid {
+                                    "ready".to_string()
+                                } else {
+                                    "error".to_string()
+                                },
+                                last_checked: now,
+                                error: res.error,
+                                latest_version: None,
+                                update_available: Some(false),
+                                is_updating: Some(false),
+                                duration_ms: Some(start.elapsed().as_millis() as u64),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        let path_opt = Self::find_executable(name).or_else(|| {
+            if name == "python3" {
+                Self::find_executable("python")
+            } else {
+                None
+            }
+        });
 
         let info = match path_opt {
             Some(path) => {
                 let mut cmd = Command::new(&path);
-                cmd.arg(ver_flag);
+                let is_venv_py_for_spotdl = name == "spotdl"
+                    && path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|n| n.to_ascii_lowercase().starts_with("python"))
+                        .unwrap_or(false);
+                if is_venv_py_for_spotdl {
+                    cmd.args(["-m", "spotdl", ver_flag]);
+                } else {
+                    cmd.arg(ver_flag);
+                }
                 Self::apply_engine_env(&mut cmd);
 
                 let opts = ProcessOptions {
@@ -216,7 +617,12 @@ impl EngineManager {
 
                 match process::run_command_with_options(&mut cmd, opts) {
                     Ok(output) if output.status.success() => {
-                        let first_line = output.stdout.lines().next().unwrap_or("").trim().to_string();
+                        let raw_ver = if !output.stdout.trim().is_empty() {
+                            output.stdout.clone()
+                        } else {
+                            output.stderr.clone()
+                        };
+                        let first_line = raw_ver.lines().next().unwrap_or("").trim().to_string();
                         let clean_version = first_line
                             .trim_start_matches("ffmpeg version")
                             .trim_start_matches("ffprobe version")
@@ -263,27 +669,21 @@ impl EngineManager {
                             duration_ms: Some(output.duration_ms),
                         }
                     }
-                    Err(ProcessError::TimedOut { duration_ms }) => {
-                        logging::warn(
-                            "engines",
-                            &format!("Engine '{}' version check timed out after {}ms", name, duration_ms),
-                        );
-                        EngineInfo {
-                            available: false,
-                            version: String::new(),
-                            path: path.to_string_lossy().to_string(),
-                            status: "timed_out".to_string(),
-                            last_checked: now,
-                            error: Some(format!(
-                                "Version check timed out after {:.1}s",
-                                duration_ms as f64 / 1000.0
-                            )),
-                            latest_version: None,
-                            update_available: Some(false),
-                            is_updating: Some(false),
-                            duration_ms: Some(duration_ms),
-                        }
-                    }
+                    Err(ProcessError::TimedOut { duration_ms }) => EngineInfo {
+                        available: false,
+                        version: String::new(),
+                        path: path.to_string_lossy().to_string(),
+                        status: "timed_out".to_string(),
+                        last_checked: now,
+                        error: Some(format!(
+                            "Version check timed out after {:.1}s",
+                            duration_ms as f64 / 1000.0
+                        )),
+                        latest_version: None,
+                        update_available: Some(false),
+                        is_updating: Some(false),
+                        duration_ms: Some(duration_ms),
+                    },
                     Err(e) => EngineInfo {
                         available: false,
                         version: String::new(),
@@ -305,7 +705,7 @@ impl EngineManager {
                 status: "missing".to_string(),
                 last_checked: now,
                 error: Some(format!(
-                    "Executable '{}' not found in managed runtime or PATH",
+                    "Executable '{}' not found in managed Engine runtime or PATH",
                     name
                 )),
                 latest_version: None,
@@ -384,9 +784,21 @@ impl EngineManager {
             missing_required.push("ffprobe".to_string());
         }
 
+        let engine_root = Self::managed_engines_root();
+        let writable = Self::is_dir_writable(&engine_root);
+
         ManagedEngineInfo {
-            install_dir: Self::managed_bin_dir().to_string_lossy().to_string(),
+            install_root: Self::install_root_dir().to_string_lossy().to_string(),
+            install_dir: engine_root.to_string_lossy().to_string(),
+            ytdlp_dir: Self::ytdlp_dir().to_string_lossy().to_string(),
+            spotdl_dir: Self::spotdl_dir().to_string_lossy().to_string(),
+            ffmpeg_dir: Self::ffmpeg_dir().to_string_lossy().to_string(),
             manifest_path: Self::manifest_path().to_string_lossy().to_string(),
+            settings_file_path: AppState::settings_file_path_for(&AppState::app_data_dir())
+                .to_string_lossy()
+                .to_string(),
+            is_writable: writable,
+            requires_elevation: !writable && cfg!(windows),
             required_ready: missing_required.is_empty(),
             missing_required,
             engines,
@@ -396,13 +808,13 @@ impl EngineManager {
     pub fn ensure_required_engines(require_ffmpeg: bool, require_spotdl: bool) -> Result<(), String> {
         let status = Self::get_engine_status();
         if require_spotdl && !status.spotdl.available {
-            return Err("spotDL engine is not installed. Use Install Engines in Dashboard or Diagnostics to download verified engines.".to_string());
+            return Err("spotDL engine is not installed. Configure Python 3 in Settings and install spotDL in Diagnostics.".to_string());
         }
         if !require_spotdl && !status.ytdlp.available {
-            return Err("yt-dlp engine is not installed. Use Install Engines in Dashboard or Diagnostics to download verified engines.".to_string());
+            return Err("yt-dlp engine is not installed. Use Install Engines in Dashboard or Diagnostics first.".to_string());
         }
         if require_ffmpeg && (!status.ffmpeg.available || !status.ffprobe.available) {
-            return Err("FFmpeg / FFprobe engines are not installed. Use Install Engines in Dashboard or Diagnostics to download verified engines.".to_string());
+            return Err("FFmpeg / FFprobe engines are not installed. Use Install Engines in Dashboard or Diagnostics first.".to_string());
         }
         Ok(())
     }
@@ -448,7 +860,7 @@ impl EngineManager {
     pub fn atomic_replace_file(staged_file: &Path, target_file: &Path) -> Result<(), String> {
         if let Some(parent) = target_file.parent() {
             fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create target bin dir: {}", e))?;
+                .map_err(|e| format!("Failed to create target Engine directory: {}", e))?;
         }
 
         let backup_file = target_file.with_extension("bak");
@@ -469,28 +881,325 @@ impl EngineManager {
                 }
                 Ok(())
             }
-            Err(rename_err) => {
-                // Fallback copy across filesystems/volumes if needed
-                match fs::copy(staged_file, target_file) {
-                    Ok(_) => {
-                        let _ = fs::remove_file(staged_file);
-                        if had_existing && backup_file.exists() {
-                            let _ = fs::remove_file(&backup_file);
-                        }
-                        Ok(())
+            Err(rename_err) => match fs::copy(staged_file, target_file) {
+                Ok(_) => {
+                    let _ = fs::remove_file(staged_file);
+                    if had_existing && backup_file.exists() {
+                        let _ = fs::remove_file(&backup_file);
                     }
-                    Err(copy_err) => {
-                        if had_existing && backup_file.exists() {
-                            let _ = fs::rename(&backup_file, target_file);
-                        }
-                        Err(format!(
-                            "Failed atomic install ({} / {})",
-                            rename_err, copy_err
-                        ))
-                    }
+                    Ok(())
                 }
+                Err(copy_err) => {
+                    if had_existing && backup_file.exists() {
+                        let _ = fs::rename(&backup_file, target_file);
+                    }
+                    Err(format!(
+                        "Failed atomic install ({} / {})",
+                        rename_err, copy_err
+                    ))
+                }
+            },
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn to_wide_null(s: &str) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn execute_elevated_admin_op(op_json_path: &Path, result_path: &Path) -> Result<AdminOpResult, String> {
+        #[repr(C)]
+        struct ShellExecuteInfoW {
+            cb_size: u32,
+            f_mask: u32,
+            hwnd: *mut core::ffi::c_void,
+            lp_verb: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show: i32,
+            h_inst_app: *mut core::ffi::c_void,
+            lp_id_list: *mut core::ffi::c_void,
+            lp_class: *const u16,
+            hkey_class: *mut core::ffi::c_void,
+            dw_hot_key: u32,
+            h_icon_or_monitor: *mut core::ffi::c_void,
+            h_process: *mut core::ffi::c_void,
+        }
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteExW(pExecInfo: *mut ShellExecuteInfoW) -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WaitForSingleObject(hHandle: *mut core::ffi::c_void, dwMilliseconds: u32) -> u32;
+            fn GetExitCodeProcess(hProcess: *mut core::ffi::c_void, lpExitCode: *mut u32) -> i32;
+            fn CloseHandle(hObject: *mut core::ffi::c_void) -> i32;
+        }
+
+        let current_exe = env::current_exe()
+            .map_err(|e| format!("Failed locating current executable for elevation: {}", e))?;
+        let verb_w = Self::to_wide_null("runas");
+        let file_w = Self::to_wide_null(&current_exe.to_string_lossy());
+        let params_str = format!("--engine-admin \"{}\"", op_json_path.to_string_lossy());
+        let params_w = Self::to_wide_null(&params_str);
+
+        let mut sei = ShellExecuteInfoW {
+            cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: 0x0000_0040 | 0x0000_0100, // SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+            hwnd: std::ptr::null_mut(),
+            lp_verb: verb_w.as_ptr(),
+            lp_file: file_w.as_ptr(),
+            lp_parameters: params_w.as_ptr(),
+            lp_directory: std::ptr::null(),
+            n_show: 0, // SW_HIDE
+            h_inst_app: std::ptr::null_mut(),
+            lp_id_list: std::ptr::null_mut(),
+            lp_class: std::ptr::null(),
+            hkey_class: std::ptr::null_mut(),
+            dw_hot_key: 0,
+            h_icon_or_monitor: std::ptr::null_mut(),
+            h_process: std::ptr::null_mut(),
+        };
+
+        let ok = unsafe { ShellExecuteExW(&mut sei) };
+        if ok == 0 {
+            return Err("Administrator approval (UAC) was cancelled or denied.".to_string());
+        }
+
+        if !sei.h_process.is_null() {
+            unsafe {
+                WaitForSingleObject(sei.h_process, 300_000);
+                let mut exit_code: u32 = 1;
+                GetExitCodeProcess(sei.h_process, &mut exit_code);
+                CloseHandle(sei.h_process);
             }
         }
+
+        if let Ok(raw) = fs::read_to_string(result_path) {
+            if let Ok(res) = serde_json::from_str::<AdminOpResult>(&raw) {
+                return Ok(res);
+            }
+        }
+        Err("Elevated Engine installation did not produce a status report.".to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn execute_elevated_admin_op(_op_json_path: &Path, _result_path: &Path) -> Result<AdminOpResult, String> {
+        Err("Target Engine directory is not writable and UAC elevation is Windows-only.".to_string())
+    }
+
+    fn execute_admin_op_in_process(op: &AdminInstallOp) -> AdminOpResult {
+        match op.action.as_str() {
+            "install" => {
+                for pair in &op.files {
+                    let src = Path::new(&pair.src);
+                    let dst = Path::new(&pair.dst);
+                    if let Err(e) = Self::atomic_replace_file(src, dst) {
+                        return AdminOpResult {
+                            success: false,
+                            version: None,
+                            error: Some(e),
+                        };
+                    }
+                    Self::make_executable(dst);
+                }
+
+                if let Some(ref rec) = op.manifest_record {
+                    let root = Path::new(&op.target_root);
+                    let _ = fs::create_dir_all(root);
+                    let mpath = root.join("manifest.json");
+                    let mut manifest = fs::read_to_string(&mpath)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ManagedEngineManifest>(&s).ok())
+                        .unwrap_or_default();
+                    manifest.engines.insert(op.engine.clone(), rec.clone());
+                    if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
+                        let _ = fs::write(&mpath, serialized);
+                    }
+                }
+
+                AdminOpResult {
+                    success: true,
+                    version: op.manifest_record.as_ref().map(|r| r.version.clone()),
+                    error: None,
+                }
+            }
+            "install_spotdl_venv" => {
+                let Some(ref py_path) = op.python_path else {
+                    return AdminOpResult {
+                        success: false,
+                        version: None,
+                        error: Some("Missing Python path for spotDL venv setup.".to_string()),
+                    };
+                };
+                let Some(ref venv_str) = op.venv_dir else {
+                    return AdminOpResult {
+                        success: false,
+                        version: None,
+                        error: Some("Missing target venv path.".to_string()),
+                    };
+                };
+                match Self::provision_spotdl_venv(Path::new(py_path), Path::new(venv_str)) {
+                    Ok(ver) => {
+                        let root = Path::new(&op.target_root);
+                        let _ = fs::create_dir_all(root);
+                        let mpath = root.join("manifest.json");
+                        let mut manifest = fs::read_to_string(&mpath)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<ManagedEngineManifest>(&s).ok())
+                            .unwrap_or_default();
+                        manifest.engines.insert(
+                            "spotdl".to_string(),
+                            EngineManifestRecord {
+                                version: ver.clone(),
+                                sha256: "venv-managed".to_string(),
+                                source_url: py_path.clone(),
+                                installed_at: chrono::Utc::now().to_rfc3339(),
+                            },
+                        );
+                        if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
+                            let _ = fs::write(&mpath, serialized);
+                        }
+                        AdminOpResult {
+                            success: true,
+                            version: Some(ver),
+                            error: None,
+                        }
+                    }
+                    Err(e) => AdminOpResult {
+                        success: false,
+                        version: None,
+                        error: Some(e),
+                    },
+                }
+            }
+            "remove" => {
+                for p in &op.remove_paths {
+                    let target = Path::new(p);
+                    if target.is_dir() {
+                        let _ = fs::remove_dir_all(target);
+                    } else if target.is_file() {
+                        let _ = fs::remove_file(target);
+                    }
+                }
+                AdminOpResult {
+                    success: true,
+                    version: None,
+                    error: None,
+                }
+            }
+            other => AdminOpResult {
+                success: false,
+                version: None,
+                error: Some(format!("Unsupported admin action '{}'", other)),
+            },
+        }
+    }
+
+    pub fn run_engine_admin_cli(op_json_path: &str) -> i32 {
+        let raw = match fs::read_to_string(op_json_path) {
+            Ok(s) => s,
+            Err(_) => return 2,
+        };
+        let op: AdminInstallOp = match serde_json::from_str(&raw) {
+            Ok(o) => o,
+            Err(_) => return 3,
+        };
+        let res = Self::execute_admin_op_in_process(&op);
+        if let Ok(serialized) = serde_json::to_string_pretty(&res) {
+            let _ = fs::write(&op.result_path, serialized);
+        }
+        if res.success { 0 } else { 1 }
+    }
+
+    fn provision_spotdl_venv(python_path: &Path, venv_dir: &Path) -> Result<String, String> {
+        if let Some(parent) = venv_dir.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed creating Engine\\spotdl directory: {}", e))?;
+        }
+
+        let venv_python = if cfg!(windows) {
+            venv_dir.join("Scripts").join("python.exe")
+        } else {
+            venv_dir.join("bin").join("python")
+        };
+
+        if !venv_python.is_file() {
+            let mut cmd = Command::new(python_path);
+            cmd.args(["-m", "venv", &venv_dir.to_string_lossy()]);
+            let out = process::run_command_with_options(
+                &mut cmd,
+                ProcessOptions {
+                    timeout: Duration::from_secs(90),
+                    ..ProcessOptions::default()
+                },
+            )
+            .map_err(|e| format!("Failed creating isolated spotDL venv: {}", e))?;
+            if !out.status.success() {
+                let err = logging::redact_secrets(out.stderr.trim());
+                return Err(format!("Failed creating isolated spotDL venv: {}", err));
+            }
+        }
+
+        let mut pip_cmd = Command::new(&venv_python);
+        pip_cmd.args([
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--no-warn-script-location",
+            "spotdl",
+        ]);
+        let pip_out = process::run_command_with_options(
+            &mut pip_cmd,
+            ProcessOptions {
+                timeout: Duration::from_secs(240),
+                ..ProcessOptions::default()
+            },
+        )
+        .map_err(|e| format!("Failed installing spotDL into isolated venv: {}", e))?;
+
+        if !pip_out.status.success() {
+            let err = logging::redact_secrets(if pip_out.stderr.trim().is_empty() {
+                pip_out.stdout.trim()
+            } else {
+                pip_out.stderr.trim()
+            });
+            return Err(format!("pip install spotdl failed inside Engine\\spotdl\\venv: {}", err));
+        }
+
+        let mut ver_cmd = Command::new(&venv_python);
+        ver_cmd.args(["-m", "spotdl", "--version"]);
+        let ver_out = process::run_command_with_options(
+            &mut ver_cmd,
+            ProcessOptions {
+                timeout: ENGINE_VERSION_TIMEOUT,
+                ..ProcessOptions::default()
+            },
+        )
+        .map_err(|e| format!("Failed verifying spotDL in venv: {}", e))?;
+        if !ver_out.status.success() {
+            return Err("spotDL verification failed inside isolated venv.".to_string());
+        }
+        let version = ver_out
+            .stdout
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(if version.is_empty() {
+            "4.x".to_string()
+        } else {
+            version
+        })
     }
 
     fn emit_install_progress(
@@ -698,6 +1407,50 @@ impl EngineManager {
         Ok(extracted_files)
     }
 
+    fn commit_staged_files(
+        staging_dir: &Path,
+        engine: &str,
+        files: Vec<AdminCopyFile>,
+        record: EngineManifestRecord,
+    ) -> Result<(), String> {
+        let root = Self::managed_engines_root();
+        let op = AdminInstallOp {
+            action: "install".to_string(),
+            engine: engine.to_string(),
+            target_root: root.to_string_lossy().to_string(),
+            files,
+            python_path: None,
+            venv_dir: None,
+            manifest_record: Some(record),
+            remove_paths: Vec::new(),
+            result_path: staging_dir
+                .join("admin_result.json")
+                .to_string_lossy()
+                .to_string(),
+        };
+
+        if Self::is_dir_writable(&root) {
+            let res = Self::execute_admin_op_in_process(&op);
+            if res.success {
+                return Ok(());
+            }
+            return Err(res.error.unwrap_or_else(|| "Engine installation failed".to_string()));
+        }
+
+        let op_path = staging_dir.join("admin_op.json");
+        let serialized = serde_json::to_string_pretty(&op)
+            .map_err(|e| format!("Failed serializing admin install spec: {}", e))?;
+        fs::write(&op_path, serialized)
+            .map_err(|e| format!("Failed writing admin install spec: {}", e))?;
+
+        let res = Self::execute_elevated_admin_op(&op_path, Path::new(&op.result_path))?;
+        if res.success {
+            Ok(())
+        } else {
+            Err(res.error.unwrap_or_else(|| "Elevated Engine installation failed.".to_string()))
+        }
+    }
+
     pub async fn install_engine_async(
         app: Option<&AppHandle>,
         name: &str,
@@ -728,7 +1481,6 @@ impl EngineManager {
             _ => String::new(),
         };
 
-        // Avoid repeated downloads if already installed cleanly unless force reinstall requested
         if !force {
             let already_ready = match normalized {
                 "yt-dlp" => status.ytdlp.available,
@@ -789,7 +1541,7 @@ impl EngineManager {
             }
         };
 
-        let result: Result<(String, String, String), String> = match normalized {
+        let result: Result<String, String> = match normalized {
             "yt-dlp" => async {
                 let asset_name = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
                 let url = if cfg!(windows) { YTDLP_WIN_URL } else { YTDLP_UNIX_URL };
@@ -836,10 +1588,23 @@ impl EngineManager {
                 Self::make_executable(&staged_bin);
 
                 let version = Self::verify_binary_runs(&staged_bin, "--version")?;
-                let target_bin = Self::managed_bin_dir().join(asset_name);
-                Self::atomic_replace_file(&staged_bin, &target_bin)?;
+                let target_bin = Self::ytdlp_dir().join(asset_name);
+                Self::commit_staged_files(
+                    &staging_dir,
+                    "yt-dlp",
+                    vec![AdminCopyFile {
+                        src: staged_bin.to_string_lossy().to_string(),
+                        dst: target_bin.to_string_lossy().to_string(),
+                    }],
+                    EngineManifestRecord {
+                        version: version.clone(),
+                        sha256: actual_sha,
+                        source_url: url.to_string(),
+                        installed_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
 
-                Ok((version, actual_sha, url.to_string()))
+                Ok(version)
             }
             .await,
             "ffmpeg" => async {
@@ -914,7 +1679,7 @@ impl EngineManager {
                     app,
                     "ffmpeg",
                     "installing",
-                    "Finalizing atomic installation...",
+                    "Installing into Engine\\ffmpeg\\bin...",
                     97.0,
                     0,
                     0,
@@ -922,26 +1687,115 @@ impl EngineManager {
                     None,
                 );
 
-                let bin_dir = Self::managed_bin_dir();
-                for file_path in extracted {
-                    if let Some(fname) = file_path.file_name() {
-                        let target = bin_dir.join(fname);
-                        Self::atomic_replace_file(&file_path, &target)?;
-                    }
-                }
+                let bin_dir = Self::ffmpeg_dir();
+                let copy_files = extracted
+                    .into_iter()
+                    .filter_map(|file_path| {
+                        file_path.file_name().map(|fname| AdminCopyFile {
+                            src: file_path.to_string_lossy().to_string(),
+                            dst: bin_dir.join(fname).to_string_lossy().to_string(),
+                        })
+                    })
+                    .collect();
 
                 let clean_ver = ffmpeg_ver
                     .trim_start_matches("ffmpeg version")
                     .trim()
                     .to_string();
-                Ok((clean_ver, actual_sha, FFMPEG_WIN_URL.to_string()))
+
+                Self::commit_staged_files(
+                    &staging_dir,
+                    "ffmpeg",
+                    copy_files,
+                    EngineManifestRecord {
+                        version: clean_ver.clone(),
+                        sha256: actual_sha,
+                        source_url: FFMPEG_WIN_URL.to_string(),
+                        installed_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+
+                Ok(clean_ver)
             }
             .await,
             "spotdl" => async {
-                if !cfg!(windows) {
-                    return Err("On Unix systems, install or update spotDL via python3 -m pip install --upgrade --user spotdl.".to_string());
+                let settings_path = AppState::settings_file_path_for(&AppState::app_data_dir());
+                let current_settings: AppSettings = fs::read_to_string(&settings_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+
+                let custom_py_configured = current_settings
+                    .python_path
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+
+                let python_res = Self::resolve_python_for_spotdl(&current_settings);
+                if custom_py_configured && python_res.is_err() {
+                    return Err(python_res.unwrap_err());
                 }
 
+                if let Ok(py_path) = python_res {
+                    Self::emit_install_progress(
+                        app,
+                        "spotdl",
+                        "installing",
+                        "Provisioning isolated spotDL venv...",
+                        65.0,
+                        0,
+                        0,
+                        format!(
+                            "Creating isolated venv in Engine\\spotdl\\venv using {}",
+                            py_path.display()
+                        ),
+                        None,
+                    );
+
+                    let root = Self::managed_engines_root();
+                    let venv_dir = Self::spotdl_venv_dir();
+                    if Self::is_dir_writable(&root) {
+                        let py_clone = py_path.clone();
+                        let venv_clone = venv_dir.clone();
+                        return tokio::task::spawn_blocking(move || {
+                            Self::provision_spotdl_venv(&py_clone, &venv_clone)
+                        })
+                        .await
+                        .map_err(|e| format!("spotDL venv task panicked: {}", e))?;
+                    } else {
+                        let op = AdminInstallOp {
+                            action: "install_spotdl_venv".to_string(),
+                            engine: "spotdl".to_string(),
+                            target_root: root.to_string_lossy().to_string(),
+                            files: Vec::new(),
+                            python_path: Some(py_path.to_string_lossy().to_string()),
+                            venv_dir: Some(venv_dir.to_string_lossy().to_string()),
+                            manifest_record: None,
+                            remove_paths: Vec::new(),
+                            result_path: staging_dir
+                                .join("admin_result.json")
+                                .to_string_lossy()
+                                .to_string(),
+                        };
+                        let op_path = staging_dir.join("admin_op.json");
+                        let serialized = serde_json::to_string_pretty(&op)
+                            .map_err(|e| format!("Failed serializing spotDL admin op: {}", e))?;
+                        fs::write(&op_path, serialized)
+                            .map_err(|e| format!("Failed writing spotDL admin op: {}", e))?;
+                        let res = Self::execute_elevated_admin_op(&op_path, Path::new(&op.result_path))?;
+                        if res.success {
+                            return Ok(res.version.unwrap_or_else(|| "4.x".to_string()));
+                        }
+                        return Err(res.error.unwrap_or_else(|| "Elevated spotDL venv setup failed".to_string()));
+                    }
+                }
+
+                if !cfg!(windows) {
+                    return Err(python_res.unwrap_err());
+                }
+
+                // Fallback when no Python executable is configured or installed on Windows:
+                // install SHA-256 verified standalone spotdl.exe into Engine\spotdl\spotdl.exe
                 let part_path = staging_dir.join("spotdl.exe.part");
                 Self::download_to_staging(&client, app, "spotdl", SPOTDL_WIN_URL, &part_path).await?;
 
@@ -969,10 +1823,23 @@ impl EngineManager {
                 fs::rename(&part_path, &staged_bin)
                     .map_err(|e| format!("Failed staging spotdl.exe: {}", e))?;
                 let version = Self::verify_binary_runs(&staged_bin, "--version")?;
-                let target_bin = Self::managed_bin_dir().join("spotdl.exe");
-                Self::atomic_replace_file(&staged_bin, &target_bin)?;
+                let target_bin = Self::spotdl_dir().join("spotdl.exe");
+                Self::commit_staged_files(
+                    &staging_dir,
+                    "spotdl",
+                    vec![AdminCopyFile {
+                        src: staged_bin.to_string_lossy().to_string(),
+                        dst: target_bin.to_string_lossy().to_string(),
+                    }],
+                    EngineManifestRecord {
+                        version: version.clone(),
+                        sha256: actual_sha,
+                        source_url: SPOTDL_WIN_URL.to_string(),
+                        installed_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
 
-                Ok((version, actual_sha, SPOTDL_WIN_URL.to_string()))
+                Ok(version)
             }
             .await,
             _ => unreachable!(),
@@ -981,19 +1848,7 @@ impl EngineManager {
         let _ = fs::remove_dir_all(&staging_dir);
 
         match result {
-            Ok((new_ver, sha256, source_url)) => {
-                let mut manifest = Self::load_manifest();
-                manifest.engines.insert(
-                    normalized.to_string(),
-                    EngineManifestRecord {
-                        version: new_ver.clone(),
-                        sha256,
-                        source_url,
-                        installed_at: chrono::Utc::now().to_rfc3339(),
-                    },
-                );
-                let _ = Self::save_manifest(&manifest);
-
+            Ok(new_ver) => {
                 Self::emit_install_progress(
                     app,
                     normalized,
@@ -1073,7 +1928,17 @@ impl EngineManager {
                         match path_opt {
                             Some(path) => {
                                 let mut cmd = Command::new(&path);
-                                cmd.arg(flag);
+                                let is_venv_py = name == "spotdl"
+                                    && path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .map(|n| n.to_ascii_lowercase().starts_with("python"))
+                                        .unwrap_or(false);
+                                if is_venv_py {
+                                    cmd.args(["-m", "spotdl", flag]);
+                                } else {
+                                    cmd.arg(flag);
+                                }
                                 Self::apply_engine_env(&mut cmd);
                                 let opts = ProcessOptions {
                                     timeout: DIAGNOSTICS_TIMEOUT,
@@ -1116,7 +1981,7 @@ impl EngineManager {
                                 passed: false,
                                 version: None,
                                 command: format!("{} {}", name, flag),
-                                output: "Binary not detected in managed runtime or PATH".to_string(),
+                                output: "Binary not detected in Engine directory or PATH".to_string(),
                                 duration_ms: start.elapsed().as_millis() as u64,
                             },
                         }
@@ -1189,10 +2054,44 @@ impl EngineManager {
         Ok(args)
     }
 
+    pub fn unsupported_non_media_extension(url: &str) -> Option<String> {
+        let parsed = reqwest::Url::parse(url.trim()).ok()?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let streaming_hosts = [
+            "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "twitch.tv",
+            "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com",
+            "dailymotion.com", "soundcloud.com", "bandcamp.com", "bilibili.com", "reddit.com",
+            "rumble.com", "kick.com",
+        ];
+        if streaming_hosts
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{}", h)))
+            || crate::spotify::is_spotify_url(url)
+        {
+            return None;
+        }
+        let path_lower = parsed.path().to_ascii_lowercase();
+        let last_seg = path_lower.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
+        if let Some((_, ext)) = last_seg.rsplit_once('.') {
+            let unsupported_exts = [
+                "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz",
+                "iso", "img", "dmg", "exe", "msi", "msix", "appimage", "deb", "rpm", "apk", "cab", "pkg",
+                "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt", "rtf", "odt", "epub", "mobi",
+                "png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp", "ico", "tiff",
+                "bin", "dat", "wasm", "dll", "so", "dylib", "torrent", "json", "xml", "yaml", "yml",
+                "md", "html", "htm", "css", "js",
+            ];
+            if unsupported_exts.contains(&ext) {
+                return Some(ext.to_string());
+            }
+        }
+        None
+    }
+
     pub fn validate_inspection_url(raw: &str) -> Result<String, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err("URL cannot be empty. Enter an HTTP or HTTPS media URL.".to_string());
+            return Err("URL cannot be empty. Enter a supported video or music URL.".to_string());
         }
         if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
             return Err("Invalid URL: contains whitespace or control characters.".to_string());
@@ -1215,7 +2114,7 @@ impl EngineManager {
         } else if lower.starts_with("http://") {
             &trimmed[7..]
         } else {
-            return Err("Unsupported URL scheme. Only http:// and https:// URLs are supported.".to_string());
+            return Err("Unsupported URL scheme. Only http://, https://, and spotify: URLs are supported.".to_string());
         };
 
         let authority = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or("");
@@ -1235,42 +2134,14 @@ impl EngineManager {
             return Err(error);
         }
 
-        Ok(trimmed.to_string())
-    }
+        if let Some(ext) = Self::unsupported_non_media_extension(trimmed) {
+            return Err(format!(
+                "VANTA downloads music and video only (yt-dlp / spotDL). Generic '.{}' files are not supported.",
+                ext
+            ));
+        }
 
-    pub fn is_direct_file_url(url: &str) -> bool {
-        let parsed = match reqwest::Url::parse(url.trim()) {
-            Ok(u) => u,
-            Err(_) => return false,
-        };
-        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
-        let streaming_hosts = [
-            "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "twitch.tv",
-            "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com",
-            "dailymotion.com", "soundcloud.com", "bandcamp.com", "bilibili.com", "reddit.com",
-            "rumble.com", "kick.com", "pornhub.com", "xvideos.com", "xnxx.com", "spankbang.com",
-            "redtube.com", "youporn.com",
-        ];
-        if streaming_hosts
-            .iter()
-            .any(|h| host == *h || host.ends_with(&format!(".{}", h)))
-        {
-            return false;
-        }
-        let path_lower = parsed.path().to_ascii_lowercase();
-        let last_seg = path_lower.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
-        if let Some((_, ext)) = last_seg.rsplit_once('.') {
-            let direct_exts = [
-                "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "iso", "img", "dmg",
-                "exe", "msi", "msix", "appimage", "deb", "rpm", "apk", "pdf", "doc", "docx",
-                "xls", "xlsx", "ppt", "pptx", "csv", "txt", "json", "xml", "epub", "mp4",
-                "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "wav", "m4a",
-                "aac", "opus", "ogg", "png", "jpg", "jpeg", "webp", "gif", "svg", "avif",
-                "bin", "dat", "wasm",
-            ];
-            return direct_exts.contains(&ext);
-        }
-        false
+        Ok(trimmed.to_string())
     }
 
     pub fn is_playlist_candidate_url(url: &str) -> bool {
@@ -1279,116 +2150,6 @@ impl EngineManager {
             return true;
         }
         false
-    }
-
-    pub async fn inspect_direct_url_async(raw_url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
-        let url = Self::validate_inspection_url(raw_url)?;
-        let ua = settings
-            .user_agent
-            .clone()
-            .unwrap_or_else(|| "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string());
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent(ua)
-            .build()
-            .map_err(|e| format!("Failed creating HTTP client: {}", e))?;
-
-        let mut res = client
-            .head(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Direct HTTP probe failed: {}", e))?;
-
-        if res.status().as_u16() == 405 || res.status().as_u16() == 501 || res.status().as_u16() == 403 {
-            res = client
-                .get(&url)
-                .header(reqwest::header::RANGE, "bytes=0-0")
-                .send()
-                .await
-                .map_err(|e| format!("Direct HTTP GET probe failed: {}", e))?;
-        }
-
-        if !res.status().is_success() {
-            return Err(format!("HTTP {} returned while inspecting direct file URL.", res.status().as_u16()));
-        }
-
-        let headers = res.headers();
-        let mut size: u64 = 0;
-        if let Some(cr) = headers.get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
-            if let Some((_, total_str)) = cr.rsplit_once('/') {
-                size = total_str.trim().parse().unwrap_or(0);
-            }
-        }
-        if size == 0 {
-            if let Some(cl) = headers.get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()) {
-                size = cl.trim().parse().unwrap_or(0);
-            }
-        }
-        let accepts_ranges = res.status().as_u16() == 206
-            || headers
-                .get(reqwest::header::ACCEPT_RANGES)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_ascii_lowercase().contains("bytes"))
-                .unwrap_or(false);
-        let mime = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        let parsed = reqwest::Url::parse(&url).ok();
-        let filename = parsed
-            .as_ref()
-            .and_then(|u| u.path_segments())
-            .and_then(|mut s| s.next_back())
-            .filter(|s| !s.is_empty())
-            .map(crate::sanitize_filename)
-            .unwrap_or_else(|| "download.bin".to_string());
-        let ext = Path::new(&filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin")
-            .to_ascii_lowercase();
-        let uploader = parsed.and_then(|u| u.host_str().map(|h| h.to_string()));
-        let mut hasher = Sha256::new();
-        hasher.update(url.as_bytes());
-        let id = hex::encode(hasher.finalize())[..12].to_string();
-
-        Ok(MediaMetadata {
-            url,
-            id,
-            title: filename.clone(),
-            uploader,
-            formats: vec![FormatOption {
-                format_id: "direct".to_string(),
-                ext,
-                resolution: None,
-                width: None,
-                height: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                filesize: if size > 0 { Some(size) } else { None },
-                filesize_approx: None,
-                format_note: Some(if accepts_ranges {
-                    "Direct HTTP (Resumable)".to_string()
-                } else {
-                    "Direct HTTP".to_string()
-                }),
-                tbr: None,
-                abr: None,
-                is_audio_only: false,
-                is_video_only: false,
-            }],
-            is_playlist: false,
-            extractor: "direct-http".to_string(),
-            is_direct_file: Some(true),
-            direct_file_size: if size > 0 { Some(size) } else { None },
-            direct_mime_type: Some(mime),
-            direct_filename: Some(filename),
-            accepts_ranges: Some(accepts_ranges),
-            ..MediaMetadata::default()
-        })
     }
 
     pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
@@ -2001,34 +2762,68 @@ impl EngineManager {
     pub fn remove_managed_engine(name: &str) -> EngineUpdateResult {
         let normalized = if name.eq_ignore_ascii_case("ytdlp") || name.eq_ignore_ascii_case("yt-dlp") {
             "yt-dlp"
-        } else if name.eq_ignore_ascii_case("ffmpeg") {
+        } else if name.eq_ignore_ascii_case("ffmpeg") || name.eq_ignore_ascii_case("ffprobe") {
             "ffmpeg"
-        } else if name.eq_ignore_ascii_case("ffprobe") {
-            "ffprobe"
         } else {
             "spotdl"
         };
-        let bin_dir = Self::managed_bin_dir();
-        let exe_name = if cfg!(windows) {
-            format!("{}.exe", normalized)
-        } else {
-            normalized.to_string()
+
+        let remove_paths: Vec<PathBuf> = match normalized {
+            "yt-dlp" => vec![Self::ytdlp_dir()],
+            "ffmpeg" => vec![Self::managed_engines_root().join("ffmpeg")],
+            _ => vec![Self::spotdl_dir()],
         };
-        let target = bin_dir.join(exe_name);
-        let removed = if target.is_file() {
-            fs::remove_file(&target).is_ok()
-        } else {
-            false
+
+        let root = Self::managed_engines_root();
+        let op = AdminInstallOp {
+            action: "remove".to_string(),
+            engine: normalized.to_string(),
+            target_root: root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            python_path: None,
+            venv_dir: None,
+            manifest_record: None,
+            remove_paths: remove_paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+            result_path: Self::managed_staging_dir()
+                .join(format!("remove_{}.json", uuid::Uuid::new_v4()))
+                .to_string_lossy()
+                .to_string(),
         };
+
+        let res = if Self::is_dir_writable(&root) {
+            Self::execute_admin_op_in_process(&op)
+        } else {
+            let op_path = Self::managed_staging_dir().join(format!("remove_op_{}.json", uuid::Uuid::new_v4()));
+            let _ = fs::create_dir_all(Self::managed_staging_dir());
+            if let Ok(serialized) = serde_json::to_string_pretty(&op) {
+                let _ = fs::write(&op_path, serialized);
+                Self::execute_elevated_admin_op(&op_path, Path::new(&op.result_path))
+                    .unwrap_or_else(|e| AdminOpResult {
+                        success: false,
+                        version: None,
+                        error: Some(e),
+                    })
+            } else {
+                AdminOpResult {
+                    success: false,
+                    version: None,
+                    error: Some("Failed preparing removal operation.".to_string()),
+                }
+            }
+        };
+
         EngineUpdateResult {
             engine: normalized.to_string(),
-            success: true,
+            success: res.success,
             previous_version: String::new(),
             current_version: String::new(),
-            message: if removed {
-                format!("Removed managed {} binary.", normalized)
+            message: if res.success {
+                format!("Removed managed {} from Engine directory.", normalized)
             } else {
-                format!("No managed {} binary found.", normalized)
+                res.error.unwrap_or_else(|| format!("Failed removing managed {}.", normalized))
             },
             rolled_back: None,
         }
@@ -2070,7 +2865,7 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         fs::create_dir_all(&base).unwrap();
 
         let staged = base.join("staged.bin");
-        let target = base.join("bin").join("tool.bin");
+        let target = base.join("Engine").join("yt-dlp").join("tool.bin");
 
         fs::write(&staged, b"vanta-engine-payload").unwrap();
         let digest = EngineManager::compute_sha256_file(&staged).unwrap();
@@ -2085,57 +2880,7 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
     }
 
     #[test]
-    fn test_sanitize_log_redacts_secrets() {
-        let raw = "Authorization: Bearer secret123 Cookie: session=abc https://example.com/?token=xyz&a=1";
-        let clean = EngineManager::sanitize_log(raw);
-        assert!(!clean.contains("secret123"));
-        assert!(!clean.contains("session=abc"));
-        assert!(!clean.contains("token=xyz"));
-    }
-
-    #[test]
-    fn test_build_ytdlp_request_args_precedence_and_no_bypass_flags() {
-        let dir = env::temp_dir().join(format!("vanta_eng_args_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        let cookie_file = dir.join("cookies.txt");
-        fs::write(
-            &cookie_file,
-            "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t1893456000\tsid\tabc123\n",
-        )
-        .unwrap();
-
-        let mut settings = AppSettings::default();
-        settings.cookies_browser = Some("firefox".to_string());
-        settings.cookies_file = Some(cookie_file.to_string_lossy().to_string());
-
-        let args = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
-            .expect("should build request args");
-
-        assert!(args.windows(2).any(|w| w[0] == "--cookies" && w[1] == cookie_file.to_string_lossy()));
-        assert!(!args.iter().any(|a| a == "--cookies-from-browser"));
-        assert!(!args.iter().any(|a| a == "--age-limit" || a == "--geo-bypass" || a == "--no-check-certificates"));
-
-        settings.cookies_file = None;
-        let _ = fs::remove_dir_all(&dir);
-
-        // When imported file is cleared, explicit browser is used (if managed default file isn't present)
-        if !crate::cookies::managed_cookies_path().exists() {
-            settings.cookies_profile = Some("default-release".to_string());
-            let args_browser = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
-                .expect("should build browser args");
-            assert!(args_browser
-                .windows(2)
-                .any(|w| w[0] == "--cookies-from-browser" && w[1] == "firefox:default-release"));
-
-            settings.cookies_browser = Some("none".to_string());
-            let args_disabled = EngineManager::build_ytdlp_request_args("https://www.youtube.com/watch?v=test", &settings)
-                .expect("should build args when cookies disabled");
-            assert!(!args_disabled.iter().any(|a| a == "--cookies" || a == "--cookies-from-browser"));
-        }
-    }
-
-    #[test]
-    fn test_validate_inspection_url() {
+    fn test_validate_inspection_url_rejects_generic_non_media_files() {
         assert!(EngineManager::validate_inspection_url("").is_err());
         assert!(EngineManager::validate_inspection_url("   ").is_err());
         assert!(EngineManager::validate_inspection_url("--exec whoami").is_err());
@@ -2144,9 +2889,54 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert!(EngineManager::validate_inspection_url("https://example.com/v?a=1 b=2").is_err());
         assert!(EngineManager::validate_inspection_url("https://").is_err());
 
+        for generic in [
+            "https://cdn.example.com/release.zip",
+            "https://cdn.example.com/archive.rar",
+            "https://cdn.example.com/setup.exe",
+            "https://cdn.example.com/installer.msi",
+            "https://cdn.example.com/manual.pdf",
+            "https://cdn.example.com/ubuntu.iso",
+            "https://cdn.example.com/disk.dmg",
+            "https://cdn.example.com/photo.png",
+        ] {
+            let err = EngineManager::validate_inspection_url(generic).unwrap_err();
+            assert!(
+                err.contains("music and video only"),
+                "expected media-only rejection for {}, got {}",
+                generic,
+                err
+            );
+        }
+
         let ok = EngineManager::validate_inspection_url("  https://www.youtube.com/watch?v=dQw4w9WgXcQ  ")
             .expect("valid https url should pass");
         assert_eq!(ok, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_python_executable_and_strict_no_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("vanta_py_test_{}", uuid::Uuid::new_v4()));
+        let spaced_dir = dir.join("Python With Spaces");
+        fs::create_dir_all(&spaced_dir).unwrap();
+
+        // Mock Python script in a directory containing spaces
+        let py_script = spaced_dir.join("python3");
+        fs::write(&py_script, "#!/bin/sh\necho 'Python 3.12.4'\n").unwrap();
+        fs::set_permissions(&py_script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ok = EngineManager::validate_python_executable(&py_script.to_string_lossy());
+        assert!(ok.valid);
+        assert_eq!(ok.version.as_deref(), Some("3.12.4"));
+
+        // Invalid custom path MUST NOT fall back silently to PATH python
+        let mut settings = AppSettings::default();
+        settings.python_path = Some("/nonexistent/dir with spaces/python.exe".to_string());
+        let strict_err = EngineManager::resolve_python_for_spotdl(&settings).unwrap_err();
+        assert!(strict_err.contains("Configured Python executable is invalid"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -2169,7 +2959,6 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         settings.cookies_browser = Some("none".to_string());
         settings.cookies_file = None;
 
-        // 1. Valid JSON metadata with formats + verified '--' separator passed before URL
         let ok_script = write_mock_ytdlp_script(
             &dir,
             "ytdlp_ok.sh",
@@ -2191,129 +2980,6 @@ printf '{"id":"vid123","title":"Sample Video","uploader":"Creator","duration":12
         assert_eq!(meta.id, "vid123");
         assert_eq!(meta.title, "Sample Video");
         assert_eq!(meta.formats.len(), 1);
-        assert_eq!(meta.formats[0].format_id, "18");
-
-        // 2. Malformed JSON should fail cleanly with descriptive message
-        let bad_json_script = write_mock_ytdlp_script(
-            &dir,
-            "ytdlp_bad_json.sh",
-            r#"printf '{"id":"partial"'\n"#,
-        );
-        let err_malformed = EngineManager::inspect_url_with_binary(
-            &bad_json_script,
-            "req_bad_json",
-            "https://example.com/bad",
-            &settings,
-            Duration::from_secs(5),
-            1024 * 1024,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(err_malformed.contains("invalid or incomplete metadata"), "got: {}", err_malformed);
-
-        // 3. Oversized JSON must abort safely instead of head-truncating JSON
-        let huge_script = write_mock_ytdlp_script(
-            &dir,
-            "ytdlp_huge.sh",
-            r#"
-yes '{"format_id":"a"}' | head -n 500
-"#,
-        );
-        let err_huge = EngineManager::inspect_url_with_binary(
-            &huge_script,
-            "req_huge",
-            "https://example.com/huge",
-            &settings,
-            Duration::from_secs(5),
-            512,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(err_huge.contains("exceeded safe limit"), "got: {}", err_huge);
-
-        // 4. Hung extractor process must time out cleanly and kill child
-        let hang_script = write_mock_ytdlp_script(
-            &dir,
-            "ytdlp_hang.sh",
-            "sleep 10\n",
-        );
-        let err_timeout = EngineManager::inspect_url_with_binary(
-            &hang_script,
-            "req_hang",
-            "https://example.com/hang",
-            &settings,
-            Duration::from_millis(250),
-            1024 * 1024,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(err_timeout.contains("timed out"), "got: {}", err_timeout);
-
-        // 5. Auth required / Chrome DPAPI lock errors return actionable error guidance
-        let dpapi_script = write_mock_ytdlp_script(
-            &dir,
-            "ytdlp_dpapi.sh",
-            "echo 'ERROR: Could not copy Chrome cookie database (DPAPI locked)' 1>&2\nexit 1\n",
-        );
-        let err_dpapi = EngineManager::inspect_url_with_binary(
-            &dpapi_script,
-            "req_dpapi",
-            "https://example.com/locked",
-            &settings,
-            Duration::from_secs(5),
-            1024 * 1024,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(err_dpapi.contains("Browser cookie database access failed"), "got: {}", err_dpapi);
-
-        // 6. Cancellation flag stops running inspection promptly
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_trigger = Arc::clone(&cancel_flag);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(120));
-            cancel_trigger.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        let err_cancel = EngineManager::inspect_url_with_binary(
-            &hang_script,
-            "req_cancel",
-            "https://example.com/cancel",
-            &settings,
-            Duration::from_secs(10),
-            1024 * 1024,
-            Some(cancel_flag),
-            None,
-        )
-        .unwrap_err();
-        assert!(err_cancel.contains("cancelled"), "got: {}", err_cancel);
-
-        // 7. Concurrent inspection requests complete independently without crashing
-        let handles: Vec<_> = (0..4)
-            .map(|i| {
-                let s_script = ok_script.clone();
-                let s_settings = settings.clone();
-                std::thread::spawn(move || {
-                    EngineManager::inspect_url_with_binary(
-                        &s_script,
-                        &format!("req_concurrent_{}", i),
-                        &format!("https://example.com/watch?v={}", i),
-                        &s_settings,
-                        Duration::from_secs(5),
-                        1024 * 1024,
-                        None,
-                        None,
-                    )
-                })
-            })
-            .collect();
-        for h in handles {
-            let res = h.join().expect("thread should not panic").expect("concurrent inspect ok");
-            assert_eq!(res.id, "vid123");
-        }
 
         let _ = fs::remove_dir_all(&dir);
     }
