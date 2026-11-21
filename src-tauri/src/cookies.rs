@@ -241,7 +241,7 @@ pub fn save_cookies_file(state: &AppState, content: &str) -> Result<CookieStatus
 
     let mut settings = state.get_settings();
     settings.cookies_file = Some(target.to_string_lossy().to_string());
-    state.save_settings(&settings);
+    state.save_settings(&settings)?;
 
     logging::info(
         "cookies",
@@ -268,7 +268,7 @@ pub fn remove_cookies_file(state: &AppState) -> Result<CookieStatus, String> {
     }
 
     settings.cookies_file = None;
-    state.save_settings(&settings);
+    state.save_settings(&settings)?;
     logging::info("cookies", "Removed imported cookies file and cleared configuration.");
     Ok(get_cookie_status(&settings))
 }

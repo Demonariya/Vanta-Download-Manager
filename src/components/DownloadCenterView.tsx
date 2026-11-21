@@ -14,6 +14,8 @@ import {
   Info,
   AlertTriangle,
   Download,
+  Music,
+  Video,
 } from 'lucide-react';
 import {
   DownloadTask,
@@ -471,19 +473,42 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                       />
                     </div>
 
-                    {/* Thumbnail or File Extension Tile */}
-                    {task.thumbnail ? (
-                      <img
-                        src={task.thumbnail}
-                        alt={task.title}
-                        referrerPolicy="no-referrer"
-                        className="w-12 h-9 rounded-md object-cover bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] shrink-0 hidden sm:block"
-                      />
-                    ) : (
-                      <div className="w-12 h-9 rounded-md bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] hidden sm:flex items-center justify-center shrink-0 text-[10px] font-mono font-semibold text-[var(--vanta-muted)]">
-                        {task.ext.toUpperCase()}
-                      </div>
-                    )}
+                    {/* Thumbnail or Media Type Tile */}
+                    {(() => {
+                      const isAudioTask = task.is_audio_only || task.engine === 'spotdl';
+                      const MediaIcon = isAudioTask ? Music : Video;
+                      return task.thumbnail ? (
+                        <div className="relative w-12 h-9 shrink-0 hidden sm:block">
+                          <img
+                            src={task.thumbnail}
+                            alt={task.title}
+                            referrerPolicy="no-referrer"
+                            className="w-12 h-9 rounded-md object-cover bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)]"
+                          />
+                          <span
+                            title={isAudioTask ? 'Music / Audio' : 'Video'}
+                            className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border border-[var(--vanta-surface)] flex items-center justify-center ${
+                              isAudioTask
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-[var(--vanta-accent)] text-white'
+                            }`}
+                          >
+                            <MediaIcon className="w-2.5 h-2.5" />
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="w-12 h-9 rounded-md bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] hidden sm:flex flex-col items-center justify-center shrink-0 text-[9px] font-mono font-semibold text-[var(--vanta-muted)] gap-0.5">
+                          <MediaIcon
+                            className={`w-3.5 h-3.5 ${
+                              isAudioTask
+                                ? 'text-emerald-600 dark:text-[#3fb950]'
+                                : 'text-[var(--vanta-accent)]'
+                            }`}
+                          />
+                          <span>{task.ext.toUpperCase()}</span>
+                        </div>
+                      );
+                    })()}
 
                     {/* Main Title, Metadata & Progress */}
                     <div className="flex-1 min-w-0 space-y-2">
@@ -499,11 +524,32 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                               {getStatusLabel(task.status)}
                             </span>
                             <span aria-hidden="true">·</span>
-                            <span>{task.engine}</span>
+                            <span>
+                              {task.is_audio_only || task.engine === 'spotdl' ? 'Audio' : 'Video'} ·{' '}
+                              {task.engine}
+                            </span>
+                            {task.uploader && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="text-[var(--vanta-text-secondary)] truncate max-w-[180px]">
+                                  {task.uploader}
+                                </span>
+                              </>
+                            )}
+                            {task.album && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="truncate max-w-[160px]">{task.album}</span>
+                              </>
+                            )}
                             <span aria-hidden="true">·</span>
                             <span>
                               {task.ext.toUpperCase()}
-                              {task.resolution_label ? ` (${task.resolution_label})` : ''}
+                              {task.is_audio_only && task.audio_bitrate
+                                ? ` (${task.audio_bitrate})`
+                                : task.resolution_label
+                                ? ` (${task.resolution_label})`
+                                : ''}
                             </span>
                             {(task.tracks_requested ?? 0) > 0 && (
                               <>

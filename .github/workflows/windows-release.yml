@@ -1,66 +1,172 @@
-name: Build & Release Windows Desktop App
+name: Windows CI & Release Pipeline
 
 on:
   push:
-    tags:
-      - 'v*'
     branches:
       - main
       - master
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
       - master
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Release Tag Version (e.g. v1.0.0)'
-        required: false
-        default: 'v1.0.0'
+      build_target:
+        description: 'Windows bundle target to build'
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - nsis
+          - msi
+          - portable
+      clean_build:
+        description: 'Run clean rebuild (-Clean)'
+        type: boolean
+        default: false
       create_github_release:
-        description: 'Publish as GitHub Release'
+        description: 'Publish GitHub Release (requires valid vX.Y.Z release_tag)'
         type: boolean
-        default: true
+        default: false
+      release_tag:
+        description: 'Release tag when create_github_release is enabled (e.g. v1.0.0)'
+        type: string
+        default: ''
       upload_actions_artifacts:
-        description: 'Upload downloadable GitHub Actions workflow artifacts'
-        type: boolean
-        default: true
-      upload_msi_artifact:
-        description: 'Upload MSI installer as separate Actions artifact'
-        type: boolean
-        default: true
-      upload_portable_artifact:
-        description: 'Upload Portable ZIP as separate Actions artifact'
+        description: 'Upload downloadable Actions workflow artifacts'
         type: boolean
         default: true
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
 
 jobs:
-  build-windows:
-    name: Build Windows x64 Installer & Executable
-    runs-on: windows-latest
+  frontend-check:
+    name: Frontend Lint, Build & Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 24
+          persist-credentials: false
+
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install npm dependencies deterministically
+        run: npm ci --include=optional
+
+      - name: TypeScript typecheck
+        run: npm run lint
+
+      - name: Build Vite frontend bundle
+        run: npm run build
+
+      - name: Run frontend unit tests
+        run: npx --no-install tsx --test --test-concurrency=1 src/utils/*.test.ts
+
+  rust-check:
+    name: Rust Format, Check, Tests & Lockfile Validation
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust Stable (MSVC x64)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Cache Cargo crates and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Run PowerShell Lockfile Validation Tests
+        shell: pwsh
+        run: .\scripts\Test-LockfileConsistency.ps1
+
+      - name: Verify Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Check Rust crate compilation
+        run: cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features desktop
+
+  windows-build:
+    name: Build Windows x64 Installers & Portable Package
+    needs: [frontend-check, rust-check]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      release_requested: ${{ steps.build_flags.outputs.release_requested }}
+      resolved_target: ${{ steps.build_flags.outputs.resolved_target }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
           cache: 'npm'
 
       - name: Setup Rust Stable (MSVC x64)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt
 
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
+      - name: Cache Cargo crates and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: './src-tauri -> target'
+
+      - name: Determine Build & Release Parameters
+        id: build_flags
+        shell: pwsh
+        run: |
+          $isTag = "${{ startsWith(github.ref, 'refs/tags/v') }}" -eq 'True'
+          $isPr = "${{ github.event_name }}" -eq 'pull_request'
+          $dispatchRelease = ("${{ github.event_name }}" -eq 'workflow_dispatch') -and ("${{ inputs.create_github_release }}" -eq 'True')
+          $releaseRequested = (-not $isPr) -and ($isTag -or $dispatchRelease)
+
+          $target = if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.build_target }}") {
+            "${{ inputs.build_target }}"
+          } else {
+            'all'
+          }
+          if ($releaseRequested -and $target -ne 'all') {
+            Write-Host "Release requested: overriding build_target '$target' to 'all' so release contains Setup, MSI, and Portable ZIP."
+            $target = 'all'
+          }
+
+          "release_requested=$($releaseRequested.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "resolved_target=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Run PowerShell Diagnostic Checks
         shell: pwsh
@@ -68,16 +174,40 @@ jobs:
 
       - name: Build Windows Release via build.ps1
         shell: pwsh
-        run: .\build.ps1 -Release -Target all
+        run: |
+          $buildArgs = @('-Release', '-Target', '${{ steps.build_flags.outputs.resolved_target }}')
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.clean_build }}" -eq 'True') {
+            $buildArgs += '-Clean'
+          }
+          & .\build.ps1 @buildArgs
 
-      - name: Publish Failure Log to Job Summary
-        if: failure() && hashFiles('dist/last-build-failure.log') != ''
+      - name: Verify Produced Deliverables & Checksums
+        shell: pwsh
+        run: |
+          $target = '${{ steps.build_flags.outputs.resolved_target }}'
+          if (-not (Test-Path 'dist/SHA256SUMS.txt') -or -not (Test-Path 'dist/build-report.txt')) {
+            throw 'Missing dist/SHA256SUMS.txt or dist/build-report.txt after build.'
+          }
+          if ($target -in @('all', 'nsis') -and -not (Get-ChildItem -Path 'dist' -Filter '*-setup.exe' | Where-Object { $_.Length -gt 0 })) {
+            throw 'Missing non-empty NSIS setup executable in dist/.'
+          }
+          if ($target -in @('all', 'msi') -and -not (Get-ChildItem -Path 'dist' -Filter '*.msi' | Where-Object { $_.Length -gt 0 })) {
+            throw 'Missing non-empty MSI installer in dist/.'
+          }
+          if ($target -in @('all', 'portable') -and -not (Get-ChildItem -Path 'dist' -Filter '*-portable.zip' | Where-Object { $_.Length -gt 0 })) {
+            throw 'Missing non-empty Portable ZIP archive in dist/.'
+          }
+          Write-Host 'All expected deliverables verified:'
+          Get-ChildItem -Path 'dist' -File | Format-Table Name, Length -AutoSize
+
+      - name: Publish Failure Diagnostics to Job Summary
+        if: failure() && hashFiles('last-build-failure.log') != ''
         shell: pwsh
         run: |
           @(
             '### Windows Build Failure Diagnostics'
             '```text'
-            (Get-Content -Path 'dist/last-build-failure.log' -Raw)
+            (Get-Content -Path 'last-build-failure.log' -Raw)
             '```'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
@@ -86,63 +216,40 @@ jobs:
         shell: pwsh
         run: |
           @(
-            '### Windows x64 Release Build Report'
+            '### Windows x64 Build Report'
             '```text'
             (Get-Content -Path 'dist/build-report.txt' -Raw)
             '```'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
-      - name: Prune Previous Workflow Artifacts in Repository
-        if: github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $headers = @{
-            Authorization          = "Bearer $env:GITHUB_TOKEN"
-            Accept                 = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
-          $repo = "${{ github.repository }}"
-          $currentRunId = [long]"${{ github.run_id }}"
-          $freedBytes = [long]0
-          $deletedCount = 0
+      - name: Upload Failure Diagnostics Artifact
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: VANTA-Failure-Diagnostics
+          path: |
+            last-build-failure.log
+            dist/build-report.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
-          try {
-            $page = 1
-            do {
-              $listUrl = "https://api.github.com/repos/$repo/actions/artifacts?per_page=100&page=$page"
-              $resp = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get
-              $artifacts = $resp.artifacts
-              if (-not $artifacts -or $artifacts.Count -eq 0) { break }
+      - name: Stage Internal Release Payload
+        if: success() && steps.build_flags.outputs.release_requested == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vanta-release-payload
+          path: |
+            dist/*-setup.exe
+            dist/*.msi
+            dist/*-portable.zip
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
+          if-no-files-found: error
+          retention-days: 1
 
-              foreach ($art in $artifacts) {
-                if ($art.expired) { continue }
-                if ($art.workflow_run -and ([long]$art.workflow_run.id -eq $currentRunId)) { continue }
-                try {
-                  $delUrl = "https://api.github.com/repos/$repo/actions/artifacts/$($art.id)"
-                  Invoke-RestMethod -Uri $delUrl -Headers $headers -Method Delete | Out-Null
-                  $freedBytes += [long]$art.size_in_bytes
-                  $deletedCount++
-                  Write-Host "Deleted old artifact '$($art.name)' ($($art.size_in_bytes) bytes) from run $($art.workflow_run.id)"
-                } catch {
-                  Write-Warning "Could not delete artifact $($art.id) ($($art.name)): $_"
-                }
-              }
-              $page++
-            } while ($artifacts.Count -eq 100)
-
-            $freedMiB = [Math]::Round($freedBytes / 1MB, 2)
-            Write-Host "Pruned $deletedCount old artifact(s) in $repo, freeing $freedMiB MiB."
-          } catch {
-            Write-Warning "Failed listing/pruning repository artifacts: $_"
-          }
-
-      - name: Upload Recommended NSIS Setup Artifact
-        id: upload_setup
-        if: github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts
-        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
-        uses: actions/upload-artifact@v7
+      - name: Upload NSIS Setup Artifact
+        if: success() && (github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts) && (steps.build_flags.outputs.resolved_target == 'all' || steps.build_flags.outputs.resolved_target == 'nsis')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: VANTA-Windows-Setup-x64
           path: |
@@ -150,13 +257,11 @@ jobs:
             dist/SHA256SUMS.txt
             dist/build-report.txt
           if-no-files-found: error
-          retention-days: 5
+          retention-days: 14
 
       - name: Upload Enterprise MSI Artifact
-        id: upload_msi
-        if: (github.event_name != 'workflow_dispatch' || (inputs.upload_actions_artifacts && inputs.upload_msi_artifact)) && steps.upload_setup.outcome != 'failure'
-        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
-        uses: actions/upload-artifact@v7
+        if: success() && (github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts) && (steps.build_flags.outputs.resolved_target == 'all' || steps.build_flags.outputs.resolved_target == 'msi')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: VANTA-Windows-MSI-x64
           path: |
@@ -164,13 +269,11 @@ jobs:
             dist/SHA256SUMS.txt
             dist/build-report.txt
           if-no-files-found: error
-          retention-days: 5
+          retention-days: 14
 
       - name: Upload Portable ZIP Artifact
-        id: upload_portable
-        if: (github.event_name != 'workflow_dispatch' || (inputs.upload_actions_artifacts && inputs.upload_portable_artifact)) && steps.upload_setup.outcome != 'failure'
-        continue-on-error: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release)) }}
-        uses: actions/upload-artifact@v7
+        if: success() && (github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts) && (steps.build_flags.outputs.resolved_target == 'all' || steps.build_flags.outputs.resolved_target == 'portable')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: VANTA-Windows-Portable-x64
           path: |
@@ -178,47 +281,107 @@ jobs:
             dist/SHA256SUMS.txt
             dist/build-report.txt
           if-no-files-found: error
-          retention-days: 5
+          retention-days: 14
 
-      - name: Report Artifact Storage Quota Notice if Skipped
-        if: steps.upload_setup.outcome == 'failure' || steps.upload_msi.outcome == 'failure' || steps.upload_portable.outcome == 'failure'
-        shell: pwsh
+      - name: Upload Build Reports Artifact
+        if: success() && (github.event_name != 'workflow_dispatch' || inputs.upload_actions_artifacts)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: VANTA-Build-Reports
+          path: |
+            dist/SHA256SUMS.txt
+            dist/build-report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [windows-build]
+    if: success() && needs.windows-build.outputs.release_requested == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Validate Release Tag Semver Format
+        id: tag_check
         run: |
-          Write-Warning "GitHub Actions account artifact storage quota is full. Proceeding with GitHub Release upload, which does not count against Actions artifact quota."
-          @(
-            '### GitHub Actions Artifact Storage Quota Full'
-            '- Actions artifact upload was skipped because account-wide Actions/Packages storage hit its quota across repositories under this owner.'
-            '- Installers, SHA256SUMS.txt, and build-report.txt remain attached to the GitHub Release when release creation is enabled.'
-          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "::error::Release tag cannot be empty when publishing a GitHub Release."
+            exit 1
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$TAG'. Expected semantic version tag such as v1.0.0 or v1.2.3-beta.1."
+            exit 1
+          fi
+
+          IS_PRERELEASE="false"
+          if [[ "$TAG" == *-* ]]; then
+            IS_PRERELEASE="true"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Download Verified Release Payload
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vanta-release-payload
+          path: release-dist
+
+      - name: Verify Downloaded Release Checksums & Assets
+        run: |
+          set -euo pipefail
+          cd release-dist
+          test -s SHA256SUMS.txt
+          test -s build-report.txt
+          sha256sum -c SHA256SUMS.txt
+          ls -lh
 
       - name: Create or Update GitHub Release
-        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_github_release))
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          name: "VANTA Download Manager ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}"
+          tag_name: ${{ steps.tag_check.outputs.tag }}
+          name: "VANTA Download Manager ${{ steps.tag_check.outputs.tag }}"
           body: |
-            ## VANTA Download Manager — Production Windows Release
+            ## VANTA Download Manager — Windows x64 Release (${{ steps.tag_check.outputs.tag }})
 
             High-concurrency desktop video & music workstation powered by **Rust / Tauri 2**, **yt-dlp**, **spotDL**, and **FFmpeg**.
 
             ### Included Release Assets
             - **NSIS Setup (`*-setup.exe`)**: Recommended Windows installer (Windows 10 & 11 x64).
             - **Enterprise MSI (`*.msi`)**: Windows Installer package for managed deployments.
-            - **Portable ZIP (`*-portable.zip`)**: Standalone executable archive.
-            - **`SHA256SUMS.txt`**: Cryptographic SHA-256 verification checksums.
-            - **`build-report.txt`**: Toolchain, version, and artifact size manifest.
+            - **Portable ZIP (`*-portable.zip`)**: Standalone portable executable archive.
+            - **`SHA256SUMS.txt`**: SHA-256 verification checksums for all release deliverables.
+            - **`build-report.txt`**: Toolchain versions and artifact size manifest.
 
-            ### Managed Runtime Architecture
-            - Per-machine Windows installer places the application in `C:\Program Files\VANTA Download Manager` and manages `yt-dlp`, `FFmpeg`/`FFprobe`, and isolated `spotDL` under `C:\Program Files\VANTA Download Manager\Engine` (`Engine\yt-dlp`, `Engine\spotdl\venv`, `Engine\ffmpeg\bin`).
-            - User settings (`settings.v1.json`), task history (`vanta_native.db`), and cookies are stored in `%APPDATA%\VANTA Download Manager` and preserved across upgrades and uninstalls.
+            ### Installation & Security Notes
+            - These Windows binaries are currently **unsigned** (not Authenticode code-signed); Windows SmartScreen may display a prompt on first launch. Verify downloads against `SHA256SUMS.txt` before running.
+            - Per-machine Windows installer places the application in `C:\Program Files\VANTA Download Manager` and provisions `yt-dlp`, `FFmpeg`/`FFprobe`, and an isolated `spotDL` runtime under `Engine\` (`Engine\yt-dlp`, `Engine\spotdl\venv`, `Engine\ffmpeg\bin`).
+            - User settings (`settings.v1.json`), task history (`vanta_native.db`), and cookies reside in `%APPDATA%\VANTA Download Manager` and are preserved across upgrades.
           files: |
-            dist/*-setup.exe
-            dist/*.msi
-            dist/*-portable.zip
-            dist/SHA256SUMS.txt
-            dist/build-report.txt
+            release-dist/*-setup.exe
+            release-dist/*.msi
+            release-dist/*-portable.zip
+            release-dist/SHA256SUMS.txt
+            release-dist/build-report.txt
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.tag_check.outputs.prerelease == 'true' }}
+
+      - name: Append Release Details to Job Summary
+        run: |
+          {
+            echo "### Published GitHub Release"
+            echo "- Tag: \`${{ steps.tag_check.outputs.tag }}\`"
+            echo "- Prerelease: \`${{ steps.tag_check.outputs.prerelease }}\`"
+            echo "- Checksums verified cleanly prior to upload via \`SHA256SUMS.txt\`."
+          } >> "$GITHUB_STEP_SUMMARY"

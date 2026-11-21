@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ArrowDown,
+  FolderOpen,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -35,7 +36,12 @@ import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
 import { InspectionController } from '../utils/inspection-controller';
 import { isSpotifyUrl } from '../utils/spotify';
-import { buildCuratedVideoOptions } from '../utils/media-formats';
+import {
+  buildCuratedVideoOptions,
+  detectInspectedMediaKind,
+  formatMediaRoutingLabel,
+  summarizeVideoOptionCodecs,
+} from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
 
 interface NewDownloadModalProps {
@@ -102,7 +108,11 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [selectedSampleRate, setSelectedSampleRate] = useState<number>(48000);
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [customFilename, setCustomFilename] = useState('');
+  const [outputDir, setOutputDir] = useState('');
+  const [downloadWholeCollection, setDownloadWholeCollection] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const lastInspectedUrlRef = useRef(initialUrl);
 
   const entryKey = (e: PlaylistEntry) => `entry-${e.index}-${e.id}`;
   const trackKey = (t: SpotifyTrackItem, fallbackIdx: number) =>
@@ -120,9 +130,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     if (patch.metadata !== undefined) {
       setMetadata(patch.metadata);
       if (patch.metadata) {
-        if (patch.metadata.extractor === 'spotdl') {
-          setSelectedTab('audio');
-        }
+        const detectedKind = detectInspectedMediaKind(
+          patch.metadata,
+          patch.metadata.url || lastInspectedUrlRef.current
+        );
+        setSelectedTab(detectedKind);
+        setDownloadWholeCollection(true);
         if (patch.metadata.entries && patch.metadata.entries.length > 0) {
           setOrderedEntries([...patch.metadata.entries]);
           setOrderedSpotifyTracks([]);
@@ -155,6 +168,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   };
 
   const inspect = async (targetUrl: string) => {
+    lastInspectedUrlRef.current = targetUrl;
     await inspectionControllerRef.current.startInspection(targetUrl, {
       inspectUrl: (u, opts) => api.inspectUrl(u, { ...opts, includePlaylist: includePlaylistMode }),
       cancelInspection: (id) => api.cancelInspection(id),
@@ -213,14 +227,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         setSelectedAudioBitrate(settings.default_audio_bitrate || '320k');
         if (settings.default_audio_sample_rate) setSelectedSampleRate(settings.default_audio_sample_rate);
         if (settings.default_audio_bit_depth) setSelectedBitDepth(settings.default_audio_bit_depth);
+        setOutputDir(settings.download_dir || '');
       }
       if (initialUrl) {
         setMode('single');
         setUrl(initialUrl);
         setCustomFilename('');
-        if (isSpotifyUrl(initialUrl)) {
-          setSelectedTab('audio');
-        }
+        setSelectedTab(detectInspectedMediaKind(null, initialUrl));
         inspect(initialUrl);
       }
     } else {
@@ -241,6 +254,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     () => buildCuratedVideoOptions(metadata?.formats || []),
     [metadata?.formats]
   );
+  const videoCodecSummary = useMemo(
+    () => summarizeVideoOptionCodecs(metadata?.formats || [], selectedFormatId),
+    [metadata?.formats, selectedFormatId]
+  );
 
   const duplicateTask = useMemo(() => {
     const trimmed = url.trim();
@@ -259,6 +276,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   const cookieBadge = describeCookieStatus(cookieStatus);
   const isSpotifyContent = metadata?.extractor === 'spotdl' || isSpotifyUrl(url.trim());
+  const detectedMediaKind = detectInspectedMediaKind(metadata, url);
+  const routingLabel = formatMediaRoutingLabel(metadata, selectedTab, url);
 
   const handlePasteClipboard = async () => {
     try {
@@ -266,10 +285,22 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       if (text) {
         const cleaned = text.trim();
         setUrl(cleaned);
+        setSelectedTab(detectInspectedMediaKind(null, cleaned));
         inspect(cleaned);
       }
     } catch {
       // ignore
+    }
+  };
+
+  const handleBrowseOutputDir = async () => {
+    try {
+      const chosen = await api.selectDirectory();
+      if (chosen) {
+        setOutputDir(chosen);
+      }
+    } catch {
+      // ignore if browser context lacks native folder picker
     }
   };
 
@@ -308,6 +339,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   const handleSubmit = async (quickDownload = false) => {
     const isLossless = selectedAudioFormat === 'flac' || selectedAudioFormat === 'wav';
+    const resolvedOutputDir = outputDir.trim() || settings?.download_dir || undefined;
 
     if (mode === 'batch') {
       if (batchValidation.valid.length === 0) return;
@@ -316,7 +348,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       try {
         for (const line of batchValidation.valid) {
           const lineIsSpotify = isSpotifyUrl(line);
-          const isAudioOnly = selectedTab === 'audio' || lineIsSpotify;
+          const isAudioOnly =
+            selectedTab === 'audio' ||
+            lineIsSpotify ||
+            detectInspectedMediaKind(null, line) === 'audio';
           const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
           await api.createTask({
             url: line,
@@ -330,6 +365,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
             audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
             is_lossy_source: isLikelyLossySource(line),
+            output_path: resolvedOutputDir,
             priority,
           });
         }
@@ -368,7 +404,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       const resolvedArtwork = metadata?.album_artwork || metadata?.thumbnail;
 
       // Playlist / Album selection + custom ordering for yt-dlp
-      if (orderedEntries.length > 0 && !quickDownload) {
+      if (orderedEntries.length > 0 && downloadWholeCollection && !quickDownload) {
         const pickedEntries = orderedEntries.filter(
           (e) => selectedPlaylistKeys[entryKey(e)] !== false
         );
@@ -393,6 +429,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
           audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
           is_lossy_source: isSourceLossy,
+          output_path: resolvedOutputDir,
           custom_filename: customFilename.trim() || undefined,
           playlist_mode: 'playlist',
           selected_items: pickedEntries.map((e) => String(e.index)),
@@ -405,7 +442,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
 
       // Spotify album / playlist track selection + custom ordering for spotDL
-      if (orderedSpotifyTracks.length > 0 && !quickDownload) {
+      if (orderedSpotifyTracks.length > 0 && downloadWholeCollection && !quickDownload) {
         const pickedTracks = orderedSpotifyTracks.filter(
           (t, idx) => selectedPlaylistKeys[trackKey(t, idx)] !== false
         );
@@ -436,6 +473,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           audio_sample_rate: isLossless ? selectedSampleRate : undefined,
           audio_bit_depth: isLossless ? selectedBitDepth : undefined,
           is_lossy_source: true,
+          output_path: resolvedOutputDir,
           custom_filename: customFilename.trim() || undefined,
           playlist_mode: trackUrls.length === 1 && !metadata?.is_playlist ? 'single' : 'playlist',
           selected_items: trackUrls.length > 0 ? trackUrls : undefined,
@@ -465,8 +503,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         audio_sample_rate: isAudioOnly && isLossless ? selectedSampleRate : undefined,
         audio_bit_depth: isAudioOnly && isLossless ? selectedBitDepth : undefined,
         is_lossy_source: isSourceLossy,
+        output_path: resolvedOutputDir,
         custom_filename: customFilename.trim() || undefined,
-        playlist_mode: includePlaylistMode && metadata?.is_playlist ? 'playlist' : 'single',
+        playlist_mode:
+          downloadWholeCollection && includePlaylistMode && metadata?.is_playlist
+            ? 'playlist'
+            : 'single',
         priority,
       });
 
@@ -563,6 +605,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                       onChange={(e) => {
                         const nextVal = e.target.value;
                         setUrl(nextVal);
+                        setSelectedTab(detectInspectedMediaKind(null, nextVal));
                         if (isExtracting) handleCancelInspection();
                         if (extractError) {
                           setExtractError(null);
@@ -639,6 +682,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     type="button"
                     onClick={() => {
                       setUrl(sample.url);
+                      setSelectedTab(detectInspectedMediaKind(null, sample.url));
                       inspect(sample.url);
                     }}
                     className="text-[var(--vanta-accent)] hover:underline font-medium"
@@ -911,38 +955,87 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     alt={metadata.title}
                     referrerPolicy="no-referrer"
                     className={`${
-                      metadata.extractor === 'spotdl' ? 'w-16 h-16' : 'w-24 h-16'
+                      detectedMediaKind === 'audio' ? 'w-16 h-16' : 'w-24 h-16'
                     } rounded-md object-cover bg-[var(--vanta-surface)] border border-[var(--vanta-border)] shrink-0`}
                   />
                 ) : (
                   <div className="w-16 h-16 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)] flex items-center justify-center shrink-0 text-[var(--vanta-muted)]">
-                    {metadata.extractor === 'spotdl' ? (
+                    {detectedMediaKind === 'audio' ? (
                       <Disc className="w-6 h-6 text-emerald-600 dark:text-[#3fb950]" />
                     ) : (
-                      <Video className="w-6 h-6" />
+                      <Video className="w-6 h-6 text-[var(--vanta-accent)]" />
                     )}
                   </div>
                 )}
 
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-semibold text-[var(--vanta-text)] truncate">
-                    {metadata.title}
-                  </h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-[var(--vanta-text)] truncate">
+                      {metadata.title}
+                    </h3>
+                    {metadata.explicit && (
+                      <span className="px-1.5 py-0.5 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[10px] font-mono text-[var(--vanta-muted)] shrink-0">
+                        Explicit
+                      </span>
+                    )}
+                  </div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-[var(--vanta-muted)] mt-1 tabular-nums">
-                    {(metadata.artists?.length ? metadata.artists.join(', ') : metadata.uploader) && (
+                    <span
+                      className={`font-semibold ${
+                        detectedMediaKind === 'audio'
+                          ? 'text-emerald-700 dark:text-[#3fb950]'
+                          : 'text-[var(--vanta-accent)]'
+                      }`}
+                    >
+                      {routingLabel}
+                    </span>
+                    {(metadata.artists?.length ? metadata.artists.join(', ') : metadata.owner || metadata.uploader) && (
                       <span className="text-[var(--vanta-text-secondary)]">
-                        {metadata.artists?.length ? metadata.artists.join(', ') : metadata.uploader}
+                        · {metadata.artists?.length ? metadata.artists.join(', ') : metadata.owner || metadata.uploader}
                       </span>
                     )}
                     {metadata.album && <span>· {metadata.album}</span>}
+                    {metadata.release_date && <span>· {metadata.release_date}</span>}
                     {metadata.duration_string && <span>· {metadata.duration_string}</span>}
-                    <span>· {metadata.extractor}</span>
+                    {(metadata.total_tracks || metadata.playlist_count) && (
+                      <span>· {metadata.total_tracks || metadata.playlist_count} tracks</span>
+                    )}
                   </div>
                 </div>
               </div>
 
+              {(orderedEntries.length > 1 || orderedSpotifyTracks.length > 1) && (
+                <div className="pt-2 border-t border-[var(--vanta-border)] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="text-[var(--vanta-muted)]">Collection handling:</span>
+                  <div className="flex items-center gap-1 p-0.5 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)]">
+                    <button
+                      type="button"
+                      onClick={() => setDownloadWholeCollection(true)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                        downloadWholeCollection
+                          ? 'bg-[var(--vanta-accent)] text-white'
+                          : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
+                      }`}
+                    >
+                      Playlist / Album
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDownloadWholeCollection(false)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                        !downloadWholeCollection
+                          ? 'bg-[var(--vanta-accent)] text-white'
+                          : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]'
+                      }`}
+                    >
+                      Single Item Only
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* yt-dlp Playlist Selection & Ordering */}
-              {orderedEntries.length > 0 && (
+              {orderedEntries.length > 0 && downloadWholeCollection && (
                 <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-medium text-[var(--vanta-text)] flex items-center gap-1.5">
@@ -1027,7 +1120,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               )}
 
               {/* Spotify Tracklist Selection & Ordering */}
-              {orderedSpotifyTracks.length > 0 && (
+              {orderedSpotifyTracks.length > 0 && downloadWholeCollection && (
                 <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-medium text-[var(--vanta-text)] flex items-center gap-1.5">
@@ -1128,10 +1221,15 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
           {/* Output Workflow */}
           <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-[var(--vanta-text-secondary)]">
-                Output Workflow
-              </span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <span className="text-xs font-medium text-[var(--vanta-text-secondary)] block">
+                  Download Format &amp; Quality
+                </span>
+                <span className="text-[11px] font-mono text-[var(--vanta-muted)]">
+                  Engine routing: {routingLabel}
+                </span>
+              </div>
               <div className="flex items-center gap-1 p-0.5 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
                 {!isSpotifyContent && (
                   <button
@@ -1163,38 +1261,47 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
 
             {selectedTab === 'video' && !isSpotifyContent ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                    Video Quality (with Audio Mux)
-                  </label>
-                  <select
-                    value={selectedFormatId}
-                    onChange={(e) => setSelectedFormatId(e.target.value)}
-                    className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                  >
-                    {curatedVideoOptions.map((opt) => (
-                      <option key={opt.id} value={opt.formatSelector}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                      Video Quality (with Audio Mux)
+                    </label>
+                    <select
+                      value={selectedFormatId}
+                      onChange={(e) => setSelectedFormatId(e.target.value)}
+                      className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                    >
+                      {curatedVideoOptions.map((opt) => (
+                        <option key={opt.id} value={opt.formatSelector}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <div className="space-y-1">
-                  <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                    Container Format
-                  </label>
-                  <select
-                    value={selectedContainer}
-                    onChange={(e) => setSelectedContainer(e.target.value)}
-                    className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-                  >
-                    <option value="mp4">MP4 (Universal)</option>
-                    <option value="mkv">MKV (Matroska Subtitles/Streams)</option>
-                    <option value="webm">WebM (VP9 / AV1)</option>
-                  </select>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                      Container Format
+                    </label>
+                    <select
+                      value={selectedContainer}
+                      onChange={(e) => setSelectedContainer(e.target.value)}
+                      className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                    >
+                      <option value="mp4">MP4 (Universal)</option>
+                      <option value="mkv">MKV (Matroska Streams)</option>
+                      <option value="webm">WebM (VP9 / AV1)</option>
+                    </select>
+                  </div>
                 </div>
+                {videoCodecSummary && (
+                  <p className="text-[11px] font-mono text-[var(--vanta-muted)]">
+                    Detected streams: {videoCodecSummary.resolution} · Video {videoCodecSummary.vcodec} · Audio{' '}
+                    {videoCodecSummary.acodec}
+                    {videoCodecSummary.fps ? ` · ${Math.round(videoCodecSummary.fps)} fps` : ''}
+                  </p>
+                )}
               </div>
             ) : (
               <div className="space-y-3">
@@ -1281,34 +1388,61 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             )}
           </div>
 
-          {/* Filename & Priority Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--vanta-border)]">
-            {mode === 'single' && (
+          {/* Filename, Priority & Output Directory */}
+          <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {mode === 'single' && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                    Custom Filename (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={customFilename}
+                    onChange={(e) => setCustomFilename(e.target.value)}
+                    placeholder="Auto from title"
+                    className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                  />
+                </div>
+              )}
               <div className="space-y-1">
-                <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
-                  Custom Filename (Optional)
-                </label>
+                <label className="text-[11px] font-medium text-[var(--vanta-muted)]">Priority</label>
+                <select
+                  value={priority}
+                  onChange={(e) => setPriority(e.target.value as TaskPriority)}
+                  className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                >
+                  <option value="low">Low</option>
+                  <option value="normal">Normal</option>
+                  <option value="high">High</option>
+                  <option value="highest">Highest</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-[var(--vanta-muted)]">
+                Output Directory
+              </label>
+              <div className="flex items-center gap-2">
                 <input
                   type="text"
-                  value={customFilename}
-                  onChange={(e) => setCustomFilename(e.target.value)}
-                  placeholder="Auto from title"
-                  className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs p-2 text-[var(--vanta-text)]"
+                  value={outputDir}
+                  onChange={(e) => setOutputDir(e.target.value)}
+                  placeholder={settings?.download_dir || 'Default downloads folder'}
+                  className="flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs p-2 font-mono text-[var(--vanta-text)]"
                 />
+                {api.isTauri() && (
+                  <button
+                    type="button"
+                    onClick={handleBrowseOutputDir}
+                    className="px-2.5 py-2 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] rounded-lg text-xs text-[var(--vanta-text)] inline-flex items-center gap-1.5 shrink-0"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>Browse</span>
+                  </button>
+                )}
               </div>
-            )}
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-[var(--vanta-muted)]">Priority</label>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value as TaskPriority)}
-                className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg text-xs p-2 text-[var(--vanta-text)]"
-              >
-                <option value="low">Low</option>
-                <option value="normal">Normal</option>
-                <option value="high">High</option>
-                <option value="highest">Highest</option>
-              </select>
             </div>
           </div>
         </div>
@@ -1316,7 +1450,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         {/* Footer */}
         <div className="px-4 sm:px-5 py-3 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] flex items-center justify-between gap-3">
           <span className="text-[11px] font-mono text-[var(--vanta-muted)] truncate">
-            Dest: {settings?.download_dir || 'Default downloads folder'}
+            {routingLabel} · {outputDir || settings?.download_dir || 'Default folder'}
           </span>
           <div className="flex items-center gap-2 shrink-0">
             <button

@@ -119,7 +119,7 @@ pub struct TaskLogEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SchedulerSettings {
     pub enabled: bool,
@@ -570,25 +570,6 @@ pub struct AppSettings {
     pub user_agent: Option<String>,
 }
 
-impl Default for SchedulerSettings {
-    fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled
-            && self.start_time == other.start_time
-            && self.stop_time == other.stop_time
-            && self.pause_on_stop == other.pause_on_stop
-            && self.days == other.days
-    }
-}
-
-impl PartialEq for SchedulerSettings {
-    fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled
-            && self.start_time == other.start_time
-            && self.stop_time == other.stop_time
-            && self.pause_on_stop == other.pause_on_stop
-            && self.days == other.days
-    }
-}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -780,5 +761,77 @@ mod tests {
         assert_eq!(update_json["currentVersion"], "2026.01.01");
         assert_eq!(update_json["latestVersion"], "2026.01.02");
         assert_eq!(update_json["updateAvailable"], true);
+    }
+
+    #[test]
+    fn test_scheduler_settings_defaults() {
+        let sched = SchedulerSettings::default();
+        assert!(!sched.enabled);
+        assert_eq!(sched.start_time, "01:00");
+        assert_eq!(sched.stop_time, "06:00");
+        assert!(sched.pause_on_stop);
+        assert_eq!(sched.days, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_scheduler_settings_json_roundtrip_and_partial_deserialization() {
+        let custom = SchedulerSettings {
+            enabled: true,
+            start_time: "22:15".to_string(),
+            stop_time: "05:30".to_string(),
+            pause_on_stop: false,
+            days: vec![1, 2, 3, 4, 5],
+        };
+        let encoded = serde_json::to_string(&custom).unwrap();
+        let decoded: SchedulerSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, custom);
+
+        // Partial JSON fills omitted fields from SchedulerSettings::default()
+        let partial: SchedulerSettings =
+            serde_json::from_str(r#"{"enabled": true, "start_time": "03:00"}"#).unwrap();
+        assert!(partial.enabled);
+        assert_eq!(partial.start_time, "03:00");
+        assert_eq!(partial.stop_time, "06:00");
+        assert!(partial.pause_on_stop);
+        assert_eq!(partial.days, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_scheduler_settings_equality_and_inequality() {
+        let a = SchedulerSettings::default();
+        let b = SchedulerSettings::default();
+        assert_eq!(a, b);
+
+        let diff_enabled = SchedulerSettings {
+            enabled: true,
+            ..SchedulerSettings::default()
+        };
+        assert_ne!(a, diff_enabled);
+
+        let diff_days = SchedulerSettings {
+            days: vec![1, 3, 5],
+            ..SchedulerSettings::default()
+        };
+        assert_ne!(a, diff_days);
+    }
+
+    #[test]
+    fn test_app_settings_scheduler_fallback_and_preservation() {
+        // Legacy JSON without a scheduler block defaults cleanly
+        let legacy: AppSettings = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
+        assert_eq!(legacy.scheduler, SchedulerSettings::default());
+
+        // Custom scheduler embedded inside AppSettings survives roundtrip
+        let mut custom = AppSettings::default();
+        custom.scheduler = SchedulerSettings {
+            enabled: true,
+            start_time: "00:30".to_string(),
+            stop_time: "04:45".to_string(),
+            pause_on_stop: false,
+            days: vec![0, 6],
+        };
+        let serialized = serde_json::to_string(&custom).unwrap();
+        let roundtripped: AppSettings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtripped.scheduler, custom.scheduler);
     }
 }

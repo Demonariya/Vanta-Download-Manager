@@ -354,11 +354,15 @@ describe('SpotifyMetadataService networking, caching, deduplication, and error s
 describe('Regression: zero fabricated Spotify placeholders remain in UI or engines', () => {
   it('never generates placeholder titles, artists, favicons, or fixed counts', () => {
     const repoRoot = process.cwd();
+    assert.equal(
+      fs.existsSync(path.join(repoRoot, 'src/components/MusicLibraryView.tsx')),
+      false,
+      'MusicLibraryView.tsx should not exist in unified media workflow'
+    );
     const filesToCheck = [
       'server/engineManager.ts',
       'server/spotify.ts',
       'src/components/NewDownloadModal.tsx',
-      'src/components/MusicLibraryView.tsx',
       'src/components/DownloadCenterView.tsx',
       'src/components/DownloadDetailsDrawer.tsx',
       'src/utils/spotify.ts',

@@ -1,5 +1,6 @@
-import { FormatOption } from '../types';
+import { FormatOption, MediaMetadata } from '../types';
 import { formatBytes } from './engine-parser';
+import { isSpotifyUrl } from './spotify';
 
 export interface CuratedVideoOption {
   id: string;
@@ -10,6 +11,108 @@ export interface CuratedVideoOption {
   hasAudio: boolean;
   needsMux: boolean;
   filesize?: number;
+}
+
+export interface VideoCodecSummary {
+  resolution: string;
+  vcodec: string;
+  acodec: string;
+  fps?: number;
+  ext?: string;
+}
+
+const AUDIO_FILE_EXT_RE = /\.(mp3|m4a|flac|wav|opus|ogg|aac)(?:$|[?#])/i;
+const AUDIO_EXT_SET = new Set(['mp3', 'm4a', 'flac', 'wav', 'opus', 'ogg', 'aac']);
+
+/**
+ * Automatically determines whether an inspected URL/metadata payload represents
+ * music/audio or video so the unified New Download UI switches controls dynamically.
+ */
+export function detectInspectedMediaKind(
+  metadata: MediaMetadata | null,
+  url: string
+): 'audio' | 'video' {
+  const trimmedUrl = (url || '').trim();
+  if (metadata?.extractor === 'spotdl' || isSpotifyUrl(trimmedUrl)) {
+    return 'audio';
+  }
+
+  const formats = metadata?.formats || [];
+  if (formats.length > 0) {
+    const hasVideoStream = formats.some(
+      (f) =>
+        !f.is_audio_only &&
+        ((Boolean(f.vcodec) && f.vcodec !== 'none') || (f.height || 0) > 0)
+    );
+    const hasAudioStream = formats.some(
+      (f) =>
+        Boolean(f.is_audio_only) ||
+        (Boolean(f.acodec) && f.acodec !== 'none') ||
+        AUDIO_EXT_SET.has((f.ext || '').toLowerCase())
+    );
+    if (!hasVideoStream && hasAudioStream) {
+      return 'audio';
+    }
+  }
+
+  if (AUDIO_FILE_EXT_RE.test(trimmedUrl)) {
+    return 'audio';
+  }
+
+  return 'video';
+}
+
+export function formatMediaRoutingLabel(
+  metadata: MediaMetadata | null,
+  mediaKind: 'audio' | 'video',
+  url: string
+): string {
+  const isSpotify = metadata?.extractor === 'spotdl' || isSpotifyUrl((url || '').trim());
+  if (isSpotify) {
+    const kind = metadata?.content_type
+      ? metadata.content_type.charAt(0).toUpperCase() + metadata.content_type.slice(1)
+      : 'Music';
+    return `Spotify ${kind} · spotDL`;
+  }
+  return mediaKind === 'audio' ? 'Audio · yt-dlp' : 'Video · yt-dlp';
+}
+
+export function summarizeVideoOptionCodecs(
+  formats: FormatOption[] = [],
+  selectedFormatId: string
+): VideoCodecSummary | null {
+  const videoStreams = formats.filter(
+    (f) => !f.is_audio_only && f.vcodec && f.vcodec !== 'none'
+  );
+  if (videoStreams.length === 0) return null;
+
+  const baseId = (selectedFormatId || '').split('+')[0].trim();
+  let matched =
+    videoStreams.find((f) => f.format_id === baseId) ||
+    [...videoStreams].sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+  if (!matched) return null;
+
+  const bestAudio = formats
+    .filter((f) => f.acodec && f.acodec !== 'none')
+    .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))[0];
+
+  const vcodec = (matched.vcodec || 'auto').split('.')[0].toUpperCase();
+  const acodecRaw =
+    matched.acodec && matched.acodec !== 'none'
+      ? matched.acodec
+      : bestAudio?.acodec || 'auto';
+  const acodec = acodecRaw.split('.')[0].toUpperCase();
+  const resolution =
+    matched.resolution || (matched.height ? `${matched.height}p` : 'Adaptive');
+
+  return {
+    resolution,
+    vcodec,
+    acodec,
+    fps: matched.fps,
+    ext: matched.ext?.toUpperCase(),
+  };
 }
 
 const STANDARD_PRESETS: CuratedVideoOption[] = [

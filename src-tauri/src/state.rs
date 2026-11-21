@@ -1101,4 +1101,32 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_scheduler_settings_persistence_and_reset() {
+        let dir = make_temp_state_dir("scheduler");
+        let state = AppState::init_in_dir(dir.clone()).unwrap();
+
+        let mut settings = state.get_settings();
+        assert_eq!(settings.scheduler, SchedulerSettings::default());
+
+        let custom_sched = SchedulerSettings {
+            enabled: true,
+            start_time: "02:30".to_string(),
+            stop_time: "05:45".to_string(),
+            pause_on_stop: false,
+            days: vec![1, 3, 5],
+        };
+        settings.scheduler = custom_sched.clone();
+        let saved = state.save_settings(&settings).unwrap();
+        assert_eq!(saved.scheduler, custom_sched);
+
+        let reloaded = AppState::init_in_dir(dir.clone()).unwrap();
+        assert_eq!(reloaded.get_settings().scheduler, custom_sched);
+
+        let reset = reloaded.reset_settings().unwrap();
+        assert_eq!(reset.scheduler, SchedulerSettings::default());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

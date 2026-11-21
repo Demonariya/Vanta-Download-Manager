@@ -20,7 +20,6 @@ import { TopBar } from './components/TopBar';
 import { DownloadCenterView, QueueScopeFilter } from './components/DownloadCenterView';
 import { DownloadDetailsDrawer } from './components/DownloadDetailsDrawer';
 import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
-import { MusicLibraryView } from './components/MusicLibraryView';
 import { HistoryView } from './components/HistoryView';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { SettingsView } from './components/SettingsView';
@@ -342,6 +341,10 @@ export default function App() {
         <Sidebar
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          onOpenNewDownload={() => {
+            setInitialInspectUrl('');
+            setIsNewDownloadOpen(true);
+          }}
           engineStatus={engineStatus}
           activeCount={activeCount}
           isCollapsed={isSidebarCollapsed}
@@ -352,7 +355,6 @@ export default function App() {
 
         <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
           <TopBar
-            onQuickInspect={handleQuickInspect}
             onOpenNewDownload={() => {
               setInitialInspectUrl('');
               setIsNewDownloadOpen(true);
@@ -409,17 +411,6 @@ export default function App() {
                   isInstallingEngines={isInstallingEngines}
                   engineInstallError={engineInstallError}
                   installProgress={installProgress}
-                />
-              )}
-
-              {activeTab === 'music' && (
-                <MusicLibraryView
-                  tasks={tasks}
-                  onOpenNewDownload={(url) => {
-                    setInitialInspectUrl(url || '');
-                    setIsNewDownloadOpen(true);
-                  }}
-                  onSelectTask={(t) => setSelectedTaskId(t.id)}
                 />
               )}
 

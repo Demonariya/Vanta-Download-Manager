@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   ListVideo,
-  Music2,
+  PlusCircle,
   History,
   Terminal,
   Settings,
@@ -15,7 +15,6 @@ import { EngineStatusMap } from '../types';
 
 export type ActiveTab =
   | 'downloads'
-  | 'music'
   | 'history'
   | 'diagnostics'
   | 'settings';
@@ -23,6 +22,7 @@ export type ActiveTab =
 interface SidebarProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
+  onOpenNewDownload: () => void;
   engineStatus: EngineStatusMap | null;
   activeCount: number;
   isCollapsed: boolean;
@@ -34,6 +34,7 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   setActiveTab,
+  onOpenNewDownload,
   engineStatus,
   activeCount,
   isCollapsed,
@@ -42,20 +43,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setIsMobileOpen,
 }) => {
   const navItems: Array<{
-    id: ActiveTab;
+    id: ActiveTab | 'new-download';
     label: string;
     icon: React.ComponentType<{ className?: string }>;
     count?: number;
+    isAction?: boolean;
   }> = [
     {
       id: 'downloads',
-      label: 'Downloads',
+      label: 'Download Center',
       icon: ListVideo,
       count: activeCount > 0 ? activeCount : undefined,
     },
-    { id: 'music', label: 'Music Workflow', icon: Music2 },
-    { id: 'history', label: 'History', icon: History },
-    { id: 'diagnostics', label: 'Diagnostics & Logs', icon: Terminal },
+    {
+      id: 'new-download',
+      label: 'New Download',
+      icon: PlusCircle,
+      isAction: true,
+    },
+    { id: 'history', label: 'Queue & History', icon: History },
+    { id: 'diagnostics', label: 'Engine Management', icon: Terminal },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
@@ -64,7 +71,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     engineStatus.ytdlp.available &&
     engineStatus.ffmpeg.available;
 
-  const handleNavClick = (id: ActiveTab) => {
+  const handleNavClick = (id: ActiveTab | 'new-download') => {
+    if (id === 'new-download') {
+      setIsMobileOpen(false);
+      onOpenNewDownload();
+      return;
+    }
     setActiveTab(id);
     setIsMobileOpen(false);
   };
@@ -131,7 +143,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <nav className="px-2.5 py-3 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id;
+            const isActive = !item.isAction && activeTab === item.id;
             return (
               <button
                 key={item.id}
@@ -144,10 +156,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 } py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isActive
                     ? 'bg-[var(--vanta-accent)]/12 text-[var(--vanta-accent)] font-semibold'
+                    : item.isAction
+                    ? 'text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] border border-dashed border-[var(--vanta-border)]'
                     : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'
                 }`}
               >
-                <Icon className="w-4 h-4 shrink-0" />
+                <Icon className={`w-4 h-4 shrink-0 ${item.isAction ? 'text-[var(--vanta-accent)]' : ''}`} />
                 {(!isCollapsed || isDrawer) && (
                   <span className="truncate flex-1 text-left">{item.label}</span>
                 )}

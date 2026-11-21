@@ -1,12 +1,10 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   Search,
-  ClipboardPaste,
   Pause,
   Play,
   Bell,
   Plus,
-  ArrowRight,
   Menu,
   Sun,
   Moon,
@@ -16,7 +14,6 @@ import {
 import { ThemeMode } from '../types';
 
 interface TopBarProps {
-  onQuickInspect: (url: string) => void;
   onOpenNewDownload: () => void;
   onOpenNotifications: () => void;
   unreadNotificationsCount: number;
@@ -33,7 +30,6 @@ interface TopBarProps {
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
-  onQuickInspect,
   onOpenNewDownload,
   onOpenNotifications,
   unreadNotificationsCount,
@@ -47,32 +43,6 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleFloatingDock,
   onToggleMobileMenu,
 }) => {
-  const [urlInput, setUrlInput] = useState('');
-
-  const handlePasteFromClipboard = async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (
-        text &&
-        (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('spotify:'))
-      ) {
-        const cleaned = text.trim();
-        setUrlInput(cleaned);
-        onQuickInspect(cleaned);
-      }
-    } catch {
-      onOpenNewDownload();
-    }
-  };
-
-  const handleUrlSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (urlInput.trim()) {
-      onQuickInspect(urlInput.trim());
-      setUrlInput('');
-    }
-  };
-
   const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
 
   return (
@@ -88,43 +58,12 @@ export const TopBar: React.FC<TopBarProps> = ({
         </button>
       )}
 
-      {/* Zone 1: Quick URL Input */}
-      <form onSubmit={handleUrlSubmit} className="flex-1 max-w-lg flex items-center gap-1.5 min-w-0">
-        <div className="relative flex-1 min-w-0">
-          <input
-            type="text"
-            placeholder="Paste video or music URL (YouTube, Spotify, etc.)..."
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs py-1.5 pl-3 pr-8 text-[var(--vanta-text)] placeholder-[var(--vanta-muted)] transition-colors truncate"
-          />
-          <button
-            type="button"
-            onClick={handlePasteFromClipboard}
-            title="Paste URL from clipboard"
-            aria-label="Paste URL from clipboard"
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--vanta-muted)] hover:text-[var(--vanta-accent)] transition-colors"
-          >
-            <ClipboardPaste className="w-3.5 h-3.5" />
-          </button>
-        </div>
-        <button
-          type="submit"
-          disabled={!urlInput.trim()}
-          aria-label="Inspect URL"
-          className="px-2.5 sm:px-3 py-1.5 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] disabled:opacity-40 border border-[var(--vanta-border)] text-[var(--vanta-text)] rounded-lg text-xs font-medium flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
-        >
-          <span className="hidden sm:inline">Inspect</span>
-          <ArrowRight className="w-3.5 h-3.5" />
-        </button>
-      </form>
-
-      {/* Zone 2: Search Filter */}
-      <div className="relative w-44 xl:w-52 hidden lg:block shrink-0">
+      {/* Queue Search Filter */}
+      <div className="relative flex-1 max-w-md min-w-0">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--vanta-muted)]" />
         <input
           type="text"
-          placeholder="Filter queue..."
+          placeholder="Filter queue by title, artist, album, or URL..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-xs py-1.5 pl-8 pr-3 text-[var(--vanta-text)] placeholder-[var(--vanta-muted)] transition-colors"

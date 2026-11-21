@@ -177,11 +177,7 @@ function Fail-Build {
     $logSavedPath = $null
     if ($CapturedLines.Count -gt 0 -and $script:RepoRoot) {
         try {
-            $logTarget = if ($script:DistDir -and (Test-Path $script:DistDir)) {
-                Join-Path $script:DistDir 'last-build-failure.log'
-            } else {
-                Join-Path $script:RepoRoot 'last-build-failure.log'
-            }
+            $logTarget = Join-Path $script:RepoRoot 'last-build-failure.log'
             @(
                 "VANTA Build Failure Log"
                 "Timestamp : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC'))"
@@ -446,39 +442,91 @@ function Resolve-NpxExecutable {
     return $null
 }
 
-function Test-LockfileConsistency {
+function ConvertFrom-JsonDictionary {
     param(
-        [string]$LockfilePath
+        [Parameter(Mandatory = $true)]
+        [string]$JsonText
     )
 
-    if (-not (Test-Path $LockfilePath)) {
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        return (ConvertFrom-Json -InputObject $JsonText -AsHashtable)
+    }
+
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $serializer.MaxJsonLength = [int]::MaxValue
+    return $serializer.DeserializeObject($JsonText)
+}
+
+function Test-LockfileConsistency {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LockfilePath,
+        [string]$PackageJsonPath = ''
+    )
+
+    if (-not (Test-Path -Path $LockfilePath -PathType Leaf)) {
         return [PSCustomObject]@{
             Valid   = $false
-            Reason  = "Missing package-lock.json."
+            Reason  = "Missing package-lock.json at '$LockfilePath'."
             Missing = @('package-lock.json')
         }
     }
 
-    try {
-        $lock = Get-Content -Path $LockfilePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    } catch {
+    $rawLock = Get-Content -Path $LockfilePath -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($rawLock)) {
         return [PSCustomObject]@{
             Valid   = $false
-            Reason  = "package-lock.json is not valid JSON: $_"
+            Reason  = "package-lock.json is empty."
             Missing = @('invalid-json')
         }
     }
 
-    if ([int]$lock.lockfileVersion -lt 3) {
+    try {
+        $lock = ConvertFrom-JsonDictionary -JsonText $rawLock
+    } catch {
         return [PSCustomObject]@{
             Valid   = $false
-            Reason  = "package-lock.json uses lockfileVersion $($lock.lockfileVersion); expected lockfileVersion 3."
+            Reason  = "package-lock.json is not valid JSON: $($_.Exception.Message)"
+            Missing = @('invalid-json')
+        }
+    }
+
+    if (-not ($lock -is [System.Collections.IDictionary])) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json root must be a JSON object."
+            Missing = @('invalid-json')
+        }
+    }
+
+    if (-not $lock.Contains('lockfileVersion') -or $null -eq $lock['lockfileVersion']) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json is missing 'lockfileVersion'."
             Missing = @('lockfileVersion-3')
         }
     }
 
-    $packagesProp = $lock.packages
-    if (-not $packagesProp) {
+    try {
+        $lockVersion = [int]$lock['lockfileVersion']
+    } catch {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json has non-numeric lockfileVersion '$($lock['lockfileVersion'])'."
+            Missing = @('lockfileVersion-3')
+        }
+    }
+
+    if ($lockVersion -lt 3) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json uses lockfileVersion $lockVersion; expected lockfileVersion 3."
+            Missing = @('lockfileVersion-3')
+        }
+    }
+
+    if (-not $lock.Contains('packages') -or -not ($lock['packages'] -is [System.Collections.IDictionary])) {
         return [PSCustomObject]@{
             Valid   = $false
             Reason  = "package-lock.json is missing the 'packages' dependency map."
@@ -486,38 +534,91 @@ function Test-LockfileConsistency {
         }
     }
 
-    $expectedKeys = @(
-        'node_modules/@tailwindcss/oxide-win32-x64-msvc',
-        'node_modules/@tailwindcss/oxide-win32-arm64-msvc',
-        'node_modules/@tailwindcss/oxide-darwin-arm64',
-        'node_modules/@tauri-apps/cli-win32-x64-msvc',
-        'node_modules/@tauri-apps/cli-win32-arm64-msvc',
-        'node_modules/@tauri-apps/cli-win32-ia32-msvc',
-        'node_modules/@rolldown/binding-win32-x64-msvc',
-        'node_modules/@rolldown/binding-win32-arm64-msvc',
-        'node_modules/@typescript/typescript-win32-x64',
-        'node_modules/lightningcss-win32-x64-msvc',
-        'node_modules/lightningcss-win32-arm64-msvc'
-    )
+    $packagesMap = $lock['packages']
+    if (-not $packagesMap.Contains('') -or -not ($packagesMap[''] -is [System.Collections.IDictionary])) {
+        return [PSCustomObject]@{
+            Valid   = $false
+            Reason  = "package-lock.json is missing root package entry (`"`") inside 'packages'."
+            Missing = @('root-package')
+        }
+    }
 
-    $missing = @()
-    foreach ($key in $expectedKeys) {
-        if (-not ($packagesProp.PSObject.Properties.Name -contains $key)) {
-            $missing += $key.Replace('node_modules/', '')
+    $missing = New-Object System.Collections.Generic.List[string]
+    $rootEntry = $packagesMap['']
+
+    # Cross-check against package.json if provided or co-located with package-lock.json
+    $resolvedPkgJson = if (-not [string]::IsNullOrWhiteSpace($PackageJsonPath)) {
+        $PackageJsonPath
+    } else {
+        Join-Path (Split-Path -Path $LockfilePath -Parent) 'package.json'
+    }
+
+    if ($resolvedPkgJson -and (Test-Path -Path $resolvedPkgJson -PathType Leaf)) {
+        $rawPkg = Get-Content -Path $resolvedPkgJson -Raw -Encoding UTF8
+        try {
+            $pkgDoc = ConvertFrom-JsonDictionary -JsonText $rawPkg
+        } catch {
+            return [PSCustomObject]@{
+                Valid   = $false
+                Reason  = "package.json is not valid JSON: $($_.Exception.Message)"
+                Missing = @('invalid-package-json')
+            }
+        }
+
+        if ($pkgDoc -is [System.Collections.IDictionary]) {
+            foreach ($section in @('dependencies', 'devDependencies', 'optionalDependencies')) {
+                if ($pkgDoc.Contains($section) -and ($pkgDoc[$section] -is [System.Collections.IDictionary])) {
+                    $rootSection = if ($rootEntry.Contains($section) -and ($rootEntry[$section] -is [System.Collections.IDictionary])) {
+                        $rootEntry[$section]
+                    } else {
+                        $null
+                    }
+                    foreach ($depName in $pkgDoc[$section].Keys) {
+                        $expectedSpec = [string]$pkgDoc[$section][$depName]
+                        if (-not $rootSection -or -not $rootSection.Contains($depName) -or ([string]$rootSection[$depName] -ne $expectedSpec)) {
+                            [void]$missing.Add("root:$depName")
+                        }
+                        if (-not $packagesMap.Contains("node_modules/$depName")) {
+                            [void]$missing.Add($depName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Verify every package's declared optionalDependencies exist in the lockfile packages map
+    # (catches stripped cross-platform bindings such as @tailwindcss/oxide-* / @tauri-apps/cli-* / @rolldown/binding-*)
+    foreach ($pkgKey in $packagesMap.Keys) {
+        $pkgMeta = $packagesMap[$pkgKey]
+        if (-not ($pkgMeta -is [System.Collections.IDictionary])) { continue }
+        if (-not $pkgMeta.Contains('optionalDependencies') -or -not ($pkgMeta['optionalDependencies'] -is [System.Collections.IDictionary])) {
+            continue
+        }
+
+        foreach ($optName in $pkgMeta['optionalDependencies'].Keys) {
+            $topLevelKey = "node_modules/$optName"
+            $nestedKey = if ([string]::IsNullOrEmpty([string]$pkgKey)) { $topLevelKey } else { "$pkgKey/node_modules/$optName" }
+            if (-not $packagesMap.Contains($topLevelKey) -and -not $packagesMap.Contains($nestedKey)) {
+                if (-not $missing.Contains([string]$optName)) {
+                    [void]$missing.Add([string]$optName)
+                }
+            }
         }
     }
 
     if ($missing.Count -gt 0) {
+        $uniqueMissing = @($missing | Select-Object -Unique)
         return [PSCustomObject]@{
             Valid   = $false
-            Reason  = "package-lock.json omits cross-platform optional dependencies: $($missing -join ', ')"
-            Missing = $missing
+            Reason  = "package-lock.json is out of sync or missing optional dependencies: $($uniqueMissing -join ', ')"
+            Missing = $uniqueMissing
         }
     }
 
     return [PSCustomObject]@{
         Valid   = $true
-        Reason  = "Cross-platform optional dependency entries verified (lockfileVersion $($lock.lockfileVersion))."
+        Reason  = "Lockfile consistency and cross-platform optional dependencies verified (lockfileVersion $lockVersion, $($packagesMap.Count) packages)."
         Missing = @()
     }
 }
@@ -604,6 +705,11 @@ function Test-WindowsBuildPrerequisites {
     } else {
         Write-Warn "WebView2 Runtime registry key not detected (required when running the desktop app on Windows)."
     }
+}
+
+# Allow tests and maintenance scripts to dot-source helper functions safely without executing the build.
+if ($MyInvocation.InvocationName -eq '.') {
+    return
 }
 
 # Validate parameter combinations
@@ -802,11 +908,23 @@ foreach ($dupLock in @('bun.lock', 'bun.lockb', 'yarn.lock', 'pnpm-lock.yaml')) 
     }
 }
 
-$lockCheck = Test-LockfileConsistency -LockfilePath $lockfilePath
+$lockCheck = Test-LockfileConsistency -LockfilePath $lockfilePath -PackageJsonPath $packageJsonPath
 if (-not $lockCheck.Valid) {
     Fail-Build -Message $lockCheck.Reason -Stage 'Lockfile Validation' -Suggestion "Run '.\build.ps1 -RepairLockfile' to regenerate package-lock.json with full cross-platform optional dependencies."
 }
 Write-Ok $lockCheck.Reason
+
+$cargoLockPath = Join-Path $script:RepoRoot 'src-tauri/Cargo.lock'
+if (Test-Path -Path $cargoLockPath -PathType Leaf) {
+    $cargoLockRaw = Get-Content -Path $cargoLockPath -Raw -Encoding UTF8
+    if ($cargoLockRaw -notmatch 'name\s*=\s*"zip"') {
+        Write-Warn "src-tauri/Cargo.lock is missing crate entries declared in src-tauri/Cargo.toml (e.g., zip); cargo will refresh Cargo.lock during check/build."
+    } else {
+        Write-Ok "Cargo.lock basic crate check passed"
+    }
+} else {
+    Write-Warn "src-tauri/Cargo.lock not found; cargo will generate a lockfile on first build."
+}
 
 # Tauri capability, icons, and public assets
 $capPath = Join-Path $script:RepoRoot 'src-tauri/capabilities/default.json'
@@ -872,12 +990,8 @@ if ($Check) {
     }
 
     Write-Stage "Checking Rust crate formatting and manifest"
-    $fmtCheck = Invoke-NativeStep -Description "Cargo format check" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--check') -AllowFailure -Quiet
-    if ($fmtCheck.ExitCode -eq 0) {
-        Write-Ok "cargo fmt --check passed"
-    } else {
-        Write-Warn "cargo fmt --check reported formatting differences or rustfmt is unavailable."
-    }
+    Invoke-NativeStep -Description "Cargo format check (cargo fmt --all -- --check)" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--all', '--', '--check') -Quiet
+    Write-Ok "cargo fmt --all -- --check passed"
     Invoke-NativeStep -Description "Verify Cargo dependency metadata" -Executable 'cargo' -Arguments @('metadata', '--manifest-path', $cargoTomlPath, '--no-deps', '--format-version', '1') -Quiet
     Write-Ok "Cargo.toml metadata validated"
 
@@ -949,12 +1063,8 @@ Write-Stage "Running Rust checks and unit tests"
 if ($SkipTests) {
     Write-Warn "Skipping Rust tests (-SkipTests)"
 } else {
-    $fmtRes = Invoke-NativeStep -Description "Cargo formatting check" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--check') -AllowFailure -Quiet
-    if ($fmtRes.ExitCode -ne 0) {
-        Write-Warn "cargo fmt --check reported formatting differences (non-blocking)."
-    } else {
-        Write-Ok "cargo fmt --check passed"
-    }
+    Invoke-NativeStep -Description "Cargo format check (cargo fmt --all -- --check)" -Executable 'cargo' -Arguments @('fmt', '--manifest-path', $cargoTomlPath, '--all', '--', '--check') -Quiet
+    Write-Ok "cargo fmt --all -- --check passed"
     Invoke-NativeStep -Description "Rust unit tests (cargo test)" -Executable 'cargo' -Arguments @('test', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
 }
 
@@ -970,7 +1080,7 @@ if (Test-Path $script:DistDir) {
         Remove-Item -Force
 }
 
-$tauriBuildArgs = @('tauri', 'build', '--features', 'desktop', '--target', $RustTarget)
+$tauriBuildArgs = @('tauri', 'build', '--ci', '--features', 'desktop', '--target', $RustTarget)
 if (-not $isReleaseBuild) {
     $tauriBuildArgs += '--debug'
 }
@@ -1078,6 +1188,24 @@ if ($expectedPortable) {
     $portableDest = Join-Path $script:DistDir $portableName
     Compress-Archive -Path (Join-Path $portableStaging '*') -DestinationPath $portableDest -CompressionLevel Optimal -Force
     Remove-Item -Path $portableStaging -Recurse -Force
+
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($portableDest)
+        try {
+            if ($zipArchive.Entries.Count -eq 0) {
+                throw "Portable ZIP archive '$portableDest' contains zero entries."
+            }
+            $exeEntry = $zipArchive.Entries | Where-Object { $_.FullName -ieq 'VANTA.exe' } | Select-Object -First 1
+            if (-not $exeEntry -or $exeEntry.Length -le 0) {
+                throw "Portable ZIP archive '$portableDest' is missing non-empty VANTA.exe."
+            }
+        } finally {
+            $zipArchive.Dispose()
+        }
+    } catch {
+        Fail-Build -Message "Portable ZIP readability verification failed: $($_.Exception.Message)" -Stage 'Artifact Verification'
+    }
 
     $collectedArtifacts += [PSCustomObject]@{
         Role = 'Portable Standalone ZIP'
