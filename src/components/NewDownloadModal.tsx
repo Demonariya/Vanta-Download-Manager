@@ -100,7 +100,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   // Output & task options
   const [selectedTab, setSelectedTab] = useState<'video' | 'audio'>('video');
-  const [selectedFormatId, setSelectedFormatId] = useState<string>('best');
+  const [selectedFormatId, setSelectedFormatId] = useState<string>('bestvideo+bestaudio/best');
   const [selectedContainer, setSelectedContainer] = useState<string>('mp4');
   const [selectedAudioFormat, setSelectedAudioFormat] = useState<string>('mp3');
   const [selectedAudioBitrate, setSelectedAudioBitrate] = useState<string>('320k');
