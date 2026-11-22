@@ -42,7 +42,7 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
         ? 'w-24 h-24 sm:w-28 sm:h-28 aspect-square'
         : 'w-full aspect-video'
       : effectiveAspect === 'square'
-      ? 'w-14 h-14 sm:w-16 sm:h-16 aspect-square'
+      ? 'w-16 h-16 sm:w-[72px] sm:h-[72px] aspect-square'
       : 'w-24 sm:w-28 aspect-video';
 
   const MediaIcon = isAudio ? Music : Video;
