@@ -479,7 +479,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                       isAudio={task.is_audio_only || task.engine === 'spotdl'}
                       ext={task.ext}
                       size="md"
-                      aspect="video"
+                      aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'}
                     />
 
                     {/* Main Title, Metadata & Progress */}
