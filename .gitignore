@@ -20,6 +20,7 @@ portable_package/
 *.tmp
 *.bak
 .vanta_data/
+.vanta_install/
 .playwright-cli/
 downloads/*
 !downloads/.gitkeep

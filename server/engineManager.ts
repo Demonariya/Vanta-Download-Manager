@@ -279,7 +279,14 @@ export class EngineManager {
       }
       return path.resolve(process.cwd(), '.vanta_install');
     }
-    return path.resolve(process.cwd(), '.vanta_install');
+    if (process.env.XDG_DATA_HOME?.trim()) {
+      return path.join(process.env.XDG_DATA_HOME.trim(), 'vanta-download-manager', 'install');
+    }
+    const home = os.homedir();
+    if (home && home !== '/') {
+      return path.join(home, '.local', 'share', 'vanta-download-manager', 'install');
+    }
+    return path.join(os.tmpdir(), 'vanta-download-manager-install');
   }
 
   public getManagedRootDir(): string {
@@ -2399,7 +2406,10 @@ export class EngineManager {
         });
 
         if (!fs.existsSync(this.getSpotdlVenvPython())) {
-          const mkVenv = await runProcessAsync(pythonExe, ['-m', 'venv', venvDir], 60_000);
+          const venvArgs = process.platform === 'win32'
+            ? ['-m', 'venv', venvDir]
+            : ['-m', 'venv', '--copies', venvDir];
+          const mkVenv = await runProcessAsync(pythonExe, venvArgs, 60_000);
           if (mkVenv.code !== 0) {
             throw new Error(mkVenv.stderr || mkVenv.stdout || 'Failed creating isolated venv');
           }
