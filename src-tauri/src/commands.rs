@@ -1221,7 +1221,10 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
         let app_clone = app.clone();
         let task_id = next_task.id.clone();
-        tokio::spawn(async move {
+        // schedule_next() is also called by synchronous Tauri commands, where
+        // no Tokio reactor is entered on the calling thread. Use Tauri's
+        // managed async runtime instead of tokio::spawn() directly.
+        tauri::async_runtime::spawn(async move {
             run_download_task(app_clone, task_id).await;
         });
     }
