@@ -1254,13 +1254,20 @@ export class EngineManager {
       args.push('-x');
       const audioFormat = task.audio_format || settings.default_audio_format || 'mp3';
       args.push('--audio-format', audioFormat);
-      if (task.audio_bitrate) {
+      // Lossless containers do not use a lossy encoder bitrate target.
+      if (task.audio_bitrate && !['flac', 'wav'].includes(audioFormat.toLowerCase())) {
         args.push('--audio-quality', task.audio_bitrate);
       }
       if (task.audio_sample_rate || task.audio_bit_depth) {
         let pp = 'ExtractAudio:';
         if (task.audio_sample_rate) pp += ` -ar ${task.audio_sample_rate}`;
-        if (task.audio_bit_depth === 24) pp += ' -sample_fmt s24';
+        // FFmpeg has no packed s24 sample format. Use 32-bit working samples and
+        // explicitly request 24-bit FLAC encoding; don't pass the invalid "s24" format.
+        if (task.audio_bit_depth === 24 && audioFormat.toLowerCase() === 'flac') {
+          pp += ' -sample_fmt s32 -bits_per_raw_sample 24';
+        } else if (task.audio_bit_depth === 24 && audioFormat.toLowerCase() === 'wav') {
+          pp += ' -sample_fmt s32';
+        }
         args.push('--postprocessor-args', pp.trim());
       }
     } else {
