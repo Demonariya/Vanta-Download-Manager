@@ -1230,10 +1230,35 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 async fn run_download_task(app: AppHandle, task_id: String) {
     let app_for_blocking = app.clone();
     let tid_for_blocking = task_id.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let worker_result = tokio::task::spawn_blocking(move || {
         run_download_task_blocking(&app_for_blocking, &tid_for_blocking);
     })
     .await;
+
+    if let Err(join_error) = worker_result {
+        let state = app.state::<AppState>();
+        let reason = if join_error.is_panic() {
+            format!("Download worker panicked: {}", join_error)
+        } else {
+            format!("Download worker could not complete: {}", join_error)
+        };
+        logging::error("queue", &format!("Task '{}' failed in background worker: {}", task_id, reason));
+
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            if !matches!(task.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Engine crashed".to_string();
+                task.speed_str = "0 B/s".to_string();
+                task.speed_bytes_per_sec = 0.0;
+                task.eta_seconds = None;
+                task.eta_str = "--".to_string();
+                task.active_connections = 0;
+                task.error_message = Some(reason);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+            }
+        }
+    }
 
     let state = app.state::<AppState>();
     schedule_next(&app, &state);
@@ -1463,6 +1488,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         return;
     }
 
+    logging::info("queue", &format!("Worker started for task '{}'; engine='{}'.", task_id, task.engine));
     let settings = state.get_settings();
     if task.engine == "direct" {
         task.status = TaskStatus::Failed;
@@ -1483,7 +1509,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         || settings.embed_metadata
         || task.format_id == "best";
 
+    logging::info("queue", &format!("Task '{}': checking required engines (ffmpeg={}, spotdl={}).", task_id, requires_ffmpeg, is_spotdl));
     if let Err(err_msg) = EngineManager::ensure_required_engines(requires_ffmpeg, is_spotdl) {
+        logging::error("queue", &format!("Task '{}': engine preflight failed: {}", task_id, err_msg));
         task.status = TaskStatus::Failed;
         task.current_phase = "Failed".to_string();
         task.error_message = Some(err_msg);
