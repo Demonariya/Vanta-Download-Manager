@@ -517,7 +517,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                             <span aria-hidden="true">·</span>
                             <span>
                               {task.ext.toUpperCase()}
-                              {task.is_audio_only && task.audio_bitrate
+                              {task.is_audio_only && task.audio_bitrate && !['flac', 'wav'].includes((task.audio_format || '').toLowerCase())
                                 ? ` (${task.audio_bitrate})`
                                 : task.resolution_label
                                 ? ` (${task.resolution_label})`
