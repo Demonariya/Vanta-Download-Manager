@@ -182,6 +182,8 @@ pub async fn create_task(
         .max()
         .unwrap_or(0);
     let known_total = payload.total_bytes.unwrap_or(0);
+    // Capture this before moving playlist_mode into DownloadTask.
+    let bg_playlist = payload.playlist_mode.as_deref() == Some("playlist");
 
     let task = DownloadTask {
         id: id.clone(),
@@ -264,8 +266,9 @@ pub async fn create_task(
     if !is_spotify && needs_metadata_enrichment {
         let app_bg = app.clone();
         let bg_id = task.id.clone();
+        // Keep a separate ID for the async lookup; task itself must remain usable below.
+        let bg_lookup_id = task.id.clone();
         let bg_url = task.url.clone();
-        let bg_playlist = payload.playlist_mode.as_deref() == Some("playlist");
         let bg_settings = settings.clone();
         tokio::spawn(async move {
             let inspect_res = tokio::task::spawn_blocking(move || {
@@ -282,7 +285,7 @@ pub async fn create_task(
 
             if let Ok(Ok(meta)) = inspect_res {
                 let st = app_bg.state::<AppState>();
-                if let Some(mut cur) = st.get_task_by_id(&task.id) {
+                if let Some(mut cur) = st.get_task_by_id(&bg_lookup_id) {
                     let mut changed = false;
                     if let Some(ref thumb) = meta.thumbnail {
                         let cur_valid = cur
