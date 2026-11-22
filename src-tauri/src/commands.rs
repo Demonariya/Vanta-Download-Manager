@@ -94,7 +94,7 @@ pub async fn create_task(
         .thumbnail
         .clone()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| crate::is_valid_thumbnail_url(s));
     let mut resolved_album = payload
         .album
         .clone()
@@ -106,16 +106,10 @@ pub async fn create_task(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let is_placeholder_title = resolved_title.is_empty()
-        || resolved_title == "Queued Download"
-        || resolved_title == "Download Task"
-        || resolved_title == "Queued Item"
-        || resolved_title == "Spotify Track / Album"
-        || resolved_title == "Spotify Music Track"
-        || resolved_title == "Spotify Album / Playlist"
-        || resolved_title.starts_with("Batch Item:");
+    let needs_metadata_enrichment =
+        crate::is_placeholder_task_title(&resolved_title) || resolved_thumbnail.is_none();
 
-    if is_spotify && (is_placeholder_title || resolved_thumbnail.is_none()) {
+    if is_spotify && needs_metadata_enrichment {
         let meta = crate::spotify::resolve_spotify_metadata_async(&trimmed_url, None).await?;
         if !meta.url.is_empty() {
             resolved_url = meta.url;
@@ -266,6 +260,64 @@ pub async fn create_task(
 
     state.upsert_task(&task);
     let _ = app.emit("task_added", &task);
+
+    if !is_spotify && needs_metadata_enrichment {
+        let app_bg = app.clone();
+        let bg_id = task.id.clone();
+        let bg_url = task.url.clone();
+        let bg_playlist = payload.playlist_mode.as_deref() == Some("playlist");
+        let bg_settings = settings.clone();
+        tokio::spawn(async move {
+            let inspect_res = tokio::task::spawn_blocking(move || {
+                EngineManager::inspect_url_with_tracking_opts(
+                    &format!("bg_{}", bg_id),
+                    &bg_url,
+                    &bg_settings,
+                    None,
+                    None,
+                    Some(bg_playlist),
+                )
+            })
+            .await;
+
+            if let Ok(Ok(meta)) = inspect_res {
+                let st = app_bg.state::<AppState>();
+                if let Some(mut cur) = st.get_task_by_id(&task.id) {
+                    let mut changed = false;
+                    if let Some(ref thumb) = meta.thumbnail {
+                        let cur_valid = cur
+                            .thumbnail
+                            .as_deref()
+                            .map(crate::is_valid_thumbnail_url)
+                            .unwrap_or(false);
+                        if !cur_valid && crate::is_valid_thumbnail_url(thumb) {
+                            cur.thumbnail = Some(thumb.clone());
+                            changed = true;
+                        }
+                    }
+                    if crate::is_placeholder_task_title(&cur.title)
+                        && !crate::is_placeholder_task_title(&meta.title)
+                    {
+                        cur.title = meta.title;
+                        changed = true;
+                    }
+                    if cur.uploader.is_none() && meta.uploader.is_some() {
+                        cur.uploader = meta.uploader;
+                        changed = true;
+                    }
+                    if cur.duration.is_none() && meta.duration.is_some() {
+                        cur.duration = meta.duration;
+                        cur.duration_string = meta.duration_string;
+                        changed = true;
+                    }
+                    if changed {
+                        st.upsert_task(&cur);
+                        let _ = app_bg.emit("task_updated", &cur);
+                    }
+                }
+            }
+        });
+    }
 
     logging::info("queue", &format!("Created task '{}' ({})", task.id, task.engine));
     schedule_next(&app, &state);
@@ -1233,6 +1285,168 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
     best.map(|(_, p)| p)
 }
 
+fn snapshot_dir_file_sizes(dir: &Path) -> HashMap<PathBuf, u64> {
+    let mut map = HashMap::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if let Ok(meta) = fs::metadata(&p) {
+                map.insert(p, meta.len());
+            }
+        }
+    }
+    map
+}
+
+fn measure_dir_growth_bytes(dir: &Path, baseline: &HashMap<PathBuf, u64>) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if let Ok(meta) = fs::metadata(&p) {
+                let len = meta.len();
+                let prev = baseline.get(&p).copied().unwrap_or(0);
+                if len > prev {
+                    total = total.saturating_add(len - prev);
+                }
+            }
+        }
+    }
+    total
+}
+
+fn find_new_output_file(
+    dir: &Path,
+    baseline: &HashMap<PathBuf, u64>,
+    is_audio: bool,
+) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
+    let media_exts = [
+        "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
+    ];
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() || baseline.contains_key(&p) {
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let valid_ext = if is_audio {
+            audio_exts.contains(&ext.as_str())
+        } else {
+            media_exts.contains(&ext.as_str())
+        };
+        if !valid_ext {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(&p) {
+            if meta.len() == 0 {
+                continue;
+            }
+            if let Ok(mtime) = meta.modified() {
+                let replace = best
+                    .as_ref()
+                    .map(|(prev_t, _)| mtime > *prev_t)
+                    .unwrap_or(true);
+                if replace {
+                    best = Some((mtime, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn parse_eta_str_seconds(eta_raw: &str) -> Option<u64> {
+    let cleaned = eta_raw.trim();
+    if cleaned.is_empty()
+        || cleaned.eq_ignore_ascii_case("unknown")
+        || cleaned.eq_ignore_ascii_case("na")
+        || cleaned.eq_ignore_ascii_case("n/a")
+        || cleaned == "--"
+    {
+        return None;
+    }
+    let parts: Vec<u64> = cleaned
+        .split(':')
+        .map(|p| p.trim().parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    match parts.len() {
+        2 => Some(parts[0] * 60 + parts[1]),
+        3 => Some(parts[0] * 3600 + parts[1] * 60 + parts[2]),
+        _ => None,
+    }
+}
+
+fn extract_bracket_ytdlp_metrics(line: &str) -> Option<(Option<f64>, u64, u64, f64, Option<String>)> {
+    if !line.contains("[download]") || !line.contains('%') {
+        return None;
+    }
+    let pct_pos = line.find('%')?;
+    let before_pct = &line[..pct_pos];
+    let pct_token = before_pct.split_whitespace().last()?;
+    let pct_val = pct_token.parse::<f64>().ok().filter(|v| v.is_finite());
+
+    let after_pct = &line[pct_pos + 1..];
+    let total = if let Some(of_idx) = after_pct.find(" of ") {
+        let rest = after_pct[of_idx + 4..].trim_start();
+        let size_token = rest
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("");
+        // Handle "~ 12.3MiB" vs "12.3MiB"
+        let first_tok = rest.split_whitespace().next().unwrap_or("");
+        if first_tok == "~" {
+            crate::parse_bytes(&size_token)
+        } else {
+            crate::parse_bytes(first_tok)
+        }
+    } else {
+        0
+    };
+
+    let speed_bytes = if let Some(at_idx) = after_pct.find(" at ") {
+        let rest = after_pct[at_idx + 4..].trim_start();
+        let tok = rest.split_whitespace().next().unwrap_or("");
+        crate::parse_bytes(tok.trim_end_matches("/s")) as f64
+    } else {
+        0.0
+    };
+
+    let eta_raw = after_pct.find(" ETA ").map(|eta_idx| {
+        after_pct[eta_idx + 5..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    });
+
+    let downloaded = if total > 0 {
+        if let Some(p) = pct_val {
+            ((p.clamp(0.0, 100.0) / 100.0) * (total as f64)).round() as u64
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    Some((pct_val, downloaded, total, speed_bytes, eta_raw))
+}
+
 fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     let state = app.state::<AppState>();
     let mut task = match state.get_task_by_id(task_id) {
@@ -1346,10 +1560,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
             let ffmpeg_bin = EngineManager::find_executable("ffmpeg");
             let started_unix = chrono::Utc::now().timestamp();
+            let started_instant = Instant::now();
             let mut completed_count = 0u32;
             let mut failed_count = 0u32;
             let mut last_error = String::new();
             let mut last_output_file: Option<PathBuf> = None;
+            let mut accumulated_completed_bytes: u64 = 0;
 
             for (idx, track_url) in ordered_tracks.iter().enumerate() {
                 if state.is_shutting_down.load(Ordering::SeqCst) {
@@ -1362,6 +1578,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 }
 
                 let track_started_unix = chrono::Utc::now().timestamp();
+                let dir_baseline = snapshot_dir_file_sizes(&track_dir);
+                let mut prev_track_bytes: u64 = 0;
+                let mut prev_sample_at = Instant::now();
+                let mut last_emit_at = Instant::now();
+                let mut ema_speed: f64 = 0.0;
+
                 let mut cur = state.get_task_by_id(task_id).unwrap_or_else(|| task.clone());
                 cur.status = TaskStatus::Downloading;
                 cur.tracks_requested = Some(total_tracks);
@@ -1407,19 +1629,70 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                             let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
                             procs.insert(task_id.to_string(), pid);
                         }
-                        let stream_res = process::stream_child_lines(child, |_line| {
-                            if state.is_shutting_down.load(Ordering::SeqCst) {
-                                process::kill_process_tree(pid);
-                                return false;
-                            }
-                            if let Some(c) = state.get_task_by_id(task_id) {
-                                if matches!(c.status, TaskStatus::Paused | TaskStatus::Cancelled) {
-                                    process::kill_process_tree(pid);
+                        let stream_res = process::stream_child_lines_with_tick(
+                            child,
+                            Duration::from_millis(400),
+                            |line| {
+                                if state.is_shutting_down.load(Ordering::SeqCst) {
                                     return false;
                                 }
-                            }
-                            true
-                        });
+                                let Some(mut c) = state.get_task_by_id(task_id) else {
+                                    return false;
+                                };
+                                if matches!(c.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                                    return false;
+                                }
+                                let tr = line.trim();
+                                if tr.contains("Converting") || tr.contains("Embedding") {
+                                    c.current_phase = format!(
+                                        "Track {}/{}: Embedding metadata...",
+                                        idx + 1,
+                                        total_tracks
+                                    );
+                                    state.upsert_task(&c);
+                                    let _ = app.emit("task_updated", &c);
+                                }
+                                true
+                            },
+                            || {
+                                if state.is_shutting_down.load(Ordering::SeqCst) {
+                                    return false;
+                                }
+                                let Some(mut c) = state.get_task_by_id(task_id) else {
+                                    return false;
+                                };
+                                if matches!(c.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                                    return false;
+                                }
+
+                                let active_bytes = measure_dir_growth_bytes(&track_dir, &dir_baseline);
+                                let dt = prev_sample_at.elapsed().as_secs_f64();
+                                if dt >= 0.35 && active_bytes >= prev_track_bytes {
+                                    let delta = active_bytes - prev_track_bytes;
+                                    let inst_speed = delta as f64 / dt;
+                                    ema_speed = if ema_speed == 0.0 {
+                                        inst_speed
+                                    } else {
+                                        0.35 * inst_speed + 0.65 * ema_speed
+                                    };
+                                    prev_track_bytes = active_bytes;
+                                    prev_sample_at = Instant::now();
+                                }
+
+                                if last_emit_at.elapsed() >= Duration::from_millis(350) {
+                                    last_emit_at = Instant::now();
+                                    c.status = TaskStatus::Downloading;
+                                    c.downloaded_bytes = accumulated_completed_bytes.saturating_add(active_bytes);
+                                    c.speed_bytes_per_sec = ema_speed;
+                                    c.speed_str = format!("{}/s", format_bytes_rust(ema_speed));
+                                    c.elapsed_seconds = started_instant.elapsed().as_secs();
+                                    c.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
+                                    state.upsert_task(&c);
+                                    let _ = app.emit("task_updated", &c);
+                                }
+                                true
+                            },
+                        );
                         {
                             let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
                             procs.remove(task_id);
@@ -1433,8 +1706,13 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         }
                         match stream_res {
                             Ok((st, _)) if st.success() => {
-                                if let Some(found) = find_recent_output_file(&track_dir, track_started_unix, true) {
+                                let newly_created = find_new_output_file(&track_dir, &dir_baseline, true)
+                                    .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true).filter(|p| !dir_baseline.contains_key(p)));
+                                if let Some(found) = newly_created {
                                     completed_count += 1;
+                                    if let Ok(m) = fs::metadata(&found) {
+                                        accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(m.len());
+                                    }
                                     last_output_file = Some(found);
                                 } else {
                                     failed_count += 1;
@@ -1499,6 +1777,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 final_t.status = TaskStatus::Completed;
                 final_t.progress_percentage = 100.0;
                 final_t.percentage_known = true;
+                final_t.downloaded_bytes = accumulated_completed_bytes;
+                final_t.total_bytes = accumulated_completed_bytes;
+                final_t.remaining_bytes = 0;
                 final_t.eta_seconds = Some(0);
                 final_t.eta_str = "Finished".to_string();
                 final_t.current_phase = format!("Completed ({}/{} tracks)", completed_count, total_tracks);
@@ -1595,10 +1876,16 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         };
 
         let mut args = vec![
+            "--no-quiet".to_string(),
+            "--progress".to_string(),
             "--newline".to_string(),
             "--no-colors".to_string(),
+            "--progress-delta".to_string(),
+            "0.2".to_string(),
             "--progress-template".to_string(),
-            "%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s".to_string(),
+            "download:%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s".to_string(),
+            "--print".to_string(),
+            "before_dl:VANTA_META:%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s".to_string(),
             "--print".to_string(),
             "after_move:VANTA_OUTPUT_FILE:%(filepath)s".to_string(),
             "-o".to_string(),
@@ -1731,12 +2018,38 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         (ytdlp_path, args)
     };
 
+    struct StreamLoopTelemetry {
+        ema_speed: f64,
+        stream_known_total: u64,
+        stream_max_downloaded: u64,
+        last_activity_at: Instant,
+        last_emit_at: Instant,
+        spotdl_prev_bytes: u64,
+        spotdl_prev_sample: Instant,
+        detected_output_path: Option<String>,
+    }
+
     let started_unix = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
-    let mut ema_speed: f64 = 0.0;
+    let spotdl_baseline = if is_spotdl {
+        snapshot_dir_file_sizes(&out_dir)
+    } else {
+        HashMap::new()
+    };
+
+    let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
+        ema_speed: 0.0,
+        stream_known_total: task.total_bytes,
+        stream_max_downloaded: 0,
+        last_activity_at: Instant::now(),
+        last_emit_at: Instant::now(),
+        spotdl_prev_bytes: 0,
+        spotdl_prev_sample: Instant::now(),
+        detected_output_path: None,
+    });
 
     task.status = TaskStatus::Connecting;
-    task.current_phase = "Connecting to engine...".to_string();
+    task.current_phase = "Connecting to media extractor...".to_string();
     state.upsert_task(&task);
     let _ = app.emit("task_updated", &task);
 
@@ -1768,115 +2081,264 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         procs.insert(task_id.to_string(), pid);
     }
 
-    let mut detected_output_path: Option<String> = None;
-
-    let stream_res = process::stream_child_lines(child, |line| {
-        if state.is_shutting_down.load(Ordering::SeqCst) {
-            process::kill_process_tree(pid);
-            return false;
-        }
-
-        let mut current = match state.get_task_by_id(task_id) {
-            Some(t) => t,
-            None => {
-                process::kill_process_tree(pid);
+    let stream_res = process::stream_child_lines_with_tick(
+        child,
+        Duration::from_millis(350),
+        |line| {
+            if state.is_shutting_down.load(Ordering::SeqCst) {
                 return false;
             }
-        };
 
-        if matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled) {
-            process::kill_process_tree(pid);
-            return false;
-        }
+            let mut current = match state.get_task_by_id(task_id) {
+                Some(t) => t,
+                None => return false,
+            };
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return true;
-        }
-
-        if is_spotdl {
-            current.percentage_known = false;
-            if trimmed.contains("Searching for") || trimmed.contains("Found") {
-                current.status = TaskStatus::Connecting;
-                current.current_phase = "Matching audio source...".to_string();
-                state.upsert_task(&current);
-                let _ = app.emit("task_updated", &current);
-            } else if trimmed.contains("Downloading") {
-                current.status = TaskStatus::Downloading;
-                current.current_phase = "Downloading audio stream...".to_string();
-                state.upsert_task(&current);
-                let _ = app.emit("task_updated", &current);
-            } else if trimmed.contains("Converting") || trimmed.contains("Embedding") {
-                current.status = TaskStatus::Processing;
-                current.current_phase = "Embedding metadata & artwork...".to_string();
-                state.upsert_task(&current);
-                let _ = app.emit("task_updated", &current);
+            if matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                return false;
             }
-            return true;
-        }
 
-        if let Some(printed) = trimmed.strip_prefix("VANTA_OUTPUT_FILE:") {
-            let p = printed.trim();
-            if !p.is_empty() {
-                detected_output_path = Some(p.to_string());
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return true;
             }
-            return true;
-        }
 
-        if let Some(idx) = trimmed.find("Destination:") {
-            let dest = trimmed[idx + "Destination:".len()..]
-                .trim()
-                .trim_matches(|c| c == '"' || c == '\'');
-            if !dest.is_empty() {
-                detected_output_path = Some(dest.to_string());
-            }
-        } else if let Some(idx) = trimmed.find("Merging formats into") {
-            let dest = trimmed[idx + "Merging formats into".len()..]
-                .trim()
-                .trim_matches(|c| c == '"' || c == '\'');
-            if !dest.is_empty() {
-                detected_output_path = Some(dest.to_string());
-            }
-            current.status = TaskStatus::Muxing;
-            current.current_phase = "Muxing video & audio streams...".to_string();
-            current.speed_bytes_per_sec = 0.0;
-            current.speed_str = "0 B/s".to_string();
-            state.upsert_task(&current);
-            let _ = app.emit("task_updated", &current);
-            return true;
-        }
+            let mut tel = loop_telemetry.borrow_mut();
 
-        if trimmed.contains("[ExtractAudio]") || trimmed.contains("[Metadata]") {
-            current.status = TaskStatus::Processing;
-            current.current_phase = "Processing & embedding metadata...".to_string();
-            current.speed_bytes_per_sec = 0.0;
-            current.speed_str = "0 B/s".to_string();
-            state.upsert_task(&current);
-            let _ = app.emit("task_updated", &current);
-            return true;
-        }
-
-        if trimmed.contains('|') {
-            let parts: Vec<&str> = trimmed.split('|').collect();
-            if parts.len() >= 6 {
-                let pct_raw = parts[0].trim_end_matches('%').trim();
-                let pct_val: Option<f64> = pct_raw.parse().ok();
-                let downloaded = crate::parse_bytes(parts[1]);
-                let total = crate::parse_bytes(parts[2]);
-                let speed_bytes = crate::parse_bytes(parts[3].trim_end_matches("/s")) as f64;
-                if speed_bytes > 0.0 {
-                    ema_speed = if ema_speed == 0.0 {
-                        speed_bytes
-                    } else {
-                        0.3 * speed_bytes + 0.7 * ema_speed
-                    };
+            if is_spotdl {
+                current.percentage_known = false;
+                if trimmed.contains("Searching for") || trimmed.contains("Found") {
+                    tel.last_activity_at = Instant::now();
+                    current.status = TaskStatus::Connecting;
+                    current.current_phase = "Matching audio source...".to_string();
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                    tel.last_emit_at = Instant::now();
+                } else if trimmed.contains("Downloading") {
+                    tel.last_activity_at = Instant::now();
+                    current.status = TaskStatus::Downloading;
+                    current.current_phase = "Downloading audio stream...".to_string();
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                    tel.last_emit_at = Instant::now();
+                } else if trimmed.contains("Converting") || trimmed.contains("Embedding") {
+                    tel.last_activity_at = Instant::now();
+                    current.status = TaskStatus::Processing;
+                    current.current_phase = "Embedding metadata & artwork...".to_string();
+                    current.speed_bytes_per_sec = 0.0;
+                    current.speed_str = "0 B/s".to_string();
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                    tel.last_emit_at = Instant::now();
                 }
-                let elapsed = started_instant.elapsed().as_secs();
-                let remaining = total.saturating_sub(downloaded);
-                let eta_sec = if total > 0 && ema_speed >= 1.0 && remaining > 0 {
-                    Some((remaining as f64 / ema_speed).ceil() as u64)
+                return true;
+            }
+
+            if let Some(meta_raw) = trimmed.strip_prefix("VANTA_META:") {
+                let fields: Vec<&str> = meta_raw.split('\t').collect();
+                let mut changed = false;
+                if let Some(title_raw) = fields.get(1).map(|s| s.trim()) {
+                    if !title_raw.is_empty()
+                        && title_raw != "NA"
+                        && crate::is_placeholder_task_title(&current.title)
+                    {
+                        current.title = title_raw.to_string();
+                        changed = true;
+                    }
+                }
+                if let Some(up_raw) = fields.get(2).map(|s| s.trim()) {
+                    if !up_raw.is_empty() && up_raw != "NA" && current.uploader.is_none() {
+                        current.uploader = Some(up_raw.to_string());
+                        changed = true;
+                    }
+                }
+                if let Some(dur_raw) = fields.get(3).map(|s| s.trim()) {
+                    if current.duration.is_none() {
+                        if let Ok(d_f) = dur_raw.parse::<f64>() {
+                            if d_f.is_finite() && d_f > 0.0 {
+                                let d_u = d_f.round() as u64;
+                                current.duration = Some(d_u);
+                                current.duration_string = Some(format_duration_rust(d_u));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if let Some(thumb_raw) = fields.get(4).map(|s| s.trim()) {
+                    let cur_valid = current
+                        .thumbnail
+                        .as_deref()
+                        .map(crate::is_valid_thumbnail_url)
+                        .unwrap_or(false);
+                    if !cur_valid && crate::is_valid_thumbnail_url(thumb_raw) {
+                        current.thumbnail = Some(thumb_raw.to_string());
+                        changed = true;
+                    }
+                }
+                if changed {
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                    tel.last_emit_at = Instant::now();
+                }
+                return true;
+            }
+
+            if let Some(printed) = trimmed.strip_prefix("VANTA_OUTPUT_FILE:") {
+                let p = printed.trim();
+                if !p.is_empty() {
+                    tel.detected_output_path = Some(p.to_string());
+                }
+                return true;
+            }
+
+            if let Some(idx) = trimmed.find("Destination:") {
+                let dest = trimmed[idx + "Destination:".len()..]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                if !dest.is_empty() {
+                    if tel.detected_output_path.as_deref() != Some(dest) {
+                        tel.stream_known_total = 0;
+                        tel.stream_max_downloaded = 0;
+                    }
+                    tel.detected_output_path = Some(dest.to_string());
+                }
+                tel.last_activity_at = Instant::now();
+                current.status = TaskStatus::Downloading;
+                current.current_phase = "Receiving media stream...".to_string();
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+                tel.last_emit_at = Instant::now();
+                return true;
+            }
+
+            if let Some(idx) = trimmed.find("Merging formats into") {
+                let dest = trimmed[idx + "Merging formats into".len()..]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                if !dest.is_empty() {
+                    tel.detected_output_path = Some(dest.to_string());
+                }
+                tel.last_activity_at = Instant::now();
+                current.status = TaskStatus::Muxing;
+                current.current_phase = "Muxing video & audio streams...".to_string();
+                current.speed_bytes_per_sec = 0.0;
+                current.speed_str = "0 B/s".to_string();
+                current.eta_seconds = None;
+                current.eta_str = "--".to_string();
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+                tel.last_emit_at = Instant::now();
+                return true;
+            }
+
+            if trimmed.contains("[Fixup")
+                || trimmed.contains("[ExtractAudio]")
+                || trimmed.contains("[Metadata]")
+                || trimmed.contains("[EmbedThumbnail]")
+            {
+                tel.last_activity_at = Instant::now();
+                current.status = TaskStatus::Processing;
+                current.current_phase = if trimmed.contains("[EmbedThumbnail]") {
+                    "Embedding cover thumbnail...".to_string()
+                } else {
+                    "Processing & embedding metadata...".to_string()
+                };
+                current.speed_bytes_per_sec = 0.0;
+                current.speed_str = "0 B/s".to_string();
+                current.eta_seconds = None;
+                current.eta_str = "--".to_string();
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+                tel.last_emit_at = Instant::now();
+                return true;
+            }
+
+            if let Some(item_pos) = trimmed.find("Downloading item ") {
+                tel.last_activity_at = Instant::now();
+                let item_part = &trimmed[item_pos..];
+                current.status = TaskStatus::Downloading;
+                current.current_phase = item_part.to_string();
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+                tel.last_emit_at = Instant::now();
+                return true;
+            }
+
+            if trimmed.contains("[youtube]") || trimmed.contains("[info]") || trimmed.contains("Extracting URL:") {
+                tel.last_activity_at = Instant::now();
+                if matches!(current.status, TaskStatus::Connecting) {
+                    current.current_phase = "Resolving media streams...".to_string();
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                    tel.last_emit_at = Instant::now();
+                }
+                return true;
+            }
+
+            // Parse 7-field or 6-field pipe progress template OR standard [download] progress line
+            let parsed_progress = if trimmed.contains('|') {
+                let parts: Vec<&str> = trimmed.split('|').collect();
+                if parts.len() >= 7 {
+                    let pct_raw = parts[0].trim().trim_end_matches('%').trim();
+                    let pct_val = pct_raw.parse::<f64>().ok().filter(|v| v.is_finite());
+                    let downloaded = crate::parse_bytes(parts[1]);
+                    let exact_total = crate::parse_bytes(parts[2]);
+                    let est_total = crate::parse_bytes(parts[3]);
+                    let total = if exact_total > 0 { exact_total } else { est_total };
+                    let speed_bytes = crate::parse_bytes(parts[4].trim_end_matches("/s")) as f64;
+                    let eta_raw = Some(parts[5].trim().to_string());
+                    let phase = parts[6].trim().to_string();
+                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
+                } else if parts.len() >= 6 {
+                    let pct_raw = parts[0].trim().trim_end_matches('%').trim();
+                    let pct_val = pct_raw.parse::<f64>().ok().filter(|v| v.is_finite());
+                    let downloaded = crate::parse_bytes(parts[1]);
+                    let total = crate::parse_bytes(parts[2]);
+                    let speed_bytes = crate::parse_bytes(parts[3].trim_end_matches("/s")) as f64;
+                    let eta_raw = Some(parts[4].trim().to_string());
+                    let phase = parts[5].trim().to_string();
+                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
                 } else {
                     None
+                }
+            } else {
+                extract_bracket_ytdlp_metrics(trimmed).map(|(pct_val, dl, tot, spd, eta)| {
+                    (pct_val, dl, tot, spd, eta, "downloading".to_string())
+                })
+            };
+
+            if let Some((pct_val, raw_downloaded, raw_total, speed_bytes, eta_raw, phase_raw)) =
+                parsed_progress
+            {
+                tel.last_activity_at = Instant::now();
+                if raw_total > 0 {
+                    tel.stream_known_total = tel.stream_known_total.max(raw_total);
+                }
+                let total = if tel.stream_known_total > 0 {
+                    tel.stream_known_total
+                } else {
+                    raw_total
+                };
+                if raw_downloaded > tel.stream_max_downloaded {
+                    tel.stream_max_downloaded = raw_downloaded;
+                }
+                let downloaded = tel.stream_max_downloaded.max(raw_downloaded);
+
+                if speed_bytes > 0.0 {
+                    tel.ema_speed = if tel.ema_speed == 0.0 {
+                        speed_bytes
+                    } else {
+                        0.3 * speed_bytes + 0.7 * tel.ema_speed
+                    };
+                }
+
+                let elapsed = started_instant.elapsed().as_secs();
+                let remaining = total.saturating_sub(downloaded);
+                let parsed_eta = eta_raw.as_deref().and_then(parse_eta_str_seconds);
+                let computed_eta = if total > 0 && tel.ema_speed >= 1.0 && remaining > 0 {
+                    Some((remaining as f64 / tel.ema_speed).ceil() as u64)
+                } else {
+                    parsed_eta
                 };
 
                 let pct_known = total > 0 || pct_val.is_some();
@@ -1886,46 +2348,116 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     pct_val.unwrap_or(0.0).clamp(0.0, 100.0)
                 };
 
-                let phase_raw = parts[5].trim();
-                current.status = if phase_raw.eq_ignore_ascii_case("processing")
+                let next_status = if phase_raw.eq_ignore_ascii_case("processing")
                     || phase_raw.eq_ignore_ascii_case("postprocessing")
                 {
                     TaskStatus::Processing
                 } else {
                     TaskStatus::Downloading
                 };
+                let next_phase = if phase_raw.eq_ignore_ascii_case("finished")
+                    || phase_raw.eq_ignore_ascii_case("processing")
+                {
+                    "Finalizing downloaded stream...".to_string()
+                } else {
+                    "Downloading media stream...".to_string()
+                };
+
+                let phase_or_status_changed = current.status != next_status || current.current_phase != next_phase;
+                current.status = next_status;
                 current.downloaded_bytes = downloaded;
                 current.total_bytes = total;
                 current.remaining_bytes = remaining;
                 current.percentage_known = pct_known;
                 current.progress_percentage = pct;
-                current.speed_bytes_per_sec = ema_speed;
+                current.speed_bytes_per_sec = tel.ema_speed;
                 current.avg_speed_bytes_per_sec = if elapsed > 0 {
                     downloaded as f64 / elapsed as f64
                 } else {
-                    ema_speed
+                    tel.ema_speed
                 };
-                current.speed_str = format!("{}/s", format_bytes_rust(ema_speed));
-                current.eta_seconds = eta_sec;
-                current.eta_str = eta_sec
-                    .map(format_duration_rust)
-                    .unwrap_or_else(|| "--".to_string());
+                current.speed_str = format!("{}/s", format_bytes_rust(tel.ema_speed));
+                current.eta_seconds = if total > 0 || pct_known { computed_eta } else { None };
+                current.eta_str = if !pct_known {
+                    "Unknown".to_string()
+                } else {
+                    current
+                        .eta_seconds
+                        .map(format_duration_rust)
+                        .unwrap_or_else(|| "--".to_string())
+                };
                 current.elapsed_seconds = elapsed;
                 current.active_connections = settings.fragment_concurrency.max(1);
                 current.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
-                current.current_phase = if phase_raw.is_empty() || phase_raw.eq_ignore_ascii_case("na") {
-                    "Downloading".to_string()
-                } else {
-                    phase_raw.to_string()
-                };
+                current.current_phase = next_phase;
 
-                state.upsert_task(&current);
-                let _ = app.emit("task_updated", &current);
+                if phase_or_status_changed || tel.last_emit_at.elapsed() >= Duration::from_millis(200) {
+                    tel.last_emit_at = Instant::now();
+                    state.upsert_task(&current);
+                    let _ = app.emit("task_updated", &current);
+                }
             }
-        }
 
-        true
-    });
+            true
+        },
+        || {
+            if state.is_shutting_down.load(Ordering::SeqCst) {
+                return false;
+            }
+            let Some(mut cur) = state.get_task_by_id(task_id) else {
+                return false;
+            };
+            if matches!(cur.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                return false;
+            }
+
+            let mut tel = loop_telemetry.borrow_mut();
+
+            if is_spotdl {
+                let active_bytes = measure_dir_growth_bytes(&out_dir, &spotdl_baseline);
+                let dt = tel.spotdl_prev_sample.elapsed().as_secs_f64();
+                if dt >= 0.35 && active_bytes >= tel.spotdl_prev_bytes {
+                    let delta = active_bytes - tel.spotdl_prev_bytes;
+                    if delta > 0 {
+                        tel.last_activity_at = Instant::now();
+                    }
+                    let inst_speed = delta as f64 / dt;
+                    tel.ema_speed = if tel.ema_speed == 0.0 {
+                        inst_speed
+                    } else {
+                        0.35 * inst_speed + 0.65 * tel.ema_speed
+                    };
+                    tel.spotdl_prev_bytes = active_bytes;
+                    tel.spotdl_prev_sample = Instant::now();
+                }
+
+                if active_bytes > 0 && tel.last_emit_at.elapsed() >= Duration::from_millis(350) {
+                    tel.last_emit_at = Instant::now();
+                    cur.status = TaskStatus::Downloading;
+                    cur.percentage_known = false;
+                    cur.downloaded_bytes = active_bytes;
+                    cur.speed_bytes_per_sec = tel.ema_speed;
+                    cur.speed_str = format!("{}/s", format_bytes_rust(tel.ema_speed));
+                    cur.elapsed_seconds = started_instant.elapsed().as_secs();
+                    cur.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
+                    state.upsert_task(&cur);
+                    let _ = app.emit("task_updated", &cur);
+                }
+            } else if tel.last_activity_at.elapsed() >= Duration::from_secs(15)
+                && matches!(cur.status, TaskStatus::Connecting | TaskStatus::Downloading)
+                && cur.current_phase != "Waiting for remote server response..."
+            {
+                cur.current_phase = "Waiting for remote server response...".to_string();
+                cur.speed_bytes_per_sec = 0.0;
+                cur.speed_str = "0 B/s".to_string();
+                state.upsert_task(&cur);
+                let _ = app.emit("task_updated", &cur);
+                tel.last_emit_at = Instant::now();
+            }
+
+            true
+        },
+    );
 
     {
         let mut procs = state
@@ -1945,6 +2477,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     {
         return;
     }
+
+    let detected_output_path = loop_telemetry.into_inner().detected_output_path;
 
     match stream_res {
         Ok((status, _err_log)) if status.success() => {

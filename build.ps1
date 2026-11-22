@@ -442,186 +442,21 @@ function Resolve-NpxExecutable {
     return $null
 }
 
-function ConvertFrom-JsonDictionary {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$JsonText
-    )
-
-    if ($PSVersionTable.PSVersion.Major -ge 6) {
-        return (ConvertFrom-Json -InputObject $JsonText -AsHashtable)
-    }
-
-    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-    $serializer.MaxJsonLength = [int]::MaxValue
-    return $serializer.DeserializeObject($JsonText)
+# Load shared read-only lockfile validation helpers (single source of truth)
+$buildScriptPath = $PSCommandPath
+if ([string]::IsNullOrWhiteSpace($buildScriptPath)) {
+    $buildScriptPath = $MyInvocation.MyCommand.Path
 }
-
-function Test-LockfileConsistency {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LockfilePath,
-        [string]$PackageJsonPath = ''
-    )
-
-    if (-not (Test-Path -Path $LockfilePath -PathType Leaf)) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "Missing package-lock.json at '$LockfilePath'."
-            Missing = @('package-lock.json')
-        }
-    }
-
-    $rawLock = Get-Content -Path $LockfilePath -Raw -Encoding UTF8
-    if ([string]::IsNullOrWhiteSpace($rawLock)) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is empty."
-            Missing = @('invalid-json')
-        }
-    }
-
-    try {
-        $lock = ConvertFrom-JsonDictionary -JsonText $rawLock
-    } catch {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is not valid JSON: $($_.Exception.Message)"
-            Missing = @('invalid-json')
-        }
-    }
-
-    if (-not ($lock -is [System.Collections.IDictionary])) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json root must be a JSON object."
-            Missing = @('invalid-json')
-        }
-    }
-
-    if (-not $lock.Contains('lockfileVersion') -or $null -eq $lock['lockfileVersion']) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is missing 'lockfileVersion'."
-            Missing = @('lockfileVersion-3')
-        }
-    }
-
-    try {
-        $lockVersion = [int]$lock['lockfileVersion']
-    } catch {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json has non-numeric lockfileVersion '$($lock['lockfileVersion'])'."
-            Missing = @('lockfileVersion-3')
-        }
-    }
-
-    if ($lockVersion -lt 3) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json uses lockfileVersion $lockVersion; expected lockfileVersion 3."
-            Missing = @('lockfileVersion-3')
-        }
-    }
-
-    if (-not $lock.Contains('packages') -or -not ($lock['packages'] -is [System.Collections.IDictionary])) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is missing the 'packages' dependency map."
-            Missing = @('packages')
-        }
-    }
-
-    $packagesMap = $lock['packages']
-    if (-not $packagesMap.Contains('') -or -not ($packagesMap[''] -is [System.Collections.IDictionary])) {
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is missing root package entry (`"`") inside 'packages'."
-            Missing = @('root-package')
-        }
-    }
-
-    $missing = New-Object System.Collections.Generic.List[string]
-    $rootEntry = $packagesMap['']
-
-    # Cross-check against package.json if provided or co-located with package-lock.json
-    $resolvedPkgJson = if (-not [string]::IsNullOrWhiteSpace($PackageJsonPath)) {
-        $PackageJsonPath
-    } else {
-        Join-Path (Split-Path -Path $LockfilePath -Parent) 'package.json'
-    }
-
-    if ($resolvedPkgJson -and (Test-Path -Path $resolvedPkgJson -PathType Leaf)) {
-        $rawPkg = Get-Content -Path $resolvedPkgJson -Raw -Encoding UTF8
-        try {
-            $pkgDoc = ConvertFrom-JsonDictionary -JsonText $rawPkg
-        } catch {
-            return [PSCustomObject]@{
-                Valid   = $false
-                Reason  = "package.json is not valid JSON: $($_.Exception.Message)"
-                Missing = @('invalid-package-json')
-            }
-        }
-
-        if ($pkgDoc -is [System.Collections.IDictionary]) {
-            foreach ($section in @('dependencies', 'devDependencies', 'optionalDependencies')) {
-                if ($pkgDoc.Contains($section) -and ($pkgDoc[$section] -is [System.Collections.IDictionary])) {
-                    $rootSection = if ($rootEntry.Contains($section) -and ($rootEntry[$section] -is [System.Collections.IDictionary])) {
-                        $rootEntry[$section]
-                    } else {
-                        $null
-                    }
-                    foreach ($depName in $pkgDoc[$section].Keys) {
-                        $expectedSpec = [string]$pkgDoc[$section][$depName]
-                        if (-not $rootSection -or -not $rootSection.Contains($depName) -or ([string]$rootSection[$depName] -ne $expectedSpec)) {
-                            [void]$missing.Add("root:$depName")
-                        }
-                        if (-not $packagesMap.Contains("node_modules/$depName")) {
-                            [void]$missing.Add($depName)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    # Verify every package's declared optionalDependencies exist in the lockfile packages map
-    # (catches stripped cross-platform bindings such as @tailwindcss/oxide-* / @tauri-apps/cli-* / @rolldown/binding-*)
-    foreach ($pkgKey in $packagesMap.Keys) {
-        $pkgMeta = $packagesMap[$pkgKey]
-        if (-not ($pkgMeta -is [System.Collections.IDictionary])) { continue }
-        if (-not $pkgMeta.Contains('optionalDependencies') -or -not ($pkgMeta['optionalDependencies'] -is [System.Collections.IDictionary])) {
-            continue
-        }
-
-        foreach ($optName in $pkgMeta['optionalDependencies'].Keys) {
-            $topLevelKey = "node_modules/$optName"
-            $nestedKey = if ([string]::IsNullOrEmpty([string]$pkgKey)) { $topLevelKey } else { "$pkgKey/node_modules/$optName" }
-            if (-not $packagesMap.Contains($topLevelKey) -and -not $packagesMap.Contains($nestedKey)) {
-                if (-not $missing.Contains([string]$optName)) {
-                    [void]$missing.Add([string]$optName)
-                }
-            }
-        }
-    }
-
-    if ($missing.Count -gt 0) {
-        $uniqueMissing = @($missing | Select-Object -Unique)
-        return [PSCustomObject]@{
-            Valid   = $false
-            Reason  = "package-lock.json is out of sync or missing optional dependencies: $($uniqueMissing -join ', ')"
-            Missing = $uniqueMissing
-        }
-    }
-
-    return [PSCustomObject]@{
-        Valid   = $true
-        Reason  = "Lockfile consistency and cross-platform optional dependencies verified (lockfileVersion $lockVersion, $($packagesMap.Count) packages)."
-        Missing = @()
-    }
+$buildScriptDir = if (-not [string]::IsNullOrWhiteSpace($buildScriptPath)) {
+    Split-Path -LiteralPath (Resolve-Path -LiteralPath $buildScriptPath).Path -Parent
+} else {
+    Resolve-RepoRoot
 }
+$lockValidationHelper = Join-Path $buildScriptDir 'scripts/LockfileValidation.ps1'
+if (-not (Test-Path -LiteralPath $lockValidationHelper -PathType Leaf)) {
+    Fail-Build -Message "Missing required lockfile validation module: $lockValidationHelper" -Stage 'Bootstrap'
+}
+. $lockValidationHelper
 
 function Test-WindowsBuildPrerequisites {
     param([switch]$StrictFail)
@@ -740,7 +575,20 @@ try {
 }
 
 $productName = if ($tauriConf.productName) { [string]$tauriConf.productName } else { 'VANTA Download Manager' }
-$appVersion = if ($tauriConf.version) { [string]$tauriConf.version } elseif ($packageJson.version) { [string]$packageJson.version } else { '1.0.0' }
+$tauriAppVersion = if ($tauriConf.version) { ([string]$tauriConf.version).Trim() } else { '' }
+$npmAppVersion = if ($packageJson.version) { ([string]$packageJson.version).Trim() } else { '' }
+if ([string]::IsNullOrWhiteSpace($tauriAppVersion) -or [string]::IsNullOrWhiteSpace($npmAppVersion)) {
+    Fail-Build -Message "Missing explicit application version in package.json ('$npmAppVersion') or src-tauri/tauri.conf.json ('$tauriAppVersion')." -Stage 'Manifest Parsing'
+}
+if ($tauriAppVersion -ne $npmAppVersion) {
+    Fail-Build -Message "Manifest version mismatch: src-tauri/tauri.conf.json reports '$tauriAppVersion' while package.json reports '$npmAppVersion'." -Stage 'Manifest Parsing'
+}
+$appVersion = $tauriAppVersion
+
+$versionCheckScript = Join-Path $script:RepoRoot 'scripts/Test-VersionConsistency.ps1'
+if (Test-Path -LiteralPath $versionCheckScript -PathType Leaf) {
+    & $versionCheckScript -ExpectedVersion $appVersion -RepoRootPath $script:RepoRoot | Out-Null
+}
 $isReleaseBuild = -not $Dev.IsPresent
 if ($Release.IsPresent) { $isReleaseBuild = $true }
 $buildModeLabel = if ($RepairLockfile) { 'RepairLockfile' } elseif ($Check) { 'Check (Read-Only)' } elseif ($isReleaseBuild) { 'Release' } else { 'Debug' }

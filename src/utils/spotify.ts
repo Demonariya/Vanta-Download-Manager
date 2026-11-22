@@ -243,7 +243,17 @@ export function spotifyUriToUrl(uri?: string | null): string | undefined {
 
 export function isGenericSpotifyIcon(url?: string | null): boolean {
   if (!url) return false;
-  const lower = url.toLowerCase();
+  const trimmed = url.trim();
+  if (!trimmed) return true;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  const lower = trimmed.toLowerCase();
   return (
     lower.includes('favicon') ||
     lower.endsWith('.ico') ||
@@ -270,7 +280,7 @@ export function pickLargestArtworkUrl(entity: any): string | undefined {
     if (!item?.url || isGenericSpotifyIcon(item.url)) continue;
     const score = item.maxWidth || item.width || item.height || 0;
     if (!bestUrl || score > bestScore) {
-      bestUrl = item.url;
+      bestUrl = item.url.trim();
       bestScore = score;
     }
   }

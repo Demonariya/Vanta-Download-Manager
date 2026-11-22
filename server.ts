@@ -1,10 +1,11 @@
 import express, { Request, Response } from 'express';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { createServer as createViteServer } from 'vite';
+import { createServer as createViteServer, PluginOption } from 'vite';
 import {
   getAllTasks,
   getTaskById,
@@ -21,6 +22,7 @@ import {
   resetSettings,
   getNotifications,
   clearNotifications,
+  isPlaceholderTaskTitle,
 } from './server/db';
 import {
   getCookieStatus,
@@ -34,7 +36,12 @@ import { engineManager, validatePythonExecutable } from './server/engineManager'
 import { spotifyMetadataService } from './server/spotify';
 import { queueController } from './server/queueController';
 import { DownloadTask } from './src/types';
-import { determineEngineForUrl, validateMediaUrl } from './src/utils/engine-parser';
+import {
+  determineEngineForUrl,
+  isValidThumbnailUrl,
+  selectBestThumbnail,
+  validateMediaUrl,
+} from './src/utils/engine-parser';
 
 dotenv.config();
 
@@ -71,6 +78,7 @@ function openPathWithOs(targetPath: string, revealParent = false): void {
 
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   const PORT = 3000;
 
   app.use(express.json());
@@ -285,20 +293,14 @@ async function startServer() {
     let resolvedUploader = typeof uploader === 'string' ? uploader.trim() || undefined : undefined;
     let resolvedDuration = duration || undefined;
     let resolvedDurationStr = duration_string || undefined;
-    let resolvedThumbnail = typeof thumbnail === 'string' ? thumbnail.trim() || undefined : undefined;
+    let resolvedThumbnail =
+      typeof thumbnail === 'string' && isValidThumbnailUrl(thumbnail.trim()) ? thumbnail.trim() : undefined;
     let resolvedAlbum = typeof album === 'string' ? album.trim() || undefined : undefined;
     let resolvedContentType = typeof content_type === 'string' ? content_type.trim() || undefined : undefined;
 
-    const isPlaceholderTitle =
-      !resolvedTitle ||
-      resolvedTitle === 'Download Task' ||
-      resolvedTitle === 'Queued Item' ||
-      resolvedTitle === 'Spotify Track / Album' ||
-      resolvedTitle === 'Spotify Music Track' ||
-      resolvedTitle === 'Spotify Album / Playlist' ||
-      resolvedTitle.startsWith('Batch Item:');
+    const needsMetadataEnrichment = isPlaceholderTaskTitle(resolvedTitle) || !resolvedThumbnail;
 
-    if (engine === 'spotdl' && (isPlaceholderTitle || !resolvedThumbnail)) {
+    if (engine === 'spotdl' && needsMetadataEnrichment) {
       try {
         const meta = await spotifyMetadataService.resolveSpotifyUrl(trimmedUrl);
         resolvedUrl = meta.url || resolvedUrl;
@@ -306,7 +308,7 @@ async function startServer() {
         resolvedUploader = meta.artists?.join(', ') || meta.owner || meta.uploader || resolvedUploader;
         resolvedDuration = meta.duration ?? resolvedDuration;
         resolvedDurationStr = meta.duration_string ?? resolvedDurationStr;
-        resolvedThumbnail = meta.album_artwork || meta.thumbnail || resolvedThumbnail;
+        resolvedThumbnail = selectBestThumbnail(meta) || resolvedThumbnail;
         resolvedAlbum = meta.album ?? resolvedAlbum;
         resolvedContentType = meta.content_type ?? resolvedContentType;
       } catch (err: any) {
@@ -396,6 +398,20 @@ async function startServer() {
     upsertTask(task);
     queueController.broadcast('task_added', task);
     queueController.scheduleNext();
+
+    if (engine === 'yt-dlp' && needsMetadataEnrichment) {
+      void engineManager
+        .inspectUrl(trimmedUrl, settings.proxy_url, undefined, {
+          includePlaylist: playlist_mode === 'playlist',
+          timeoutMs: 25_000,
+        })
+        .then((meta) => {
+          queueController.enrichTaskMetadata(task.id, meta);
+        })
+        .catch(() => {
+          // Non-blocking enrichment; active download before_dl metadata handles fallback
+        });
+    }
 
     res.status(201).json(task);
   });
@@ -668,9 +684,38 @@ async function startServer() {
   // Mount Vite middlewares in development
   const isProduction = process.env.NODE_ENV === 'production';
   if (!isProduction) {
+    const disableHmr = process.env.DISABLE_HMR === 'true';
+    const disableHmrClientWsPlugin: PluginOption = {
+      name: 'vanta:disable-hmr-client-ws',
+      enforce: 'post',
+      transform(code, id) {
+        const cleanId = id.split('?')[0].replace(/\\/g, '/');
+        if (cleanId.endsWith('/vite/dist/client/client.mjs') || cleanId === '/@vite/client') {
+          const patched = code.replace(
+            /const createWebSocketModuleRunnerTransport\s*=\s*\([^)]*\)\s*=>\s*\{/,
+            'const createWebSocketModuleRunnerTransport = () => ({ connect: async () => {}, disconnect: async () => {}, send: () => {} }); const _unusedCreateWebSocketModuleRunnerTransport = (options) => {'
+          );
+          if (patched !== code) {
+            return { code: patched, map: null };
+          }
+        }
+        return null;
+      },
+    };
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: disableHmr
+        ? {
+            middlewareMode: true,
+            hmr: false,
+            ws: false,
+          }
+        : {
+            middlewareMode: true,
+            ws: { server: httpServer },
+          },
       appType: 'spa',
+      ...(disableHmr ? { plugins: [disableHmrClientWsPlugin] } : {}),
     });
     app.use(vite.middlewares);
   } else {
@@ -680,7 +725,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`VANTA Download Manager server running on http://0.0.0.0:${PORT}`);
   });
 }

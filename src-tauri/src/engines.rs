@@ -2152,6 +2152,86 @@ impl EngineManager {
         false
     }
 
+    pub fn select_best_thumbnail(val: &serde_json::Value) -> Option<String> {
+        let mut best: Option<(f64, String)> = None;
+
+        if let Some(arr) = val.get("thumbnails").and_then(|v| v.as_array()) {
+            for item in arr {
+                let Some(url) = item.get("url").and_then(|v| v.as_str()).map(str::trim) else {
+                    continue;
+                };
+                if !crate::is_valid_thumbnail_url(url) {
+                    continue;
+                }
+                let lower = url.to_ascii_lowercase();
+                let id_str = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if id_str.contains("storyboard") || lower.contains("/sb/") || lower.contains("_sb_") {
+                    continue;
+                }
+
+                let width = item
+                    .get("width")
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(0.0);
+                let height = item
+                    .get("height")
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(0.0);
+                let pref = item
+                    .get("preference")
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.0);
+
+                let mut score = if width > 0.0 && height > 0.0 {
+                    width * height
+                } else if height > 0.0 {
+                    height * height * 1.5
+                } else if width > 0.0 {
+                    width * width * 0.6
+                } else {
+                    1000.0
+                };
+
+                score += pref * 100.0;
+                if lower.contains("maxresdefault") || lower.contains("sddefault") {
+                    score += 500_000.0;
+                } else if lower.contains("hq720") || lower.contains("hqdefault") {
+                    score += 200_000.0;
+                } else if lower.contains("mqdefault") {
+                    score += 50_000.0;
+                }
+                if lower.starts_with("https://") {
+                    score += 10.0;
+                }
+
+                if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                    best = Some((score, url.to_string()));
+                }
+            }
+        }
+
+        if let Some((_, url)) = best {
+            return Some(url);
+        }
+
+        for field in ["album_artwork", "thumbnail"] {
+            if let Some(url) = val.get(field).and_then(|v| v.as_str()).map(str::trim) {
+                if crate::is_valid_thumbnail_url(url) {
+                    return Some(url.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn inspect_url(url: &str, settings: &AppSettings) -> Result<MediaMetadata, String> {
         Self::inspect_url_with_tracking("direct", url, settings, None, None)
     }
@@ -2491,10 +2571,7 @@ impl EngineManager {
                                 .or_else(|| e.get("channel"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            thumbnail: e
-                                .get("thumbnail")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
+                            thumbnail: Self::select_best_thumbnail(e),
                         }
                     })
                     .collect()
@@ -2530,10 +2607,7 @@ impl EngineManager {
                 .get("duration_string")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            thumbnail: val
-                .get("thumbnail")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            thumbnail: Self::select_best_thumbnail(&val),
             description: val
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -2982,5 +3056,22 @@ printf '{"id":"vid123","title":"Sample Video","uploader":"Creator","duration":12
         assert_eq!(meta.formats.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_select_best_thumbnail_ranks_resolution_and_rejects_storyboard() {
+        let sample = serde_json::json!({
+            "thumbnail": "https://i.ytimg.com/vi/abc/default.jpg",
+            "thumbnails": [
+                { "url": "https://i.ytimg.com/sb/abc/storyboard.jpg", "width": 2000, "height": 2000 },
+                { "url": "https://i.ytimg.com/vi/abc/mqdefault.jpg", "width": 320, "height": 180 },
+                { "url": "https://i.ytimg.com/vi/abc/maxresdefault.jpg", "width": 1280, "height": 720 },
+                { "url": "not-a-url", "width": 4000, "height": 4000 }
+            ]
+        });
+        assert_eq!(
+            EngineManager::select_best_thumbnail(&sample).as_deref(),
+            Some("https://i.ytimg.com/vi/abc/maxresdefault.jpg")
+        );
     }
 }

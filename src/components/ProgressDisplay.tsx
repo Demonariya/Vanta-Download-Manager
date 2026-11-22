@@ -70,17 +70,25 @@ export function getStatusColorClass(status: DownloadTask['status']): string {
 
 export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact = false }) => {
   const isActive = isActiveTaskStatus(task.status);
-  const percentageKnown = task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0);
+  const percentageKnown =
+    task.status === 'completed' ||
+    (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
+
+  const isPostProcessing =
+    task.status === 'muxing' || task.status === 'processing' || task.status === 'verifying';
+  const isPreTransfer =
+    task.status === 'inspecting' || task.status === 'connecting' || task.status === 'resuming';
   const isIndeterminate =
     isActive &&
-    (task.status === 'inspecting' ||
-      task.status === 'connecting' ||
-      task.status === 'resuming' ||
-      task.status === 'muxing' ||
-      task.status === 'verifying' ||
-      (task.status === 'downloading' && !percentageKnown));
+    (isPreTransfer || isPostProcessing || (task.status === 'downloading' && !percentageKnown));
 
   const clampedPct = Math.min(100, Math.max(0, task.progress_percentage || 0));
+  const barWidthPct =
+    task.status === 'completed'
+      ? 100
+      : task.status === 'paused' && !percentageKnown
+      ? 0
+      : clampedPct;
 
   const barToneClass =
     task.status === 'completed'
@@ -89,7 +97,7 @@ export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact 
       ? 'bg-red-600 dark:bg-[#f85149]'
       : task.status === 'paused' || task.status === 'pausing'
       ? 'bg-amber-500 dark:bg-[#d29922]'
-      : task.status === 'muxing' || task.status === 'processing' || task.status === 'verifying'
+      : isPostProcessing
       ? 'bg-violet-600 dark:bg-[#a371f7]'
       : task.status === 'cancelled'
       ? 'bg-[var(--vanta-muted)]/50'
@@ -99,14 +107,44 @@ export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact 
     task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0
       ? task.total_bytes
       : task.downloaded_bytes;
-  const downloadedText = effectiveDownloadedBytes > 0 ? formatBytes(effectiveDownloadedBytes) : '0 B';
-  const totalText = task.total_bytes > 0 ? formatBytes(task.total_bytes) : 'Unknown size';
+  const downloadedText =
+    effectiveDownloadedBytes > 0 ? formatBytes(effectiveDownloadedBytes) : '0 B';
+  const totalText = task.total_bytes > 0 ? formatBytes(task.total_bytes) : null;
+  const remainingBytes =
+    (task.remaining_bytes ?? 0) > 0
+      ? task.remaining_bytes ?? 0
+      : task.total_bytes > effectiveDownloadedBytes
+      ? task.total_bytes - effectiveDownloadedBytes
+      : 0;
+
   const sizeSummaryText =
-    task.status === 'completed' && task.total_bytes > 0 && effectiveDownloadedBytes === task.total_bytes
+    task.status === 'completed' && totalText && effectiveDownloadedBytes === task.total_bytes
       ? totalText
-      : task.total_bytes > 0
+      : totalText
       ? `${downloadedText} / ${totalText}`
-      : downloadedText;
+      : task.status === 'downloading' || effectiveDownloadedBytes > 0
+      ? `Downloaded: ${downloadedText}`
+      : '0 B';
+
+  const phaseText = task.current_phase?.trim() || getStatusLabel(task.status);
+  const showSpeed =
+    task.status === 'downloading' && task.speed_bytes_per_sec > 0 && Boolean(task.speed_str);
+  const hasKnownEta =
+    task.status === 'downloading' &&
+    percentageKnown &&
+    Boolean(task.eta_str) &&
+    task.eta_str !== '--' &&
+    task.eta_str !== 'Unknown';
+  const showUnknownEta = task.status === 'downloading' && !percentageKnown;
+
+  const pctReadout =
+    task.status === 'completed'
+      ? '100%'
+      : isIndeterminate || (task.status === 'paused' && !percentageKnown)
+      ? '--%'
+      : task.status === 'downloading' && clampedPct >= 99.9 && task.total_bytes > 0
+      ? 'Finishing...'
+      : `${clampedPct.toFixed(1)}%`;
 
   return (
     <div className="space-y-1.5 w-full min-w-0">
@@ -116,46 +154,53 @@ export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact 
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={isIndeterminate ? undefined : Math.round(clampedPct)}
+        aria-valuenow={isIndeterminate ? undefined : Math.round(barWidthPct)}
       >
         {isIndeterminate ? (
           <div className={`h-full w-1/2 vanta-indeterminate-bar ${barToneClass}`} />
         ) : (
           <div
             className={`h-full transition-[width] duration-200 ease-out ${barToneClass}`}
-            style={{ width: `${task.status === 'completed' ? 100 : clampedPct}%` }}
+            style={{ width: `${barWidthPct}%` }}
           />
         )}
       </div>
 
       {/* Telemetry Readout */}
-      {!compact && (
+      {compact ? (
+        <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-[var(--vanta-muted)]">
+          <span className={`truncate ${getStatusColorClass(task.status)}`}>{phaseText}</span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {showSpeed && (
+              <span className="text-[var(--vanta-text-secondary)]">{task.speed_str}</span>
+            )}
+            <span>{sizeSummaryText}</span>
+            <span className="font-semibold text-[var(--vanta-text)]">{pctReadout}</span>
+          </div>
+        </div>
+      ) : (
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] font-mono tabular-nums text-[var(--vanta-muted)]">
           <div className="flex items-center gap-2 min-w-0 truncate">
-            <span className={`font-medium ${getStatusColorClass(task.status)}`}>
-              {task.current_phase || getStatusLabel(task.status)}
-            </span>
+            <span className={`font-medium ${getStatusColorClass(task.status)}`}>{phaseText}</span>
             <span aria-hidden="true">·</span>
             <span>{sizeSummaryText}</span>
+            {task.status === 'downloading' && remainingBytes > 0 && task.total_bytes > 0 && (
+              <span className="hidden md:inline text-[var(--vanta-muted)]">
+                ({formatBytes(remainingBytes)} left)
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {isActive && task.speed_bytes_per_sec > 0 && (
+            {showSpeed && (
               <span className="text-[var(--vanta-text-secondary)]">{task.speed_str}</span>
             )}
-            {isActive && task.eta_str && task.eta_str !== '--' && (
-              <span>ETA {task.eta_str}</span>
-            )}
+            {hasKnownEta && <span>ETA {task.eta_str}</span>}
+            {showUnknownEta && <span>ETA: Unknown</span>}
             {task.status === 'completed' && (task.elapsed_seconds ?? 0) > 0 && (
               <span>in {formatDuration(task.elapsed_seconds)}</span>
             )}
-            <span className="font-semibold text-[var(--vanta-text)]">
-              {task.status === 'completed'
-                ? '100%'
-                : isIndeterminate
-                ? '--%'
-                : `${clampedPct.toFixed(1)}%`}
-            </span>
+            <span className="font-semibold text-[var(--vanta-text)]">{pctReadout}</span>
           </div>
         </div>
       )}

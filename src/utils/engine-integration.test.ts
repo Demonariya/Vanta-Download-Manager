@@ -5,47 +5,245 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { classifyDownloadError, sanitizeLog } from './error-classifier';
 
-test('Integration: yt-dlp executable runs and reports latest stable release', () => {
-  const candidates = [
-    path.resolve(process.cwd(), 'bin', 'yt-dlp'),
-    '/usr/local/bin/yt-dlp',
-    '/usr/bin/yt-dlp',
-  ];
-  const execPath = candidates.find((p) => fs.existsSync(p));
-  assert.ok(execPath, 'yt-dlp executable must exist in project or system path');
+interface BinaryCheckResult {
+  compatible: boolean;
+  executable: boolean;
+  reason?: string;
+}
 
-  const version = execSync(`"${execPath}" --version`, { encoding: 'utf-8' }).trim();
-  assert.ok(/^\d{4}\./.test(version), `Reported version (${version}) should be valid CalVer release`);
+function inspectExecutable(filePath: string): BinaryCheckResult {
+  if (!fs.existsSync(filePath)) {
+    return { compatible: false, executable: false, reason: 'file does not exist' };
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    return {
+      compatible: false,
+      executable: false,
+      reason: `stat failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!stat.isFile()) {
+    return { compatible: false, executable: false, reason: 'path is not a regular file' };
+  }
+
+  // Inspect magic bytes to ensure platform compatibility before attempting execution
+  let header = Buffer.alloc(0);
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(4);
+      const bytesRead = fs.readSync(fd, buf, 0, 4, 0);
+      header = buf.subarray(0, bytesRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    return {
+      compatible: false,
+      executable: false,
+      reason: `unable to read binary header: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const isWindows = process.platform === 'win32';
+  const isPeBinary = header.length >= 2 && header[0] === 0x4d && header[1] === 0x5a; // "MZ"
+  const isElfBinary =
+    header.length >= 4 &&
+    header[0] === 0x7f &&
+    header[1] === 0x45 &&
+    header[2] === 0x4c &&
+    header[3] === 0x46;
+  const isShebangScript = header.length >= 2 && header[0] === 0x23 && header[1] === 0x21; // "#!"
+  const isMachO =
+    header.length >= 4 &&
+    ((header[0] === 0xcf && header[1] === 0xfa && header[2] === 0xed && header[3] === 0xfe) ||
+      (header[0] === 0xfe && header[1] === 0xed && header[2] === 0xfa && header[3] === 0xcf) ||
+      (header[0] === 0xca && header[1] === 0xfe && header[2] === 0xba && header[3] === 0xbe));
+
+  if (isWindows) {
+    if (!isPeBinary && !/\.(exe|cmd|bat)$/i.test(filePath)) {
+      return {
+        compatible: false,
+        executable: false,
+        reason: 'file is not a Windows PE executable or batch wrapper',
+      };
+    }
+    return { compatible: true, executable: true };
+  }
+
+  if (isPeBinary) {
+    return {
+      compatible: false,
+      executable: false,
+      reason: `Windows PE executable cannot run natively on ${process.platform}`,
+    };
+  }
+
+  const platformCompatible = isElfBinary || isShebangScript || (process.platform === 'darwin' && isMachO);
+  if (!platformCompatible) {
+    return {
+      compatible: false,
+      executable: false,
+      reason: `unrecognized binary format for ${process.platform}`,
+    };
+  }
+
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return { compatible: true, executable: true };
+  } catch {
+    return {
+      compatible: true,
+      executable: false,
+      reason: 'executable permission bit (X_OK) is missing',
+    };
+  }
+}
+
+function findExecutableOnPath(names: string[]): string | null {
+  const pathEnv = process.env.PATH || '';
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      const status = inspectExecutable(candidate);
+      if (status.compatible && status.executable) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+function resolveToolExecutable(options: {
+  toolName: string;
+  envVar: string;
+  pathNames: string[];
+  repoFallback?: string;
+}): { path: string; diagnostics: string[] } {
+  const diagnostics: string[] = [];
+  const envValue = process.env[options.envVar]?.trim();
+
+  if (envValue) {
+    const resolvedEnvPath = path.resolve(envValue);
+    const check = inspectExecutable(resolvedEnvPath);
+    if (!check.compatible || !check.executable) {
+      throw new Error(
+        `${options.toolName} configured via ${options.envVar}="${envValue}" is unusable: ${check.reason || 'unknown error'}`
+      );
+    }
+    return { path: resolvedEnvPath, diagnostics };
+  }
+
+  const onPath = findExecutableOnPath(options.pathNames);
+  if (onPath) {
+    return { path: onPath, diagnostics };
+  }
+  diagnostics.push(`PATH lookup for [${options.pathNames.join(', ')}] found no compatible executable`);
+
+  if (options.repoFallback) {
+    const check = inspectExecutable(options.repoFallback);
+    if (check.compatible && check.executable) {
+      return { path: options.repoFallback, diagnostics };
+    }
+    diagnostics.push(`Repository candidate "${options.repoFallback}": ${check.reason || 'unavailable'}`);
+  }
+
+  throw new Error(
+    `Unable to locate a compatible executable ${options.toolName} binary on ${process.platform} (${process.arch}). Checked ${options.envVar}, PATH, and fallback candidates: ${diagnostics.join('; ')}`
+  );
+}
+
+function runToolVersion(executablePath: string, args: string[], toolLabel: string): string {
+  try {
+    return execFileSync(executablePath, args, {
+      encoding: 'utf-8',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 15_000,
+    }).trim();
+  } catch (err) {
+    const details = err as NodeJS.ErrnoException & { stderr?: string | Buffer; status?: number | null };
+    const stderrText = details.stderr ? String(details.stderr).trim() : '';
+    throw new Error(
+      `Failed executing ${toolLabel} at "${executablePath}" with args [${args.join(' ')}] (code=${details.code ?? details.status ?? 'unknown'}): ${details.message}${stderrText ? ` | stderr: ${stderrText}` : ''}`
+    );
+  }
+}
+
+test('Integration: yt-dlp executable runs and reports latest stable release', (t) => {
+  const isWindows = process.platform === 'win32';
+  const repoYtdlp = path.resolve(process.cwd(), 'bin', isWindows ? 'yt-dlp.exe' : 'yt-dlp');
+  const { path: ytdlpPath } = resolveToolExecutable({
+    toolName: 'yt-dlp',
+    envVar: 'VANTA_TEST_YTDLP_PATH',
+    pathNames: isWindows ? ['yt-dlp.exe', 'yt-dlp'] : ['yt-dlp'],
+    repoFallback: repoYtdlp,
+  });
+
+  const version = runToolVersion(ytdlpPath, ['--version'], 'yt-dlp');
+  t.diagnostic(`Tested yt-dlp at "${ytdlpPath}" -> ${version}`);
+  assert.ok(/^\d{4}\./.test(version), `Reported yt-dlp version (${version}) from "${ytdlpPath}" should be a valid CalVer release`);
 });
 
 test('Integration: spotDL executable runs cleanly when installed', (t) => {
-  const candidates = [
-    path.resolve(process.cwd(), 'bin', 'spotdl'),
-    '/root/.local/bin/spotdl',
-    '/usr/local/bin/spotdl',
-    '/usr/bin/spotdl',
-  ];
-  const execPath = candidates.find((p) => fs.existsSync(p));
-  if (!execPath) {
-    t.skip('Optional spotDL binary is not installed in this container environment');
+  const isWindows = process.platform === 'win32';
+  const repoSpotdl = path.resolve(process.cwd(), 'bin', isWindows ? 'spotdl.exe' : 'spotdl');
+
+  let spotdlPath: string;
+  try {
+    spotdlPath = resolveToolExecutable({
+      toolName: 'spotDL',
+      envVar: 'VANTA_TEST_SPOTDL_PATH',
+      pathNames: isWindows ? ['spotdl.exe', 'spotdl'] : ['spotdl'],
+      repoFallback: repoSpotdl,
+    }).path;
+  } catch {
+    t.skip('Optional spotDL binary is not installed in this environment');
     return;
   }
 
-  const version = execSync(`"${execPath}" --version`, { encoding: 'utf-8' }).trim();
-  assert.ok(version.length > 0, `Reported spotDL version should be non-empty: ${version}`);
+  const version = runToolVersion(spotdlPath, ['--version'], 'spotDL');
+  t.diagnostic(`Tested spotDL at "${spotdlPath}" -> ${version}`);
+  assert.ok(version.length > 0, `Reported spotDL version from "${spotdlPath}" should be non-empty`);
 });
 
-test('Integration: FFmpeg and FFprobe run and inspect media correctly', () => {
-  const ffmpegOut = execSync('ffmpeg -version', { encoding: 'utf-8' });
-  assert.ok(ffmpegOut.includes('ffmpeg version'), 'FFmpeg should be operational');
+test('Integration: FFmpeg and FFprobe run and inspect media correctly', (t) => {
+  const isWindows = process.platform === 'win32';
 
-  const ffprobeOut = execSync('ffprobe -version', { encoding: 'utf-8' });
-  assert.ok(ffprobeOut.includes('ffprobe version'), 'FFprobe should be operational');
+  const { path: ffmpegPath } = resolveToolExecutable({
+    toolName: 'ffmpeg',
+    envVar: 'FFMPEG_PATH',
+    pathNames: isWindows ? ['ffmpeg.exe', 'ffmpeg'] : ['ffmpeg'],
+  });
+  const ffmpegOut = runToolVersion(ffmpegPath, ['-version'], 'ffmpeg');
+  t.diagnostic(`Tested ffmpeg at "${ffmpegPath}"`);
+  assert.ok(
+    ffmpegOut.includes('ffmpeg version'),
+    `FFmpeg at "${ffmpegPath}" did not report an expected version banner`
+  );
+
+  const { path: ffprobePath } = resolveToolExecutable({
+    toolName: 'ffprobe',
+    envVar: 'FFPROBE_PATH',
+    pathNames: isWindows ? ['ffprobe.exe', 'ffprobe'] : ['ffprobe'],
+  });
+  const ffprobeOut = runToolVersion(ffprobePath, ['-version'], 'ffprobe');
+  t.diagnostic(`Tested ffprobe at "${ffprobePath}"`);
+  assert.ok(
+    ffprobeOut.includes('ffprobe version'),
+    `FFprobe at "${ffprobePath}" did not report an expected version banner`
+  );
 });
 
 test('HTTP 410 Recovery Simulation: Expired media URL correctly triggers re-extraction', () => {

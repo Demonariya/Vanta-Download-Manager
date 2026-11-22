@@ -13,6 +13,12 @@ import {
   parseBatchUrls,
   sanitizeFilename,
   parseYtdlpProgress,
+  StreamingLineParser,
+  stripAnsiCodes,
+  isValidThumbnailUrl,
+  selectBestThumbnail,
+  parseVantaBeforeDlMeta,
+  parseSpotdlProgressLine,
 } from './engine-parser';
 
 test('parseBytes parses various unit strings correctly', () => {
@@ -20,6 +26,9 @@ test('parseBytes parses various unit strings correctly', () => {
   assert.equal(parseBytes('1KB'), 1024);
   assert.equal(parseBytes('2.5MB'), 2621440);
   assert.equal(parseBytes('1GiB'), 1073741824);
+  assert.equal(parseBytes('~ 12.5MiB'), Math.round(12.5 * 1024 * 1024));
+  assert.equal(parseBytes('Unknown B/s'), 0);
+  assert.equal(parseBytes('N/A'), 0);
   assert.equal(parseBytes('NA'), 0);
   assert.equal(parseBytes('invalid'), 0);
   assert.equal(parseBytes(''), 0);
@@ -122,7 +131,24 @@ test('sanitizeFilename removes illegal characters safely', () => {
   assert.equal(clean.includes('\\'), false);
 });
 
-test('parseYtdlpProgress parses structured, standard, unknown-size, and muxing output', () => {
+test('parseYtdlpProgress parses 6-field, 7-field estimate, unknown-size, fragment, playlist item, and phases', () => {
+  const template7 = '30.0%|30.0MiB|NA|~ 100.0MiB|5.0MiB/s|00:14|downloading';
+  const p7 = parseYtdlpProgress(template7);
+  assert.ok(p7);
+  assert.equal(p7.percentageKnown, true);
+  assert.ok(Math.abs((p7.percentage || 0) - 30) < 0.2);
+  assert.equal(p7.totalBytes, 100 * 1024 * 1024);
+  assert.equal(p7.speedStr, '5.0 MB/s');
+  assert.equal(p7.etaStr, '00:14');
+
+  const templateUnknown = 'NA|4.5MiB|NA|NA|Unknown B/s|Unknown|downloading';
+  const pUnknown7 = parseYtdlpProgress(templateUnknown);
+  assert.ok(pUnknown7);
+  assert.equal(pUnknown7.percentageKnown, false);
+  assert.equal(pUnknown7.downloadedBytes, Math.round(4.5 * 1024 * 1024));
+  assert.equal(pUnknown7.totalBytes, 0);
+  assert.equal(pUnknown7.etaStr, '--');
+
   const structured = '45.5%|50.2MB|110.3MB|4.2MB/s|00:14|downloading';
   const p1 = parseYtdlpProgress(structured);
   assert.ok(p1);
@@ -131,14 +157,22 @@ test('parseYtdlpProgress parses structured, standard, unknown-size, and muxing o
   assert.equal(p1.speedStr, '4.2 MB/s');
   assert.equal(p1.etaStr, '00:14');
 
-  const standard = '[download]  50.0% of 100.00MiB at 5.00MiB/s ETA 00:10';
+  const standard = '[download]  50.0% of ~ 100.00MiB at 5.00MiB/s ETA 00:10 (frag 4/12)';
   const p2 = parseYtdlpProgress(standard);
   assert.ok(p2);
-  assert.equal(p2.percentage, 50.0);
+  assert.equal(p2.percentageKnown, true);
+  assert.equal(p2.fragmentIndex, 4);
+  assert.equal(p2.fragmentCount, 12);
   assert.equal(p2.speedStr, '5.0 MB/s');
   assert.equal(p2.etaStr, '00:10');
 
-  const unknownSize = '[download]  12.0MiB at 2.0MiB/s';
+  const itemLine = '[download] Downloading item 3 of 10';
+  const pItem = parseYtdlpProgress(itemLine);
+  assert.ok(pItem);
+  assert.equal(pItem.playlistItemIndex, 3);
+  assert.equal(pItem.playlistItemCount, 10);
+
+  const unknownSize = '[download]  12.0MiB at 2.0MiB/s (frag 2/8)';
   const pUnknown = parseYtdlpProgress(unknownSize);
   assert.ok(pUnknown);
   assert.equal(pUnknown.percentageKnown, false);
@@ -148,4 +182,64 @@ test('parseYtdlpProgress parses structured, standard, unknown-size, and muxing o
   const p3 = parseYtdlpProgress(merger);
   assert.ok(p3);
   assert.equal(p3.phase, 'muxing');
+
+  const extractAudio = '[ExtractAudio] Destination: track.mp3';
+  const pAudio = parseYtdlpProgress(extractAudio);
+  assert.ok(pAudio);
+  assert.equal(pAudio.phase, 'processing');
 });
+
+test('StreamingLineParser handles CR, CRLF chunk boundaries, ANSI stripping, and EOF flush', () => {
+  const parser = new StreamingLineParser();
+  const c1 = parser.push('\u001b[32m[download]\u001b[0m 10.0%\r');
+  assert.deepEqual(c1, []); // holds trailing \r in case next byte is \n
+  const c2 = parser.push('\n[download] 20.0%\r[download] 30.0%');
+  assert.deepEqual(c2, ['[download] 10.0%', '[download] 20.0%']);
+  const c3 = parser.flush();
+  assert.deepEqual(c3, ['[download] 30.0%']);
+  assert.equal(stripAnsiCodes('\u001b[1;34mVANTA\u001b[0m'), 'VANTA');
+});
+
+test('selectBestThumbnail picks highest quality valid URL and rejects storyboards or malformed URLs', () => {
+  assert.equal(isValidThumbnailUrl('https://i.ytimg.com/vi/abc/maxresdefault.jpg'), true);
+  assert.equal(isValidThumbnailUrl('https://i.ytimg.com/sb/abc/storyboard3_L1/M0.jpg'), false);
+  assert.equal(isValidThumbnailUrl('javascript:alert(1)'), false);
+  assert.equal(isValidThumbnailUrl('NA'), false);
+
+  const best = selectBestThumbnail({
+    thumbnail: 'https://i.ytimg.com/vi/abc/default.jpg',
+    thumbnails: [
+      { url: 'https://i.ytimg.com/sb/abc/storyboard.jpg', width: 2000, height: 2000 },
+      { url: 'https://i.ytimg.com/vi/abc/mqdefault.jpg', width: 320, height: 180 },
+      { url: 'https://i.ytimg.com/vi/abc/maxresdefault.jpg', width: 1280, height: 720, preference: 2 },
+    ],
+  });
+  assert.equal(best, 'https://i.ytimg.com/vi/abc/maxresdefault.jpg');
+
+  const artworkFallback = selectBestThumbnail({
+    album_artwork: 'https://i.scdn.co/image/ab67616d0000b273realartwork',
+  });
+  assert.equal(artworkFallback, 'https://i.scdn.co/image/ab67616d0000b273realartwork');
+});
+
+test('parseVantaBeforeDlMeta and parseSpotdlProgressLine parse metadata and spotDL lines accurately', () => {
+  const meta = parseVantaBeforeDlMeta(
+    'VANTA_META:dQw4w9WgXcQ\tReal Video Title\tChannel Name\t213\thttps://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg'
+  );
+  assert.deepEqual(meta, {
+    id: 'dQw4w9WgXcQ',
+    title: 'Real Video Title',
+    uploader: 'Channel Name',
+    duration: 213,
+    thumbnail: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg',
+  });
+
+  const spotSearch = parseSpotdlProgressLine('Searching for song on YouTube');
+  assert.equal(spotSearch?.phase, 'connecting');
+  const spotDL = parseSpotdlProgressLine('Downloading track... 64%');
+  assert.equal(spotDL?.phase, 'downloading');
+  assert.ok(spotDL?.label.includes('Downloading'));
+  const spotProc = parseSpotdlProgressLine('Embedding metadata into MP3');
+  assert.equal(spotProc?.phase, 'processing');
+});
+

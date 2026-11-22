@@ -13,7 +13,6 @@ import {
   Upload,
   Loader2,
   RotateCw,
-  Disc,
   ListMusic,
   AlertTriangle,
   ArrowUp,
@@ -43,6 +42,7 @@ import {
   summarizeVideoOptionCodecs,
 } from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
+import { MediaThumbnail } from './MediaThumbnail';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
@@ -949,24 +949,14 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           {metadata && (
             <div className="p-3.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] space-y-3">
               <div className="flex items-start gap-3">
-                {metadata.album_artwork || metadata.thumbnail ? (
-                  <img
-                    src={metadata.album_artwork || metadata.thumbnail}
-                    alt={metadata.title}
-                    referrerPolicy="no-referrer"
-                    className={`${
-                      detectedMediaKind === 'audio' ? 'w-16 h-16' : 'w-24 h-16'
-                    } rounded-md object-cover bg-[var(--vanta-surface)] border border-[var(--vanta-border)] shrink-0`}
-                  />
-                ) : (
-                  <div className="w-16 h-16 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)] flex items-center justify-center shrink-0 text-[var(--vanta-muted)]">
-                    {detectedMediaKind === 'audio' ? (
-                      <Disc className="w-6 h-6 text-emerald-600 dark:text-[#3fb950]" />
-                    ) : (
-                      <Video className="w-6 h-6 text-[var(--vanta-accent)]" />
-                    )}
-                  </div>
-                )}
+                <MediaThumbnail
+                  src={metadata.album_artwork || metadata.thumbnail}
+                  title={metadata.title}
+                  isAudio={detectedMediaKind === 'audio'}
+                  size={detectedMediaKind === 'audio' ? 'md' : 'md'}
+                  aspect={detectedMediaKind === 'audio' ? 'square' : 'video'}
+                  showBadge={false}
+                />
 
                 <div className="flex-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2">

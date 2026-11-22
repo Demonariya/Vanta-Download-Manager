@@ -13,6 +13,7 @@ import {
 import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { ProgressDisplay } from './ProgressDisplay';
+import { MediaThumbnail } from './MediaThumbnail';
 import { api } from '../services/api';
 
 interface DownloadDetailsDrawerProps {
@@ -97,6 +98,42 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
 
       {/* Scrollable Inspector Body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
+        {/* Media Preview & Genuine Metadata Summary */}
+        {(() => {
+          const isAudioTask = task.is_audio_only || task.engine === 'spotdl';
+          const metaParts: string[] = [];
+          if (task.uploader) metaParts.push(task.uploader);
+          if (task.album) metaParts.push(task.album);
+          if (task.duration_string) metaParts.push(task.duration_string);
+          if (task.resolution_label) metaParts.push(task.resolution_label);
+          if (task.ext) metaParts.push(task.ext.toUpperCase());
+
+          return (
+            <div className="p-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              <div className={isAudioTask ? 'flex items-start gap-3' : 'space-y-2.5'}>
+                <MediaThumbnail
+                  src={task.thumbnail}
+                  title={task.title}
+                  isAudio={isAudioTask}
+                  ext={task.ext}
+                  size="lg"
+                  aspect={isAudioTask ? 'square' : 'video'}
+                />
+                <div className="min-w-0 flex-1 space-y-1">
+                  <h3 className="text-xs sm:text-sm font-semibold text-[var(--vanta-text)] leading-snug break-words">
+                    {task.title}
+                  </h3>
+                  {metaParts.length > 0 && (
+                    <p className="text-[11px] font-mono tabular-nums text-[var(--vanta-muted)] break-words">
+                      {metaParts.join(' · ')}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Progress Overview */}
         <div className="space-y-2.5">
           <ProgressDisplay task={task} />

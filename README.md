@@ -105,9 +105,10 @@ VANTA builds **slim installers** by default (no 300+ MiB bundled engine binaries
    - **`*-portable.zip` (Portable Archive)** — Extract anywhere and launch `VANTA.exe` (place optional custom engine binaries inside the adjacent `bin/` directory).
 3. Verify the downloaded file against `SHA256SUMS.txt`:
    ```powershell
-   Get-FileHash .\VANTA-Download-Manager_1.0.0_x64-setup.exe -Algorithm SHA256
+   Get-FileHash ".\VANTA Download Manager_0.0.1_x64-setup.exe" -Algorithm SHA256
    ```
-4. Launch VANTA and open **Diagnostics** if prompted to fetch managed engine binaries (`yt-dlp`, `FFmpeg`/`FFprobe`, `spotDL`).
+4. **Upgrading / Installing from an earlier internal `1.0.0` dev build:** Because `0.0.1` is lower than `1.0.0`, Windows Installer/NSIS downgrade protection blocks in-place downgrade over `1.0.0` without changing the app identifier or `upgradeCode`. If an internal `1.0.0` build is installed, uninstall it first via Windows **Settings → Apps → Installed apps** and then install `0.0.1` (user settings, download history, and cookies in `%LOCALAPPDATA%\com.vanta.downloadmanager` are preserved across uninstall).
+5. Launch VANTA and open **Diagnostics** if prompted to fetch managed engine binaries (`yt-dlp`, `FFmpeg`/`FFprobe`, `spotDL`).
 
 ---
 
@@ -191,9 +192,9 @@ After `build.ps1` finishes, Vite's intermediate web bundle (already embedded int
 
 ```text
 dist/
-├── VANTA Download Manager_1.0.0_x64-setup.exe     # NSIS Setup Installer
-├── VANTA Download Manager_1.0.0_x64_en-US.msi     # Windows MSI Installer
-├── VANTA-Download-Manager_1.0.0_x64-portable.zip  # Portable ZIP (VANTA.exe + bin/)
+├── VANTA Download Manager_0.0.1_x64-setup.exe     # NSIS Setup Installer
+├── VANTA Download Manager_0.0.1_x64_en-US.msi     # Windows MSI Installer
+├── VANTA-Download-Manager_0.0.1_x64-portable.zip  # Portable ZIP (VANTA.exe + Engine/)
 ├── SHA256SUMS.txt                                  # SHA-256 digests for every package
 └── build-report.txt                                # Toolchain versions, binary size & manifest
 ```

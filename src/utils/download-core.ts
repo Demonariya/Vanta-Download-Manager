@@ -10,12 +10,12 @@ export const VALID_TASK_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   inspecting: ['ready', 'queued', 'connecting', 'downloading', 'paused', 'failed', 'cancelled'],
   ready: ['queued', 'connecting', 'downloading', 'paused', 'failed', 'cancelled'],
   connecting: ['downloading', 'processing', 'muxing', 'verifying', 'pausing', 'paused', 'failed', 'cancelled'],
-  downloading: ['processing', 'muxing', 'verifying', 'completed', 'pausing', 'paused', 'failed', 'cancelled'],
+  downloading: ['connecting', 'processing', 'muxing', 'verifying', 'completed', 'pausing', 'paused', 'failed', 'cancelled'],
   pausing: ['paused', 'cancelled', 'failed'],
   paused: ['resuming', 'queued', 'connecting', 'downloading', 'cancelled'],
   resuming: ['connecting', 'downloading', 'pausing', 'paused', 'failed', 'cancelled'],
-  processing: ['muxing', 'verifying', 'completed', 'pausing', 'paused', 'failed', 'cancelled'],
-  muxing: ['verifying', 'completed', 'failed', 'cancelled'],
+  processing: ['muxing', 'downloading', 'verifying', 'completed', 'pausing', 'paused', 'failed', 'cancelled'],
+  muxing: ['processing', 'downloading', 'verifying', 'completed', 'pausing', 'paused', 'failed', 'cancelled'],
   verifying: ['completed', 'failed', 'cancelled'],
   completed: ['queued'],
   failed: ['queued', 'cancelled'],
@@ -84,6 +84,7 @@ export class ProgressTracker {
   private readonly startedAtMs: number;
   private lastSampleAtMs: number;
   private lastDownloadedBytes: number;
+  private knownTotalBytes = 0;
   private emaSpeedBytesPerSec = 0;
 
   constructor(options?: { alpha?: number; startedAtMs?: number; initialBytes?: number }) {
@@ -94,10 +95,27 @@ export class ProgressTracker {
     this.lastDownloadedBytes = Math.max(0, options?.initialBytes ?? 0);
   }
 
+  public resetStream(options?: { nowMs?: number; initialBytes?: number }): void {
+    const now = options?.nowMs ?? Date.now();
+    this.lastSampleAtMs = now;
+    this.lastDownloadedBytes = Math.max(0, options?.initialBytes ?? 0);
+    this.knownTotalBytes = 0;
+    this.emaSpeedBytesPerSec = 0;
+  }
+
   public update(sample: ProgressSampleInput): ComputedProgressState {
     const nowMs = sample.nowMs ?? Date.now();
-    const downloaded = Math.max(0, Math.round(sample.downloadedBytes));
-    const total = Math.max(0, Math.round(sample.totalBytes));
+    const rawDownloaded = Math.max(0, Math.round(sample.downloadedBytes));
+    const rawTotal = Math.max(0, Math.round(sample.totalBytes));
+    if (rawTotal > 0) {
+      this.knownTotalBytes = Math.max(this.knownTotalBytes, rawTotal);
+    }
+
+    // Within a single active stream, retain monotonic downloaded bytes; if transitioning to
+    // a secondary stream (e.g., audio after video), explicit resetStream() handles it cleanly.
+    const downloaded = Math.max(this.lastDownloadedBytes, rawDownloaded);
+    const total = rawTotal > 0 ? Math.max(rawTotal, downloaded) : this.knownTotalBytes > 0 && downloaded <= this.knownTotalBytes ? this.knownTotalBytes : 0;
+
     const dtSec = Math.max(0.05, (nowMs - this.lastSampleAtMs) / 1000);
     const totalElapsedSec = Math.max(0, Math.round((nowMs - this.startedAtMs) / 1000));
 

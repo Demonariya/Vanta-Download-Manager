@@ -8,7 +8,7 @@ import {
   NotificationItem,
   TaskLogEntry,
 } from '../src/types';
-import { sanitizeFilename } from '../src/utils/engine-parser';
+import { isValidThumbnailUrl, sanitizeFilename } from '../src/utils/engine-parser';
 import { DEFAULT_SCHEDULER_SETTINGS } from '../src/utils/scheduler';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
@@ -496,6 +496,95 @@ export function getTaskById(id: string): DownloadTask | null {
   const r = stmt.get(id) as any;
   if (!r) return null;
   return hydrateTaskRow(r);
+}
+
+const PLACEHOLDER_TASK_TITLES = new Set([
+  '',
+  'Loading...',
+  'Inspecting...',
+  'Resolving...',
+  'Unknown Title',
+  'Queued video URL',
+  'Queued Item',
+  'Queued Download',
+  'Download Task',
+  'Media Download',
+  'Media',
+  'Untitled Media',
+  'Spotify Track / Album',
+  'Spotify Music Track',
+  'Spotify Album / Playlist',
+]);
+
+export function isPlaceholderTaskTitle(title: string | undefined | null): boolean {
+  const trimmed = (title || '').trim();
+  if (PLACEHOLDER_TASK_TITLES.has(trimmed)) return true;
+  return (
+    trimmed.startsWith('Batch Item:') ||
+    trimmed.startsWith('Batch Media:') ||
+    trimmed.startsWith('Inspecting ')
+  );
+}
+
+/**
+ * Safely merges partial progress/metadata updates into an existing DownloadTask
+ * without stripping valid thumbnails, titles, uploader metadata, or logs.
+ */
+export function mergeTaskUpdate(
+  current: DownloadTask,
+  update: Partial<DownloadTask>
+): DownloadTask {
+  const cleanedUpdate: Record<string, any> = {};
+  for (const [key, val] of Object.entries(update || {})) {
+    if (val !== undefined) {
+      cleanedUpdate[key] = val;
+    }
+  }
+
+  // Never erase a valid thumbnail with empty/invalid values
+  if ('thumbnail' in cleanedUpdate) {
+    if (!isValidThumbnailUrl(cleanedUpdate.thumbnail)) {
+      if (isValidThumbnailUrl(current.thumbnail)) {
+        cleanedUpdate.thumbnail = current.thumbnail;
+      } else {
+        delete cleanedUpdate.thumbnail;
+      }
+    } else {
+      cleanedUpdate.thumbnail = cleanedUpdate.thumbnail.trim();
+    }
+  } else if (isValidThumbnailUrl(current.thumbnail)) {
+    cleanedUpdate.thumbnail = current.thumbnail;
+  }
+
+  // Never overwrite a meaningful user/inspected title with a placeholder or empty string
+  if ('title' in cleanedUpdate) {
+    const nextTitle = typeof cleanedUpdate.title === 'string' ? cleanedUpdate.title.trim() : '';
+    if (!nextTitle || (!isPlaceholderTaskTitle(current.title) && isPlaceholderTaskTitle(nextTitle))) {
+      cleanedUpdate.title = current.title;
+    } else {
+      cleanedUpdate.title = nextTitle;
+    }
+  }
+
+  // Preserve non-empty descriptive metadata if incoming values are blank
+  for (const field of ['uploader', 'album', 'duration_string', 'content_type'] as const) {
+    if (field in cleanedUpdate) {
+      const nextVal = typeof cleanedUpdate[field] === 'string' ? cleanedUpdate[field].trim() : cleanedUpdate[field];
+      if (!nextVal && current[field]) {
+        cleanedUpdate[field] = current[field];
+      }
+    }
+  }
+
+  const merged: DownloadTask = {
+    ...current,
+    ...cleanedUpdate,
+  };
+
+  if (Array.isArray(merged.logs)) {
+    merged.logs = merged.logs.slice(-100);
+  }
+  return merged;
 }
 
 export function upsertTask(task: DownloadTask): void {

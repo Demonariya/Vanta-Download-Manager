@@ -19,6 +19,11 @@ import {
 } from '../src/types';
 import {
   parseYtdlpProgress,
+  parseVantaBeforeDlMeta,
+  parseSpotdlProgressLine,
+  StreamingLineParser,
+  selectBestThumbnail,
+  isValidThumbnailUrl,
   formatDuration,
   sanitizeFilename,
   determineEngineForUrl,
@@ -30,7 +35,7 @@ import { ProgressTracker, buildIdleMetricsPatch } from '../src/utils/download-co
 import { resolveVideoFormatSelector } from '../src/utils/media-formats';
 import { sanitizeLog } from '../src/utils/error-classifier';
 import { tryParseSpotifyInput } from '../src/utils/spotify';
-import { getAppDataDir, getSettings, getSettingsFilePath } from './db';
+import { getAppDataDir, getSettings, getSettingsFilePath, isPlaceholderTaskTitle } from './db';
 import {
   resolveCookieSource,
   testCookieExtraction as runCookieTest,
@@ -48,6 +53,10 @@ interface TrackedInspection {
   proc: ChildProcess | null;
   cancelled: boolean;
   abort?: () => void;
+}
+
+export interface EngineManagerOptions {
+  executables?: Partial<Record<'yt-dlp' | 'spotdl' | 'ffmpeg' | 'ffprobe' | 'python3', string>>;
 }
 
 function killChildProcessTree(proc: ChildProcess | null): void {
@@ -246,10 +255,16 @@ export async function validatePythonExecutable(rawPath: string): Promise<PythonV
 
 export class EngineManager {
   private activeProcesses: Map<string, ChildProcess> = new Map();
+  private activeAbortHandlers: Map<string, () => void> = new Map();
   private cancelledTasks: Set<string> = new Set();
   private activeInspections: Map<string, TrackedInspection> = new Map();
   private cachedEngineStatus: { ts: number; data: EngineStatusMap } | null = null;
   private inflightEngineScan: Promise<EngineStatusMap> | null = null;
+  private readonly executableOverrides: Partial<Record<string, string>>;
+
+  constructor(options?: EngineManagerOptions) {
+    this.executableOverrides = { ...(options?.executables || {}) };
+  }
 
   public getInstallRootDir(): string {
     const override = process.env.VANTA_ENGINE_ROOT?.trim();
@@ -327,6 +342,26 @@ export class EngineManager {
   }
 
   public findExecutable(name: string): string | null {
+    const instanceOverride = this.executableOverrides[name]?.trim();
+    if (instanceOverride && fs.existsSync(instanceOverride)) {
+      return instanceOverride;
+    }
+
+    const envKey =
+      name === 'yt-dlp'
+        ? 'VANTA_TEST_YTDLP_PATH'
+        : name === 'spotdl'
+        ? 'VANTA_TEST_SPOTDL_PATH'
+        : name === 'ffmpeg'
+        ? 'VANTA_TEST_FFMPEG_PATH'
+        : name === 'ffprobe'
+        ? 'VANTA_TEST_FFPROBE_PATH'
+        : '';
+    const envOverride = envKey ? process.env[envKey]?.trim() : '';
+    if (envOverride && fs.existsSync(envOverride)) {
+      return envOverride;
+    }
+
     const exeName = process.platform === 'win32' && !name.endsWith('.exe') ? `${name}.exe` : name;
     const candidates: string[] = [];
 
@@ -413,6 +448,12 @@ export class EngineManager {
   }
 
   public async resolveSpotdlInvocation(settings?: AppSettings): Promise<{ program: string; leadingArgs: string[] }> {
+    const testSpotdlOverride =
+      this.executableOverrides['spotdl']?.trim() || process.env.VANTA_TEST_SPOTDL_PATH?.trim();
+    if (testSpotdlOverride && fs.existsSync(testSpotdlOverride)) {
+      return { program: testSpotdlOverride, leadingArgs: [] };
+    }
+
     const s = settings || getSettings();
     if ((s.python_path || '').trim()) {
       await this.resolvePythonForSpotdl(s);
@@ -865,10 +906,7 @@ export class EngineManager {
                         duration: typeof e.duration === 'number' ? e.duration : undefined,
                         duration_string: e.duration ? formatDuration(e.duration) : undefined,
                         uploader: e.uploader || e.channel || raw.uploader || undefined,
-                        thumbnail:
-                          e.thumbnail ||
-                          (Array.isArray(e.thumbnails) && e.thumbnails[0]?.url) ||
-                          undefined,
+                        thumbnail: selectBestThumbnail(e),
                       };
                     })
                 : undefined;
@@ -880,7 +918,7 @@ export class EngineManager {
               uploader: raw.uploader || raw.channel || raw.artist || 'Unknown',
               duration: raw.duration,
               duration_string: formatDuration(raw.duration),
-              thumbnail: raw.thumbnail || (raw.thumbnails && raw.thumbnails[0]?.url) || undefined,
+              thumbnail: selectBestThumbnail(raw),
               description: raw.description ? String(raw.description).slice(0, 500) : undefined,
               formats: parsedFormats,
               is_playlist: isPlaylist,
@@ -989,26 +1027,123 @@ export class EngineManager {
     return settings.download_dir;
   }
 
-  private findRecentlyCreatedFile(dir: string, startedAtMs: number, isAudio: boolean): string | null {
+  private findRecentlyCreatedFile(
+    dir: string,
+    startedAtMs: number,
+    isAudio: boolean,
+    excludePaths?: Set<string>
+  ): string | null {
     if (!fs.existsSync(dir)) return null;
-    const extRegex = isAudio
-      ? /\.(mp3|flac|wav|m4a|aac|opus|ogg)$/i
-      : /\.(mp4|mkv|webm|mov|avi|m4v|flv|mp3|flac|m4a|opus)$/i;
-    let newestPath: string | null = null;
-    let newestMtime = 0;
+    const allowedExts = isAudio
+      ? new Set(['.mp3', '.flac', '.wav', '.m4a', '.aac', '.opus', '.ogg', '.webm'])
+      : new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.m4v', '.ts', '.mp3', '.m4a', '.opus', '.flac']);
+
+    let bestPath: string | null = null;
+    let bestMtime = 0;
 
     const scan = (currentDir: string, depth: number) => {
       if (depth > 2) return;
-      for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = path.join(currentDir, entry.name);
+        if (excludePaths?.has(full)) continue;
+        if (entry.isDirectory()) {
+          scan(full, depth + 1);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const lower = entry.name.toLowerCase();
+        if (lower.endsWith('.part') || lower.endsWith('.ytdl') || lower.endsWith('.temp') || lower.endsWith('.tmp')) {
+          continue;
+        }
+        const ext = path.extname(lower);
+        if (!allowedExts.has(ext)) continue;
+        try {
+          const st = fs.statSync(full);
+          if (st.size > 0 && st.mtimeMs >= startedAtMs - 2500 && st.mtimeMs >= bestMtime) {
+            bestMtime = st.mtimeMs;
+            bestPath = full;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    scan(dir, 0);
+    return bestPath;
+  }
+
+  private snapshotDirFiles(dir: string): Map<string, { size: number; mtimeMs: number }> {
+    const snap = new Map<string, { size: number; mtimeMs: number }>();
+    if (!fs.existsSync(dir)) return snap;
+    const scan = (currentDir: string, depth: number) => {
+      if (depth > 2) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
         const full = path.join(currentDir, entry.name);
         if (entry.isDirectory()) {
           scan(full, depth + 1);
-        } else if (entry.isFile() && extRegex.test(entry.name) && !entry.name.endsWith('.part')) {
+        } else if (entry.isFile()) {
           try {
             const st = fs.statSync(full);
-            if (st.size > 0 && st.mtimeMs >= startedAtMs - 2500 && st.mtimeMs > newestMtime) {
-              newestMtime = st.mtimeMs;
-              newestPath = full;
+            snap.set(full, { size: st.size, mtimeMs: st.mtimeMs });
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
+    scan(dir, 0);
+    return snap;
+  }
+
+  private measureSpotdlActiveBytes(
+    dir: string,
+    baseline: Map<string, { size: number; mtimeMs: number }>,
+    startedAtMs: number
+  ): { totalBytes: number; latestFile: string | null } {
+    if (!fs.existsSync(dir)) return { totalBytes: 0, latestFile: null };
+    const mediaOrTempExt = /\.(mp3|flac|wav|m4a|aac|opus|ogg|webm|mp4|mkv|part|temp)$/i;
+    let totalBytes = 0;
+    let latestFile: string | null = null;
+    let latestMtime = 0;
+
+    const scan = (currentDir: string, depth: number) => {
+      if (depth > 2) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          scan(full, depth + 1);
+        } else if (entry.isFile() && (mediaOrTempExt.test(entry.name) || entry.name.includes('.part'))) {
+          try {
+            const st = fs.statSync(full);
+            const prev = baseline.get(full);
+            const isRecent =
+              !prev || st.size > prev.size || st.mtimeMs >= startedAtMs - 1000;
+            if (isRecent && st.size > 0) {
+              const contributed = prev && st.mtimeMs <= prev.mtimeMs ? Math.max(0, st.size - prev.size) : st.size;
+              totalBytes += contributed;
+              if (st.mtimeMs >= latestMtime && !entry.name.endsWith('.part') && !entry.name.endsWith('.temp')) {
+                latestMtime = st.mtimeMs;
+                latestFile = full;
+              }
             }
           } catch {
             // ignore
@@ -1017,7 +1152,7 @@ export class EngineManager {
       }
     };
     scan(dir, 0);
-    return newestPath;
+    return { totalBytes, latestFile };
   }
 
   private executeYtdlpDownload(
@@ -1047,8 +1182,14 @@ export class EngineManager {
     const args: string[] = [
       '--newline',
       '--no-colors',
+      '--no-quiet',
+      '--progress',
+      '--progress-delta',
+      '0.2',
       '--progress-template',
-      '%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s',
+      'download:%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s',
+      '--print',
+      'before_dl:VANTA_META:%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s',
       '--print',
       'after_move:VANTA_OUTPUT_FILE:%(filepath)s',
       '-o',
@@ -1147,6 +1288,29 @@ export class EngineManager {
 
     const startedAtMs = Date.now();
     const tracker = new ProgressTracker({ alpha: 0.3, startedAtMs });
+    const stdoutParser = new StreamingLineParser();
+    const stderrParser = new StreamingLineParser();
+    const seenDownloadDestinations = new Set<string>();
+
+    let lastOutputAtMs = startedAtMs;
+    let lastByteAdvanceAtMs = startedAtMs;
+    let lastObservedBytes = 0;
+    let hasReceivedDownloadProgress = false;
+    let currentPhaseStatus: DownloadTask['status'] = 'connecting';
+    let lastKnownBytes = 0;
+    let lastKnownTotal = task.total_bytes || 0;
+    let metadataBackfilled = isValidThumbnailUrl(task.thumbnail) && !isPlaceholderTaskTitle(task.title);
+    let settled = false;
+    let watchdogTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      this.activeProcesses.delete(task.id);
+      this.activeAbortHandlers.delete(task.id);
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+      }
+    };
 
     onProgress({
       status: 'connecting',
@@ -1164,78 +1328,208 @@ export class EngineManager {
 
       let lastOutput = '';
       let detectedOutputFile = '';
+      let lastComputedState: ReturnType<ProgressTracker['update']> | null = null;
+
+      watchdogTimer = setInterval(() => {
+        if (settled || this.cancelledTasks.has(task.id)) return;
+        const now = Date.now();
+        if (!hasReceivedDownloadProgress && now - lastOutputAtMs >= 12_000) {
+          onProgress({
+            status: 'connecting',
+            current_phase: 'Waiting for source response...',
+            elapsed_seconds: Math.round((now - startedAtMs) / 1000),
+          });
+        } else if (
+          hasReceivedDownloadProgress &&
+          currentPhaseStatus === 'downloading' &&
+          now - lastByteAdvanceAtMs >= 15_000
+        ) {
+          onProgress({
+            status: 'downloading',
+            current_phase: 'Transfer stalled — waiting for incoming data...',
+            speed_bytes_per_sec: 0,
+            speed_str: '0 B/s',
+            elapsed_seconds: Math.round((now - startedAtMs) / 1000),
+          });
+        }
+      }, 2_000);
+      watchdogTimer.unref?.();
+
+      this.activeAbortHandlers.set(task.id, cleanup);
+
+      const handleLine = (rawLine: string) => {
+        if (settled || this.cancelledTasks.has(task.id)) return;
+        const trimmed = rawLine.trim();
+        if (!trimmed) return;
+        lastOutputAtMs = Date.now();
+
+        if (trimmed.startsWith('VANTA_OUTPUT_FILE:')) {
+          const printedPath = trimmed.slice('VANTA_OUTPUT_FILE:'.length).trim();
+          if (printedPath) detectedOutputFile = printedPath;
+          return;
+        }
+
+        if (trimmed.startsWith('VANTA_META:')) {
+          const meta = parseVantaBeforeDlMeta(trimmed);
+          if (meta) {
+            const metaPatch: Partial<DownloadTask> = {};
+            if (meta.thumbnail && !isValidThumbnailUrl(task.thumbnail)) {
+              metaPatch.thumbnail = meta.thumbnail;
+            }
+            if (meta.title && isPlaceholderTaskTitle(task.title)) {
+              metaPatch.title = meta.title;
+            }
+            if (meta.uploader && !task.uploader) {
+              metaPatch.uploader = meta.uploader;
+            }
+            if (meta.duration && !task.duration) {
+              metaPatch.duration = meta.duration;
+              metaPatch.duration_string = formatDuration(meta.duration);
+            }
+            if (Object.keys(metaPatch).length > 0 || !metadataBackfilled) {
+              metadataBackfilled = true;
+              onProgress(metaPatch);
+            }
+          }
+          return;
+        }
+
+        const destMatch = trimmed.match(/\[(?:download|ExtractAudio)\]\s+Destination:\s*(.*)$/);
+        if (destMatch && destMatch[1]) {
+          const destPath = destMatch[1].trim().replace(/^["']|["']$/g, '');
+          if (destPath) {
+            detectedOutputFile = destPath;
+            if (seenDownloadDestinations.size > 0 && !seenDownloadDestinations.has(destPath)) {
+              tracker.resetStream({ nowMs: Date.now() });
+              lastObservedBytes = 0;
+            }
+            seenDownloadDestinations.add(destPath);
+          }
+        }
+
+        const mergerMatch = trimmed.match(/\[(?:Merger|Fixup\w+)\]\s+Merging formats into\s+["']?(.*?)["']?$/);
+        if (mergerMatch && mergerMatch[1]) {
+          detectedOutputFile = mergerMatch[1].trim().replace(/^["']|["']$/g, '');
+        }
+
+        const parsed = parseYtdlpProgress(trimmed);
+        if (!parsed) return;
+
+        if (parsed.phase === 'connecting') {
+          currentPhaseStatus = 'connecting';
+          onProgress({
+            status: 'connecting',
+            current_phase: parsed.phaseLabel || 'Resolving media source...',
+            elapsed_seconds: Math.round((Date.now() - startedAtMs) / 1000),
+          });
+          return;
+        }
+
+        if (parsed.phase === 'muxing') {
+          currentPhaseStatus = 'muxing';
+          onProgress({
+            status: 'muxing',
+            current_phase: parsed.phaseLabel || 'Muxing video & audio streams via FFmpeg...',
+            downloaded_bytes: lastComputedState?.downloaded_bytes ?? lastKnownBytes,
+            total_bytes: lastComputedState?.total_bytes ?? lastKnownTotal,
+            progress_percentage: lastComputedState?.progress_percentage ?? (lastKnownTotal > 0 ? 100 : 0),
+            speed_bytes_per_sec: 0,
+            speed_str: '0 B/s',
+            eta_seconds: null,
+            eta_str: '--',
+            active_connections: 0,
+          });
+          return;
+        }
+
+        if (parsed.phase === 'processing' || parsed.phase === 'converting') {
+          currentPhaseStatus = 'processing';
+          onProgress({
+            status: 'processing',
+            current_phase: parsed.phaseLabel || 'Processing & embedding metadata...',
+            downloaded_bytes: lastComputedState?.downloaded_bytes ?? lastKnownBytes,
+            total_bytes: lastComputedState?.total_bytes ?? lastKnownTotal,
+            progress_percentage: lastComputedState?.progress_percentage ?? (lastKnownTotal > 0 ? 100 : 0),
+            speed_bytes_per_sec: 0,
+            speed_str: '0 B/s',
+            eta_seconds: null,
+            eta_str: '--',
+            active_connections: 0,
+          });
+          return;
+        }
+
+        if (parsed.playlistItemIndex !== undefined && parsed.playlistItemCount !== undefined) {
+          currentPhaseStatus = 'downloading';
+          onProgress({
+            status: 'downloading',
+            current_phase: parsed.phaseLabel || `Downloading item ${parsed.playlistItemIndex} of ${parsed.playlistItemCount}...`,
+            tracks_requested: task.tracks_requested || parsed.playlistItemCount,
+            tracks_completed: Math.max(0, parsed.playlistItemIndex - 1),
+          });
+          return;
+        }
+
+        const nowMs = Date.now();
+        const incomingBytes = parsed.downloadedBytes ?? 0;
+        if (incomingBytes > lastObservedBytes || (parsed.speedBytesPerSec ?? 0) > 0) {
+          lastObservedBytes = incomingBytes;
+          lastByteAdvanceAtMs = nowMs;
+        }
+
+        hasReceivedDownloadProgress = true;
+        currentPhaseStatus = 'downloading';
+
+        const computed = tracker.update({
+          downloadedBytes: incomingBytes,
+          totalBytes: parsed.totalBytes ?? 0,
+          instantSpeedBytesPerSec: parsed.speedBytesPerSec,
+          percentageHint: parsed.percentageKnown ? parsed.percentage : undefined,
+          activeConnections: Math.max(1, settings.fragment_concurrency || 1),
+          nowMs,
+        });
+        lastComputedState = computed;
+        lastKnownBytes = computed.downloaded_bytes;
+        lastKnownTotal = computed.total_bytes;
+
+        onProgress({
+          status: 'downloading',
+          current_phase: parsed.phaseLabel || 'Downloading media stream',
+          ...computed,
+        });
+      };
 
       proc.stdout.on('data', (data) => {
         const text = data.toString();
         lastOutput = (lastOutput + text).slice(-4000);
-        const lines = text.split('\n');
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-
-          if (trimmed.startsWith('VANTA_OUTPUT_FILE:')) {
-            const printedPath = trimmed.slice('VANTA_OUTPUT_FILE:'.length).trim();
-            if (printedPath) detectedOutputFile = printedPath;
-            continue;
-          }
-
-          const destMatch = trimmed.match(/\[(?:download|Merger|ExtractAudio)\] Destination:\s*(.*)$/);
-          if (destMatch && destMatch[1]) {
-            detectedOutputFile = destMatch[1].trim().replace(/^["']|["']$/g, '');
-          }
-
-          const mergerMatch = trimmed.match(/\[(?:Merger|Fixup\w+)\] Merging formats into ["']?(.*?)["']?$/);
-          if (mergerMatch && mergerMatch[1]) {
-            detectedOutputFile = mergerMatch[1].trim().replace(/^["']|["']$/g, '');
-          }
-
-          const parsed = parseYtdlpProgress(trimmed);
-          if (parsed) {
-            if (parsed.phase === 'muxing') {
-              onProgress({
-                status: 'muxing',
-                current_phase: 'Muxing video & audio streams via FFmpeg...',
-                speed_bytes_per_sec: 0,
-                speed_str: '0 B/s',
-                eta_seconds: null,
-                eta_str: '--',
-                active_connections: 0,
-              });
-            } else if (parsed.phase === 'processing' || parsed.phase === 'converting') {
-              onProgress({
-                status: 'processing',
-                current_phase: 'Processing & embedding metadata...',
-                speed_bytes_per_sec: 0,
-                speed_str: '0 B/s',
-                eta_seconds: null,
-                eta_str: '--',
-                active_connections: 0,
-              });
-            } else {
-              const computed = tracker.update({
-                downloadedBytes: parsed.downloadedBytes ?? 0,
-                totalBytes: parsed.totalBytes ?? 0,
-                instantSpeedBytesPerSec: parsed.speedBytesPerSec,
-                percentageHint: parsed.percentage,
-                activeConnections: Math.max(1, settings.fragment_concurrency || 1),
-              });
-              onProgress({
-                status: 'downloading',
-                current_phase: 'Downloading media stream',
-                ...computed,
-              });
-            }
-          }
+        for (const line of stdoutParser.push(data)) {
+          handleLine(line);
         }
       });
 
       proc.stderr.on('data', (data) => {
-        lastOutput = (lastOutput + data.toString()).slice(-4000);
+        const text = data.toString();
+        lastOutput = (lastOutput + text).slice(-4000);
+        for (const line of stderrParser.push(data)) {
+          handleLine(line);
+        }
       });
 
       proc.on('close', (code) => {
-        this.activeProcesses.delete(task.id);
+        if (settled) return;
+        for (const tailLine of stdoutParser.flush()) {
+          handleLine(tailLine);
+        }
+        for (const tailLine of stderrParser.flush()) {
+          handleLine(tailLine);
+        }
+        settled = true;
+        cleanup();
+
+        if (this.cancelledTasks.has(task.id) || code === null) {
+          return;
+        }
+
         if (code === 0) {
           const finalFile =
             detectedOutputFile && fs.existsSync(detectedOutputFile) && fs.statSync(detectedOutputFile).isFile()
@@ -1279,20 +1573,23 @@ export class EngineManager {
             }),
             eta_str: 'Finished',
           });
-        } else if (code === null) {
-          // Process was killed (paused or cancelled)
         } else {
           onError(`yt-dlp failed (code ${code}): ${sanitizeLog(lastOutput || 'Unknown error')}`);
         }
       });
 
       proc.on('error', (err) => {
-        this.activeProcesses.delete(task.id);
+        if (settled) return;
+        settled = true;
+        cleanup();
         onError(`Execution error: ${sanitizeLog(err.message)}`);
       });
     } catch (err: any) {
-      this.activeProcesses.delete(task.id);
-      onError(err.message || 'Failed to start download');
+      if (!settled) {
+        settled = true;
+        cleanup();
+        onError(err.message || 'Failed to start download');
+      }
     }
   }
 
@@ -1335,13 +1632,18 @@ export class EngineManager {
       const startedAtMs = Date.now();
       let completedCount = 0;
       let failedCount = 0;
+      let totalCompletedBytes = 0;
       let lastErr = '';
       let lastFile: string | null = null;
+      const verifiedTrackFiles = new Set<string>();
 
       for (let i = 0; i < orderedTracks.length; i += 1) {
         if (this.cancelledTasks.has(task.id)) return;
         const trackUrl = orderedTracks[i];
         const trackStartedAt = Date.now();
+        const baseline = this.snapshotDirFiles(targetDir);
+        const trackTracker = new ProgressTracker({ alpha: 0.3, startedAtMs: trackStartedAt });
+        let currentPhase = `Matching track ${i + 1} of ${orderedTracks.length}...`;
 
         onProgress({
           status: 'downloading',
@@ -1349,8 +1651,9 @@ export class EngineManager {
           tracks_completed: completedCount,
           tracks_failed: failedCount,
           percentage_known: true,
-          progress_percentage: Math.round((i / orderedTracks.length) * 100),
-          current_phase: `Downloading track ${i + 1} of ${orderedTracks.length}...`,
+          progress_percentage: Math.round((completedCount / orderedTracks.length) * 100),
+          downloaded_bytes: totalCompletedBytes,
+          current_phase: currentPhase,
         });
 
         const prefix = String(i + 1).padStart(2, '0');
@@ -1378,51 +1681,128 @@ export class EngineManager {
             detached: process.platform !== 'win32',
           });
           this.activeProcesses.set(task.id, proc);
+
+          const stdoutParser = new StreamingLineParser();
+          const stderrParser = new StreamingLineParser();
           let tail = '';
+          let settled = false;
+          let lastOutputAtMs = Date.now();
+
+          const pollTimer = setInterval(() => {
+            if (settled || this.cancelledTasks.has(task.id)) return;
+            const measured = this.measureSpotdlActiveBytes(targetDir, baseline, trackStartedAt);
+            const nowMs = Date.now();
+            if (measured.totalBytes > 0) {
+              const computed = trackTracker.update({
+                downloadedBytes: measured.totalBytes,
+                totalBytes: 0,
+                percentageHint: Math.round((completedCount / orderedTracks.length) * 100),
+                activeConnections: 1,
+                nowMs,
+              });
+              onProgress({
+                status: 'downloading',
+                current_phase: currentPhase,
+                tracks_requested: orderedTracks.length,
+                tracks_completed: completedCount,
+                tracks_failed: failedCount,
+                downloaded_bytes: totalCompletedBytes + computed.downloaded_bytes,
+                total_bytes: 0,
+                progress_percentage: Math.round((completedCount / orderedTracks.length) * 100),
+                percentage_known: true,
+                speed_bytes_per_sec: computed.speed_bytes_per_sec,
+                avg_speed_bytes_per_sec: computed.avg_speed_bytes_per_sec,
+                speed_str: computed.speed_str,
+                elapsed_seconds: Math.round((nowMs - startedAtMs) / 1000),
+                active_connections: 1,
+              });
+            } else if (nowMs - lastOutputAtMs >= 12_000) {
+              onProgress({
+                status: 'downloading',
+                current_phase: `Track ${i + 1}/${orderedTracks.length}: Waiting for spotDL response...`,
+                elapsed_seconds: Math.round((nowMs - startedAtMs) / 1000),
+              });
+            }
+          }, 400);
+          pollTimer.unref?.();
+
+          const finish = (outcome: { ok: boolean; err: string }) => {
+            if (settled) return;
+            settled = true;
+            clearInterval(pollTimer);
+            this.activeProcesses.delete(task.id);
+            this.activeAbortHandlers.delete(task.id);
+            resolve(outcome);
+          };
+
+          this.activeAbortHandlers.set(task.id, () => finish({ ok: false, err: 'cancelled' }));
+
+          const processSpotLine = (line: string) => {
+            lastOutputAtMs = Date.now();
+            const stage = parseSpotdlProgressLine(line);
+            if (stage) {
+              currentPhase = `Track ${i + 1}/${orderedTracks.length}: ${stage.label}`;
+              onProgress({
+                status: stage.phase === 'processing' ? 'processing' : 'downloading',
+                current_phase: currentPhase,
+              });
+            }
+          };
+
           proc.stdout?.on('data', (d) => {
             tail = (tail + d.toString()).slice(-2000);
+            for (const line of stdoutParser.push(d)) {
+              processSpotLine(line);
+            }
           });
           proc.stderr?.on('data', (d) => {
             tail = (tail + d.toString()).slice(-2000);
+            for (const line of stderrParser.push(d)) {
+              processSpotLine(line);
+            }
           });
           proc.on('error', (err) => {
-            this.activeProcesses.delete(task.id);
-            resolve({ ok: false, err: err.message });
+            finish({ ok: false, err: err.message });
           });
           proc.on('close', (code) => {
-            this.activeProcesses.delete(task.id);
+            for (const line of stdoutParser.flush()) processSpotLine(line);
+            for (const line of stderrParser.flush()) processSpotLine(line);
             if (this.cancelledTasks.has(task.id) || code === null) {
-              resolve({ ok: false, err: 'cancelled' });
+              finish({ ok: false, err: 'cancelled' });
             } else if (code === 0) {
-              resolve({ ok: true, err: '' });
+              finish({ ok: true, err: '' });
             } else {
-              resolve({ ok: false, err: sanitizeLog(tail || `Exited with code ${code}`) });
+              finish({ ok: false, err: sanitizeLog(tail || `Exited with code ${code}`) });
             }
           });
         });
 
         if (this.cancelledTasks.has(task.id)) return;
         if (res.ok) {
-          const created = this.findRecentlyCreatedFile(targetDir, trackStartedAt, true);
-          if (created) {
+          const created = this.findRecentlyCreatedFile(targetDir, trackStartedAt, true, verifiedTrackFiles);
+          if (created && fs.statSync(created).size > 0) {
+            verifiedTrackFiles.add(created);
             completedCount += 1;
+            totalCompletedBytes += fs.statSync(created).size;
             lastFile = created;
           } else {
             failedCount += 1;
-            lastErr = `Track ${i + 1} completed without an audio file on disk.`;
+            lastErr = `Track ${i + 1} completed without a non-empty audio file on disk.`;
           }
         } else {
           failedCount += 1;
           lastErr = res.err;
         }
-      }
 
-      onProgress({
-        tracks_requested: orderedTracks.length,
-        tracks_completed: completedCount,
-        tracks_failed: failedCount,
-        progress_percentage: Math.round((completedCount / orderedTracks.length) * 100),
-      });
+        onProgress({
+          tracks_requested: orderedTracks.length,
+          tracks_completed: completedCount,
+          tracks_failed: failedCount,
+          downloaded_bytes: totalCompletedBytes,
+          progress_percentage: Math.round((completedCount / orderedTracks.length) * 100),
+          percentage_known: true,
+        });
+      }
 
       if (failedCount > 0 || completedCount < orderedTracks.length) {
         return onError(
@@ -1435,19 +1815,24 @@ export class EngineManager {
         return onError('spotDL playlist completed without verified audio files on disk.');
       }
       const stat = fs.statSync(finalFile);
+      const totalPlaylistBytes = totalCompletedBytes > 0 ? totalCompletedBytes : stat.size;
       const mediaInfo = this.verifyMediaFile(finalFile);
       return onComplete(targetDir, {
         tracks_requested: orderedTracks.length,
         tracks_completed: completedCount,
         tracks_failed: 0,
-        total_bytes: stat.size,
-        downloaded_bytes: stat.size,
+        total_bytes: totalPlaylistBytes,
+        downloaded_bytes: totalPlaylistBytes,
         remaining_bytes: 0,
         percentage_known: true,
         ext: format,
         verified_audio_info: mediaInfo?.audioSummary || undefined,
         audio_codec: mediaInfo?.audioCodec ?? null,
-        ...buildIdleMetricsPatch(task),
+        ...buildIdleMetricsPatch({
+          ...task,
+          total_bytes: totalPlaylistBytes,
+          downloaded_bytes: totalPlaylistBytes,
+        }),
         current_phase: `Completed (${completedCount}/${orderedTracks.length} tracks)`,
         eta_str: 'Finished',
       });
@@ -1488,9 +1873,31 @@ export class EngineManager {
     }
 
     const startedAtMs = Date.now();
+    const baseline = this.snapshotDirFiles(outDir);
+    const tracker = new ProgressTracker({ alpha: 0.3, startedAtMs });
+    const stdoutParser = new StreamingLineParser();
+    const stderrParser = new StreamingLineParser();
+
+    let settled = false;
+    let lastOutputAtMs = startedAtMs;
+    let lastByteAdvanceAtMs = startedAtMs;
+    let lastObservedBytes = 0;
+    let currentPhase = 'Matching audio source via spotDL...';
+    let currentStatus: DownloadTask['status'] = 'connecting';
+    let pollTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      this.activeProcesses.delete(task.id);
+      this.activeAbortHandlers.delete(task.id);
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
     onProgress({
       status: 'connecting',
-      current_phase: 'Matching audio source via spotDL...',
+      current_phase: currentPhase,
       started_at: task.started_at || new Date(startedAtMs).toISOString(),
       percentage_known: false,
       progress_percentage: 0,
@@ -1503,40 +1910,118 @@ export class EngineManager {
         detached: process.platform !== 'win32',
       });
       this.activeProcesses.set(task.id, proc);
+      this.activeAbortHandlers.set(task.id, () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+        }
+      });
 
       let lastOutput = '';
+
+      pollTimer = setInterval(() => {
+        if (settled || this.cancelledTasks.has(task.id)) return;
+        const nowMs = Date.now();
+        const measured = this.measureSpotdlActiveBytes(outDir, baseline, startedAtMs);
+        if (measured.totalBytes > 0) {
+          if (measured.totalBytes > lastObservedBytes) {
+            lastObservedBytes = measured.totalBytes;
+            lastByteAdvanceAtMs = nowMs;
+          }
+          currentStatus = 'downloading';
+          const computed = tracker.update({
+            downloadedBytes: measured.totalBytes,
+            totalBytes: 0,
+            activeConnections: 1,
+            nowMs,
+          });
+          onProgress({
+            status: 'downloading',
+            current_phase:
+              nowMs - lastByteAdvanceAtMs >= 15_000
+                ? 'Transfer stalled — waiting for incoming data...'
+                : currentPhase === 'Matching audio source via spotDL...'
+                ? 'Downloading audio stream...'
+                : currentPhase,
+            ...computed,
+            percentage_known: false,
+            progress_percentage: 0,
+          });
+        } else if (nowMs - lastOutputAtMs >= 12_000) {
+          onProgress({
+            status: currentStatus,
+            current_phase: 'Waiting for source response...',
+            elapsed_seconds: Math.round((nowMs - startedAtMs) / 1000),
+            percentage_known: false,
+          });
+        }
+      }, 400);
+      pollTimer.unref?.();
+
+      const processSpotLine = (line: string) => {
+        if (settled || this.cancelledTasks.has(task.id)) return;
+        lastOutputAtMs = Date.now();
+
+        const ytdlpParsed = parseYtdlpProgress(line);
+        if (ytdlpParsed && ytdlpParsed.phase === 'downloading' && (ytdlpParsed.downloadedBytes ?? 0) > 0) {
+          const nowMs = Date.now();
+          if ((ytdlpParsed.downloadedBytes ?? 0) > lastObservedBytes) {
+            lastObservedBytes = ytdlpParsed.downloadedBytes ?? 0;
+            lastByteAdvanceAtMs = nowMs;
+          }
+          currentStatus = 'downloading';
+          const computed = tracker.update({
+            downloadedBytes: ytdlpParsed.downloadedBytes ?? 0,
+            totalBytes: ytdlpParsed.totalBytes ?? 0,
+            instantSpeedBytesPerSec: ytdlpParsed.speedBytesPerSec,
+            percentageHint: ytdlpParsed.percentageKnown ? ytdlpParsed.percentage : undefined,
+            activeConnections: 1,
+            nowMs,
+          });
+          onProgress({
+            status: 'downloading',
+            current_phase: ytdlpParsed.phaseLabel || 'Downloading audio stream...',
+            ...computed,
+          });
+          return;
+        }
+
+        const stage = parseSpotdlProgressLine(line);
+        if (stage) {
+          currentPhase = stage.label;
+          currentStatus = stage.phase;
+          onProgress({
+            status: stage.phase,
+            current_phase: stage.label,
+            percentage_known: false,
+          });
+        }
+      };
 
       proc.stdout.on('data', (d) => {
         const text = d.toString();
         lastOutput = (lastOutput + text).slice(-4000);
-        if (text.includes('Searching for') || text.includes('Found')) {
-          onProgress({
-            status: 'connecting',
-            current_phase: 'Matching audio source...',
-            percentage_known: false,
-          });
-        } else if (text.includes('Downloading')) {
-          onProgress({
-            status: 'downloading',
-            current_phase: 'Downloading audio stream...',
-            percentage_known: false,
-          });
-        } else if (text.includes('Converting') || text.includes('Embedding') || text.includes('Downloaded')) {
-          onProgress({
-            status: 'processing',
-            current_phase: 'Converting & embedding metadata...',
-            percentage_known: false,
-          });
+        for (const line of stdoutParser.push(d)) {
+          processSpotLine(line);
         }
       });
 
       proc.stderr.on('data', (d) => {
-        lastOutput = (lastOutput + d.toString()).slice(-4000);
+        const text = d.toString();
+        lastOutput = (lastOutput + text).slice(-4000);
+        for (const line of stderrParser.push(d)) {
+          processSpotLine(line);
+        }
       });
 
       proc.on('close', (code) => {
-        this.activeProcesses.delete(task.id);
-        if (this.cancelledTasks.has(task.id)) return;
+        if (settled) return;
+        for (const line of stdoutParser.flush()) processSpotLine(line);
+        for (const line of stderrParser.flush()) processSpotLine(line);
+        settled = true;
+        cleanup();
+
+        if (this.cancelledTasks.has(task.id) || code === null) return;
         if (code === 0) {
           const finalFile = this.findRecentlyCreatedFile(outDir, startedAtMs, true);
           if (!finalFile || !fs.existsSync(finalFile)) {
@@ -1573,25 +2058,33 @@ export class EngineManager {
             }),
             eta_str: 'Finished',
           });
-        } else if (code === null) {
-          // Process killed
         } else {
           onError(`spotDL failed (code ${code}): ${sanitizeLog(lastOutput || 'Unknown error')}`);
         }
       });
 
       proc.on('error', (err) => {
-        this.activeProcesses.delete(task.id);
+        if (settled) return;
+        settled = true;
+        cleanup();
         onError(`Execution error: ${sanitizeLog(err.message)}`);
       });
     } catch (err: any) {
-      this.activeProcesses.delete(task.id);
-      onError(err.message || 'Failed to start spotDL download');
+      if (!settled) {
+        settled = true;
+        cleanup();
+        onError(err.message || 'Failed to start spotDL download');
+      }
     }
   }
 
   public cancelOrPauseProcess(taskId: string, _reason: 'paused' | 'cancelled' = 'cancelled'): boolean {
     this.cancelledTasks.add(taskId);
+    const abort = this.activeAbortHandlers.get(taskId);
+    if (abort) {
+      this.activeAbortHandlers.delete(taskId);
+      abort();
+    }
     const proc = this.activeProcesses.get(taskId);
     if (proc) {
       killChildProcessTree(proc);

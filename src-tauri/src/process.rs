@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -279,61 +279,174 @@ pub fn run_captured_command(cmd: &mut Command) -> Result<CapturedOutput, String>
     run_command_with_options(cmd, ProcessOptions::default()).map_err(|e| e.to_string())
 }
 
-/// Streams stdout line-by-line while concurrently draining stderr on a background thread
-/// so pipe buffers never deadlock even under verbose warnings or errors.
-pub fn stream_child_lines<F>(
+/// Incremental line splitter supporting `\r`, `\n`, `\r\n`, chunk boundaries, and ANSI removal.
+#[derive(Default)]
+pub struct StreamingLineSplitter {
+    buffer: Vec<u8>,
+}
+
+impl StreamingLineSplitter {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for &b in chunk {
+            if b == b'\r' || b == b'\n' {
+                if !self.buffer.is_empty() {
+                    let raw = String::from_utf8_lossy(&self.buffer);
+                    let cleaned = crate::strip_ansi_codes(&raw);
+                    if !cleaned.trim().is_empty() {
+                        lines.push(cleaned);
+                    }
+                    self.buffer.clear();
+                }
+            } else {
+                self.buffer.push(b);
+                if self.buffer.len() > 64 * 1024 {
+                    let raw = String::from_utf8_lossy(&self.buffer);
+                    let cleaned = crate::strip_ansi_codes(&raw);
+                    if !cleaned.trim().is_empty() {
+                        lines.push(cleaned);
+                    }
+                    self.buffer.clear();
+                }
+            }
+        }
+        lines
+    }
+
+    pub fn flush(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&self.buffer);
+        let cleaned = crate::strip_ansi_codes(&raw);
+        self.buffer.clear();
+        if cleaned.trim().is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        }
+    }
+}
+
+enum StreamMsg {
+    StdoutLine(String),
+    StderrLine(String),
+    StdoutDone,
+    StderrDone,
+}
+
+/// Streams BOTH stdout and stderr lines concurrently (splitting on `\r`, `\n`, `\r\n` across chunks)
+/// and fires a periodic tick callback so callers can abort or sample disk byte growth cleanly.
+pub fn stream_child_lines_with_tick<F, T>(
     mut child: Child,
-    mut on_stdout_line: F,
+    tick_interval: Duration,
+    mut on_line: F,
+    mut on_tick: T,
 ) -> Result<(ExitStatus, String), String>
 where
     F: FnMut(&str) -> bool,
+    T: FnMut() -> bool,
 {
     let pid = child.id();
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
+    let (tx, rx) = mpsc::channel::<StreamMsg>();
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let stderr_tail_clone = Arc::clone(&stderr_tail);
 
-    let (stderr_done_tx, stderr_done_rx) = mpsc::sync_channel::<()>(1);
+    let tx_out = tx.clone();
     thread::spawn(move || {
-        if let Some(mut pipe) = stderr_pipe {
-            let mut chunk = [0u8; 8192];
+        if let Some(mut pipe) = stdout_pipe {
+            let mut splitter = StreamingLineSplitter::new();
+            let mut chunk = [0u8; 4096];
             loop {
                 match pipe.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let mut guard = stderr_tail_clone
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        append_capped(&mut guard, &chunk[..n], DEFAULT_MAX_STDERR_BYTES);
+                        for line in splitter.push(&chunk[..n]) {
+                            let _ = tx_out.send(StreamMsg::StdoutLine(line));
+                        }
                     }
                 }
             }
+            if let Some(tail) = splitter.flush() {
+                let _ = tx_out.send(StreamMsg::StdoutLine(tail));
+            }
         }
-        let _ = stderr_done_tx.send(());
+        let _ = tx_out.send(StreamMsg::StdoutDone);
+    });
+
+    let tx_err = tx;
+    let stderr_tail_clone = Arc::clone(&stderr_tail);
+    thread::spawn(move || {
+        if let Some(mut pipe) = stderr_pipe {
+            let mut splitter = StreamingLineSplitter::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        {
+                            let mut guard = stderr_tail_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            append_capped(&mut guard, &chunk[..n], DEFAULT_MAX_STDERR_BYTES);
+                        }
+                        for line in splitter.push(&chunk[..n]) {
+                            let _ = tx_err.send(StreamMsg::StderrLine(line));
+                        }
+                    }
+                }
+            }
+            if let Some(tail) = splitter.flush() {
+                let _ = tx_err.send(StreamMsg::StderrLine(tail));
+            }
+        }
+        let _ = tx_err.send(StreamMsg::StderrDone);
     });
 
     let mut aborted = false;
+    let mut stdout_done = false;
+    let mut stderr_done = false;
     let mut last_stdout_lines: Vec<String> = Vec::new();
-    if let Some(pipe) = stdout_pipe {
-        let reader = BufReader::new(pipe);
-        for line_res in reader.lines() {
-            match line_res {
-                Ok(line) => {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        if last_stdout_lines.len() >= 25 {
-                            last_stdout_lines.remove(0);
-                        }
-                        last_stdout_lines.push(trimmed.to_string());
+    let mut last_tick = Instant::now();
+
+    while !(stdout_done && stderr_done) {
+        match rx.recv_timeout(tick_interval) {
+            Ok(StreamMsg::StdoutLine(line)) => {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if last_stdout_lines.len() >= 25 {
+                        last_stdout_lines.remove(0);
                     }
-                    if !on_stdout_line(&line) {
-                        aborted = true;
-                        break;
-                    }
+                    last_stdout_lines.push(trimmed.to_string());
                 }
-                Err(_) => break,
+                if !aborted && !on_line(&line) {
+                    aborted = true;
+                    break;
+                }
+            }
+            Ok(StreamMsg::StderrLine(line)) => {
+                if !aborted && !on_line(&line) {
+                    aborted = true;
+                    break;
+                }
+            }
+            Ok(StreamMsg::StdoutDone) => stdout_done = true,
+            Ok(StreamMsg::StderrDone) => stderr_done = true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if !aborted && last_tick.elapsed() >= tick_interval {
+            last_tick = Instant::now();
+            if !on_tick() {
+                aborted = true;
+                break;
             }
         }
     }
@@ -346,7 +459,6 @@ where
     let status = child
         .wait()
         .map_err(|e| format!("Failed waiting for child process: {}", e))?;
-    let _ = stderr_done_rx.recv_timeout(Duration::from_secs(2));
 
     let stderr_bytes = stderr_tail
         .lock()
@@ -358,6 +470,18 @@ where
     }
 
     Ok((status, combined_err))
+}
+
+/// Streams both stdout and stderr line-by-line concurrently so progress written to either stream
+/// (and carriage-return `\r` updates without newlines) is delivered immediately without deadlocking.
+pub fn stream_child_lines<F>(
+    child: Child,
+    on_line: F,
+) -> Result<(ExitStatus, String), String>
+where
+    F: FnMut(&str) -> bool,
+{
+    stream_child_lines_with_tick(child, Duration::from_millis(250), on_line, || true)
 }
 
 /// Terminates a process and its entire descendant process tree without opening a console window.
@@ -529,5 +653,42 @@ mod tests {
                 limit_bytes: 1024
             })
         ));
+    }
+
+    #[test]
+    fn test_streaming_line_splitter_handles_cr_chunks_ansi_and_eof() {
+        let mut splitter = StreamingLineSplitter::new();
+        assert_eq!(
+            splitter.push(b"\x1b[32m10.0%|1MiB|10MiB\r20."),
+            vec!["10.0%|1MiB|10MiB".to_string()]
+        );
+        assert_eq!(
+            splitter.push(b"0%|2MiB|10MiB\r\nfinal"),
+            vec!["20.0%|2MiB|10MiB".to_string()]
+        );
+        assert_eq!(splitter.flush().as_deref(), Some("final"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stream_child_lines_reads_cr_stdout_and_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf 'out1\\rout2\\n'; printf 'err1\\r' 1>&2",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let child = cmd.spawn().unwrap();
+        let mut seen = Vec::new();
+        let (status, _) = stream_child_lines(child, |line| {
+            seen.push(line.trim().to_string());
+            true
+        })
+        .unwrap();
+        assert!(status.success());
+        assert!(seen.contains(&"out1".to_string()));
+        assert!(seen.contains(&"out2".to_string()));
+        assert!(seen.contains(&"err1".to_string()));
     }
 }

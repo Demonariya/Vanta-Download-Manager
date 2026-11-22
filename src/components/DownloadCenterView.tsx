@@ -14,8 +14,6 @@ import {
   Info,
   AlertTriangle,
   Download,
-  Music,
-  Video,
 } from 'lucide-react';
 import {
   DownloadTask,
@@ -32,6 +30,7 @@ import {
 } from '../utils/queue-logic';
 import { formatBytes } from '../utils/engine-parser';
 import { ProgressDisplay, getStatusLabel, getStatusColorClass } from './ProgressDisplay';
+import { MediaThumbnail } from './MediaThumbnail';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../services/api';
 
@@ -474,41 +473,14 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                     </div>
 
                     {/* Thumbnail or Media Type Tile */}
-                    {(() => {
-                      const isAudioTask = task.is_audio_only || task.engine === 'spotdl';
-                      const MediaIcon = isAudioTask ? Music : Video;
-                      return task.thumbnail ? (
-                        <div className="relative w-12 h-9 shrink-0 hidden sm:block">
-                          <img
-                            src={task.thumbnail}
-                            alt={task.title}
-                            referrerPolicy="no-referrer"
-                            className="w-12 h-9 rounded-md object-cover bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)]"
-                          />
-                          <span
-                            title={isAudioTask ? 'Music / Audio' : 'Video'}
-                            className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border border-[var(--vanta-surface)] flex items-center justify-center ${
-                              isAudioTask
-                                ? 'bg-emerald-600 text-white'
-                                : 'bg-[var(--vanta-accent)] text-white'
-                            }`}
-                          >
-                            <MediaIcon className="w-2.5 h-2.5" />
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="w-12 h-9 rounded-md bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] hidden sm:flex flex-col items-center justify-center shrink-0 text-[9px] font-mono font-semibold text-[var(--vanta-muted)] gap-0.5">
-                          <MediaIcon
-                            className={`w-3.5 h-3.5 ${
-                              isAudioTask
-                                ? 'text-emerald-600 dark:text-[#3fb950]'
-                                : 'text-[var(--vanta-accent)]'
-                            }`}
-                          />
-                          <span>{task.ext.toUpperCase()}</span>
-                        </div>
-                      );
-                    })()}
+                    <MediaThumbnail
+                      src={task.thumbnail}
+                      title={task.title}
+                      isAudio={task.is_audio_only || task.engine === 'spotdl'}
+                      ext={task.ext}
+                      size="md"
+                      aspect="video"
+                    />
 
                     {/* Main Title, Metadata & Progress */}
                     <div className="flex-1 min-w-0 space-y-2">
@@ -562,6 +534,12 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                                     </span>
                                   ) : null}
                                 </span>
+                              </>
+                            )}
+                            {task.duration_string && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="tabular-nums">{task.duration_string}</span>
                               </>
                             )}
                             {task.total_bytes > 0 && (

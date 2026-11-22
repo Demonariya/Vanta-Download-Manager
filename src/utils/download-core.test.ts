@@ -96,3 +96,24 @@ test('Scheduler evaluates overnight and active download windows deterministicall
   assert.equal(isWithinSchedulerWindow(overnight, new Date('2026-10-24T04:00:00')), true);
   assert.equal(isWithinSchedulerWindow(overnight, new Date('2026-10-24T12:00:00')), false);
 });
+
+test('ProgressTracker.resetStream cleanly transitions from video stream to smaller audio stream', () => {
+  const tracker = new ProgressTracker({ startedAtMs: 1000 });
+  const videoDone = tracker.update({
+    downloadedBytes: 10_000_000,
+    totalBytes: 10_000_000,
+    nowMs: 3000,
+  });
+  assert.equal(videoDone.progress_percentage, 100);
+
+  tracker.resetStream();
+  const audioStart = tracker.update({
+    downloadedBytes: 250_000,
+    totalBytes: 1_000_000,
+    nowMs: 4000,
+  });
+  assert.equal(audioStart.downloaded_bytes, 250_000);
+  assert.equal(audioStart.total_bytes, 1_000_000);
+  assert.equal(audioStart.progress_percentage, 25);
+});
+

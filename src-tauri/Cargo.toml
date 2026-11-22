@@ -1,6 +1,6 @@
 [package]
 name = "vanta-download-manager"
-version = "1.0.0"
+version = "0.0.1"
 description = "VANTA Download Manager - High-concurrency video and music workstation"
 authors = ["VANTA Core Engineering"]
 edition = "2021"

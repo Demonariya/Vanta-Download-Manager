@@ -87,7 +87,7 @@ export const FloatingProgressDock: React.FC<FloatingProgressDockProps> = ({
                     </button>
                   </div>
                 </div>
-                <ProgressDisplay task={task} />
+                <ProgressDisplay task={task} compact />
               </div>
             ))}
 

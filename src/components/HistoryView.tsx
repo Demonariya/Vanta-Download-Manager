@@ -5,6 +5,7 @@ import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { computeHistoryStats } from '../utils/queue-logic';
 import { formatAudioQualityBadge } from '../utils/audio-quality';
 import { ConfirmDialog } from './ConfirmDialog';
+import { MediaThumbnail } from './MediaThumbnail';
 
 interface HistoryViewProps {
   tasks: DownloadTask[];
@@ -233,11 +234,29 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                     className="hover:bg-[var(--vanta-surface-hover)]/50 transition-colors cursor-pointer"
                   >
                     <td className="py-3 px-4">
-                      <div className="font-medium text-[var(--vanta-text)] truncate max-w-sm">
-                        {item.title}
-                      </div>
-                      <div className="text-[11px] text-[var(--vanta-muted)] truncate max-w-sm font-mono mt-0.5">
-                        {item.url}
+                      <div className="flex items-center gap-3 min-w-0">
+                        <MediaThumbnail
+                          src={item.thumbnail}
+                          title={item.title}
+                          isAudio={item.is_audio_only || item.engine === 'spotdl'}
+                          ext={item.ext}
+                          size="sm"
+                          aspect="video"
+                          showBadge={false}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-[var(--vanta-text)] truncate max-w-sm">
+                            {item.title}
+                          </div>
+                          {item.uploader && (
+                            <div className="text-[11px] text-[var(--vanta-text-secondary)] truncate max-w-sm">
+                              {item.uploader}
+                            </div>
+                          )}
+                          <div className="text-[11px] text-[var(--vanta-muted)] truncate max-w-sm font-mono mt-0.5">
+                            {item.url}
+                          </div>
+                        </div>
                       </div>
                     </td>
                     <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">

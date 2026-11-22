@@ -453,18 +453,58 @@ impl AppState {
         stmt.query_row(params![id], Self::map_task_row).ok()
     }
 
+    pub fn preserve_task_metadata(existing: &DownloadTask, incoming: &mut DownloadTask) {
+        if let Some(ref existing_thumb) = existing.thumbnail {
+            let incoming_valid = incoming
+                .thumbnail
+                .as_deref()
+                .map(crate::is_valid_thumbnail_url)
+                .unwrap_or(false);
+            if !incoming_valid && crate::is_valid_thumbnail_url(existing_thumb) {
+                incoming.thumbnail = Some(existing_thumb.clone());
+            }
+        }
+        if crate::is_placeholder_task_title(&incoming.title) && !crate::is_placeholder_task_title(&existing.title) {
+            incoming.title = existing.title.clone();
+        }
+        if incoming.uploader.is_none() {
+            incoming.uploader = existing.uploader.clone();
+        }
+        if incoming.album.is_none() {
+            incoming.album = existing.album.clone();
+        }
+        if incoming.duration.is_none() {
+            incoming.duration = existing.duration;
+            if incoming.duration_string.is_none() {
+                incoming.duration_string = existing.duration_string.clone();
+            }
+        }
+        if incoming.content_type.is_none() {
+            incoming.content_type = existing.content_type.clone();
+        }
+        if incoming.logs.is_empty() && !existing.logs.is_empty() {
+            incoming.logs = existing.logs.clone();
+        }
+    }
+
     pub fn upsert_task(&self, task: &DownloadTask) {
+        let mut to_save = task.clone();
+        if let Some(existing) = self.get_task_by_id(&task.id) {
+            Self::preserve_task_metadata(&existing, &mut to_save);
+        }
+
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let logs_tail: Vec<&TaskLogEntry> = if task.logs.len() > 100 {
-            task.logs[task.logs.len() - 100..].iter().collect()
+        let logs_tail: Vec<&TaskLogEntry> = if to_save.logs.len() > 100 {
+            to_save.logs[to_save.logs.len() - 100..].iter().collect()
         } else {
-            task.logs.iter().collect()
+            to_save.logs.iter().collect()
         };
         let logs_json = serde_json::to_string(&logs_tail).unwrap_or_else(|_| "[]".to_string());
-        let selected_items_json = task
+        let selected_items_json = to_save
             .selected_items
             .as_ref()
             .and_then(|items| serde_json::to_string(items).ok());
+        let task = &to_save;
 
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO tasks (
