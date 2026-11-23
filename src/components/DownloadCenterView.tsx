@@ -402,7 +402,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             />
             <span>TRANSFER QUEUE ({visibleTasks.length})</span>
           </div>
-          <span className="hidden sm:inline">PRIORITY / TELEMETRY / ACTIONS</span>
+          <span className="hidden sm:inline">FILE DETAILS · PROGRESS · SPEED / ETA · ACTIONS</span>
         </div>
 
         {visibleTasks.length === 0 ? (
@@ -674,7 +674,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         </div>
                       </div>
 
-                      <ProgressDisplay task={task} />
+                      <ProgressDisplay task={task} compact />
 
                       {task.error_message && (
                         <p className="text-[11px] text-red-600 dark:text-[#f85149] truncate">
