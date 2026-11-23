@@ -1,18 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  X,
-  FolderOpen,
-  FileCheck2,
-  Edit3,
-  Check,
-  Copy,
-  AlertCircle,
-  Terminal,
-  RefreshCw,
+  X, FolderOpen, FileCheck2, Edit3, Copy, AlertCircle, RefreshCw,
+  Info, ListVideo, Captions, Music2, Settings2, Download,
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
-import { ProgressDisplay } from './ProgressDisplay';
+import { ProgressDisplay, getStatusLabel, getStatusColorClass } from './ProgressDisplay';
 import { MediaThumbnail } from './MediaThumbnail';
 import { api } from '../services/api';
 
@@ -22,11 +15,10 @@ interface DownloadDetailsDrawerProps {
   onRetryTask: (id: string) => void;
 }
 
-export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
-  task,
-  onClose,
-  onRetryTask,
-}) => {
+type InspectorTab = 'details' | 'playlist' | 'subtitles' | 'lyrics' | 'options';
+
+export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ task, onClose, onRetryTask }) => {
+  const [tab, setTab] = useState<InspectorTab>('details');
   const [renameMode, setRenameMode] = useState(false);
   const [filenameDraft, setFilenameDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
@@ -36,320 +28,170 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({
 
   useEffect(() => {
     if (!task) return;
+    setTab('details');
     setRenameMode(false);
-    const basename = (task.output_path || '').split(/[\\/]/).pop() || task.custom_filename || task.title;
-    setFilenameDraft(basename);
+    setFilenameDraft((task.output_path || '').split(/[\\/]/).pop() || task.custom_filename || task.title);
     setActionError(null);
     setActionNotice(null);
   }, [task?.id]);
 
   if (!task) return null;
 
-  const handleRenameSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const audioTask = task.is_audio_only || task.engine === 'spotdl';
+  const lyrics = task.lyrics_lrc_content?.trim() || '';
+  const effectiveBytes = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0
+    ? task.total_bytes : task.downloaded_bytes;
+
+  const handleRename = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!filenameDraft.trim()) return;
     setRenameBusy(true);
     setActionError(null);
-    setActionNotice(null);
     try {
       await api.renameTaskFile(task.id, filenameDraft.trim());
       setRenameMode(false);
       setActionNotice('Output file renamed.');
-    } catch (err: any) {
-      setActionError(err?.message || 'Failed to rename output file.');
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to rename output file.');
     } finally {
       setRenameBusy(false);
     }
   };
 
-  const handleCopyUrl = () => {
-    navigator.clipboard?.writeText(task.url).catch(() => {});
-    setCopiedUrl(true);
-    setTimeout(() => setCopiedUrl(false), 1800);
+  const copyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(task.url);
+      setCopiedUrl(true);
+      window.setTimeout(() => setCopiedUrl(false), 1600);
+    } catch {
+      setActionError('Could not copy the source URL.');
+    }
   };
 
-  const effectiveDownloadedBytes =
-    task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0
-      ? task.total_bytes
-      : task.downloaded_bytes;
+  const exportLyrics = () => {
+    if (!lyrics) return;
+    const blob = new Blob([lyrics], { type: 'text/plain;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = `${(task.title || 'track').replace(/[\\/:*?"<>|]/g, '_')}.lrc`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  };
+
+  const tabs: Array<{ id: InspectorTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { id: 'details', label: 'Details', icon: Info },
+    { id: 'playlist', label: 'Playlist', icon: ListVideo },
+    { id: 'subtitles', label: 'Subtitles', icon: Captions },
+    { id: 'lyrics', label: 'Lyrics', icon: Music2 },
+    { id: 'options', label: 'Options', icon: Settings2 },
+  ];
 
   return (
-    <aside
-      className="fixed top-8 bottom-0 right-0 z-30 w-full sm:w-[400px] lg:static lg:z-auto lg:w-[390px] xl:w-[420px] lg:shrink-0 border-l border-[var(--vanta-border)] bg-[var(--vanta-surface)] shadow-2xl lg:shadow-none flex flex-col min-h-0"
-      aria-label="Download Inspector"
-    >
-      {/* Header */}
-      <div className="px-4 py-3.5 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] flex items-center justify-between gap-2 shrink-0">
-        <div className="min-w-0">
-          <p className="text-[10px] font-mono uppercase tracking-wider text-[var(--vanta-muted)]">
-            Transfer Inspector
-          </p>
-          <h2 className="text-sm font-semibold text-[var(--vanta-text)] truncate">{task.title}</h2>
+    <aside className="w-full h-[310px] sm:h-[330px] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
+      <div className="h-12 px-3 sm:px-4 border-b border-[var(--vanta-border)] flex items-center justify-between gap-3 shrink-0">
+        <nav className="flex items-center gap-1 min-w-0 overflow-x-auto" aria-label="Download detail sections">
+          {tabs.map(({ id, label, icon: Icon }) => (
+            <button key={id} type="button" onClick={() => setTab(id)}
+              className={`h-9 px-3 rounded-lg text-xs sm:text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors ${tab === id ? 'bg-[var(--vanta-accent)] text-white' : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'}`}>
+              <Icon className="w-4 h-4" />{label}
+            </button>
+          ))}
+        </nav>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="hidden md:block text-xs text-[var(--vanta-muted)] truncate max-w-[260px]">{task.title}</span>
+          <button type="button" onClick={onClose} aria-label="Close details panel" className="p-2 rounded-lg text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+            <X className="w-4 h-4" />
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close transfer inspector"
-          className="p-1.5 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] rounded-lg transition-colors shrink-0"
-        >
-          <X className="w-4 h-4" />
-        </button>
       </div>
 
-      {/* Scrollable Inspector Body */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
-        {/* Media Preview & Genuine Metadata Summary */}
-        {(() => {
-          const isAudioTask = task.is_audio_only || task.engine === 'spotdl';
-          const metaParts: string[] = [];
-          if (task.uploader) metaParts.push(task.uploader);
-          if (task.album) metaParts.push(task.album);
-          if (task.duration_string) metaParts.push(task.duration_string);
-          if (task.resolution_label) metaParts.push(task.resolution_label);
-          if (task.ext) metaParts.push(task.ext.toUpperCase());
-
-          return (
-            <div className="p-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
-              <div className={isAudioTask ? 'flex items-start gap-3' : 'space-y-2.5'}>
-                <MediaThumbnail
-                  src={task.thumbnail}
-                  title={task.title}
-                  isAudio={isAudioTask}
-                  ext={task.ext}
-                  size="lg"
-                  aspect={isAudioTask ? 'square' : 'video'}
-                />
-                <div className="min-w-0 flex-1 space-y-1">
-                  <h3 className="text-xs sm:text-sm font-semibold text-[var(--vanta-text)] leading-snug break-words">
-                    {task.title}
-                  </h3>
-                  {metaParts.length > 0 && (
-                    <p className="text-[11px] font-mono tabular-nums text-[var(--vanta-muted)] break-words">
-                      {metaParts.join(' · ')}
-                    </p>
-                  )}
-                </div>
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
+        {tab === 'details' && (
+          <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(240px,1.2fr)_minmax(220px,1fr)] gap-3 lg:gap-4">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 flex items-center gap-3 min-w-0">
+              <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-[var(--vanta-text)] line-clamp-2">{task.title}</h3>
+                <p className="mt-1 text-[11px] text-[var(--vanta-muted)] truncate">{task.uploader || task.album || (audioTask ? 'Audio download' : 'Video download')}</p>
+                <span className={`inline-flex mt-2 px-2 py-1 rounded-md text-[10px] font-semibold ${getStatusColorClass(task.status)} bg-[var(--vanta-surface)]`}>{getStatusLabel(task.status)}</span>
               </div>
             </div>
-          );
-        })()}
 
-        {/* Progress Overview */}
-        <div className="space-y-2.5">
-          <ProgressDisplay task={task} />
-          {task.error_message && (
-            <div className="p-2.5 rounded-lg border border-red-500/35 bg-red-500/10 text-red-600 dark:text-[#f85149] flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <div className="flex-1 min-w-0 space-y-1.5">
-                <p className="break-words">{task.error_message}</p>
-                {task.status === 'failed' && (
-                  <button
-                    type="button"
-                    onClick={() => onRetryTask(task.id)}
-                    className="px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-[11px] font-medium inline-flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Retry Download</span>
-                  </button>
-                )}
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 space-y-3 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[var(--vanta-text)]">Transfer progress</span>
+                <span className="text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.status === 'completed' ? '100%' : task.percentage_known === false ? '—' : `${Math.min(100, Math.max(0, task.progress_percentage || 0)).toFixed(1)}%`}</span>
+              </div>
+              <ProgressDisplay task={task} />
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div><span className="block text-[var(--vanta-muted)]">Downloaded</span><strong className="text-[var(--vanta-text)]">{formatBytes(effectiveBytes)}</strong></div>
+                <div><span className="block text-[var(--vanta-muted)]">Total size</span><strong className="text-[var(--vanta-text)]">{task.total_bytes ? formatBytes(task.total_bytes) : '—'}</strong></div>
+                <div><span className="block text-[var(--vanta-muted)]">Speed</span><strong className="text-[var(--vanta-text)]">{task.speed_str || '—'}</strong></div>
+                <div><span className="block text-[var(--vanta-muted)]">ETA</span><strong className="text-[var(--vanta-text)]">{task.eta_str || '—'}</strong></div>
               </div>
             </div>
-          )}
-        </div>
 
-        {/* Actions & File Controls */}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            disabled={!task.output_path || task.status !== 'completed'}
-            onClick={() => api.openTaskFile(task).catch((e) => setActionError(e.message))}
-            className="px-3 py-1.5 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] disabled:opacity-40 text-white font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-          >
-            <FileCheck2 className="w-3.5 h-3.5" />
-            <span>Open File</span>
-          </button>
-          <button
-            type="button"
-            disabled={!task.output_path}
-            onClick={() => api.openTaskFolder(task).catch((e) => setActionError(e.message))}
-            className="px-3 py-1.5 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] disabled:opacity-40 border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-          >
-            <FolderOpen className="w-3.5 h-3.5" />
-            <span>Open Folder</span>
-          </button>
-          {task.status === 'completed' && task.output_path && (
-            <button
-              type="button"
-              onClick={() => setRenameMode((v) => !v)}
-              className="px-3 py-1.5 rounded-lg bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Rename File</span>
-            </button>
-          )}
-        </div>
-
-        {renameMode && (
-          <form onSubmit={handleRenameSubmit} className="flex items-center gap-2">
-            <input
-              type="text"
-              value={filenameDraft}
-              onChange={(e) => setFilenameDraft(e.target.value)}
-              placeholder="New filename.ext"
-              className="flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border-strong)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg px-2.5 py-1.5 font-mono text-xs text-[var(--vanta-text)]"
-            />
-            <button
-              type="submit"
-              disabled={renameBusy || !filenameDraft.trim()}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-medium whitespace-nowrap shrink-0"
-            >
-              {renameBusy ? 'Saving...' : 'Apply'}
-            </button>
-          </form>
-        )}
-
-        {actionError && (
-          <div className="p-2.5 rounded-lg border border-red-500/35 bg-red-500/10 text-red-600 dark:text-[#f85149] text-[11px] break-words">
-            {actionError}
-          </div>
-        )}
-        {actionNotice && (
-          <div className="p-2.5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-[#3fb950] text-[11px] break-all font-mono">
-            {actionNotice}
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 space-y-2.5 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[var(--vanta-text)]">File & source</span>
+                <button type="button" onClick={copyUrl} className="text-[11px] text-[var(--vanta-accent)] inline-flex items-center gap-1"><Copy className="w-3 h-3" />{copiedUrl ? 'Copied' : 'Copy URL'}</button>
+              </div>
+              <p className="text-[10px] font-mono text-[var(--vanta-muted)] break-all line-clamp-2">{task.url}</p>
+              <div className="flex flex-wrap gap-1.5">
+                <button type="button" disabled={!task.output_path || task.status !== 'completed'} onClick={() => api.openTaskFile(task).catch((error) => setActionError(error.message))} className="px-2.5 py-1.5 rounded-lg bg-[var(--vanta-accent)] text-white text-[11px] inline-flex items-center gap-1.5 disabled:opacity-40"><FileCheck2 className="w-3.5 h-3.5" />Open File</button>
+                <button type="button" disabled={!task.output_path} onClick={() => api.openTaskFolder(task).catch((error) => setActionError(error.message))} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] text-[11px] inline-flex items-center gap-1.5 disabled:opacity-40"><FolderOpen className="w-3.5 h-3.5" />Open Folder</button>
+                {task.status === 'failed' && <button type="button" onClick={() => onRetryTask(task.id)} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] inline-flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" />Retry</button>}
+                {task.status === 'completed' && task.output_path && <button type="button" onClick={() => setRenameMode((value) => !value)} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-[var(--vanta-text)] text-[11px] inline-flex items-center gap-1.5"><Edit3 className="w-3.5 h-3.5" />Rename</button>}
+              </div>
+              {renameMode && <form onSubmit={handleRename} className="flex gap-2"><input value={filenameDraft} onChange={(event) => setFilenameDraft(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-bg)] px-2 py-1.5 text-xs text-[var(--vanta-text)]" aria-label="New filename" /><button type="submit" disabled={renameBusy || !filenameDraft.trim()} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs disabled:opacity-40">{renameBusy ? 'Saving…' : 'Save'}</button></form>}
+              {task.output_path && <p className="text-[10px] font-mono text-[var(--vanta-muted)] break-all line-clamp-2">{task.output_path}</p>}
+              {actionError && <p className="text-[11px] text-red-500 break-words">{actionError}</p>}
+              {actionNotice && <p className="text-[11px] text-emerald-500">{actionNotice}</p>}
+            </div>
           </div>
         )}
 
-        {/* Telemetry & Media Specifications */}
-        <div className="border-t border-[var(--vanta-border)] pt-4 space-y-2.5">
-          <h3 className="text-[11px] font-mono uppercase tracking-wider text-[var(--vanta-muted)]">
-            Transfer & Media Telemetry
-          </h3>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono tabular-nums text-[11px]">
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Engine</dt>
-              <dd className="text-[var(--vanta-text)] font-medium">{task.engine}</dd>
-            </div>
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Format / Ext</dt>
-              <dd className="text-[var(--vanta-text)] font-medium">
-                {task.ext.toUpperCase()} {task.resolution_label ? `(${task.resolution_label})` : ''}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Downloaded / Total</dt>
-              <dd className="text-[var(--vanta-text)]">
-                {formatBytes(effectiveDownloadedBytes)} / {task.total_bytes > 0 ? formatBytes(task.total_bytes) : '--'}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Average Speed</dt>
-              <dd className="text-[var(--vanta-text)]">
-                {task.avg_speed_bytes_per_sec && task.avg_speed_bytes_per_sec > 0
-                  ? `${formatBytes(task.avg_speed_bytes_per_sec)}/s`
-                  : task.speed_str || '0 B/s'}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Elapsed Time</dt>
-              <dd className="text-[var(--vanta-text)]">
-                {task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '--'}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--vanta-muted)]">Connections / Retries</dt>
-              <dd className="text-[var(--vanta-text)]">
-                {task.active_connections ?? 0} conn · {task.retries}/{task.max_retries} retries
-              </dd>
-            </div>
-            {(task.video_codec || task.audio_codec || task.verified_audio_info) && (
-              <div className="col-span-2">
-                <dt className="text-[var(--vanta-muted)]">Verified Codecs</dt>
-                <dd className="text-[var(--vanta-text)] break-words">
-                  {task.verified_audio_info ||
-                    [
-                      task.video_codec ? `Video: ${task.video_codec}` : null,
-                      task.audio_codec ? `Audio: ${task.audio_codec}` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                </dd>
-              </div>
-            )}
-            {(task.tracks_requested ?? 0) > 0 && (
-              <div className="col-span-2">
-                <dt className="text-[var(--vanta-muted)]">Playlist / Selection Progress</dt>
-                <dd className="text-[var(--vanta-text)]">
-                  {task.tracks_completed ?? 0} of {task.tracks_requested} completed
-                  {(task.tracks_failed ?? 0) > 0 ? ` · ${task.tracks_failed} failed` : ''}
-                </dd>
-              </div>
-            )}
-          </dl>
-        </div>
-
-        {/* Source & Destination Paths */}
-        <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
-
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-[var(--vanta-muted)]">Source URL</span>
-              <button
-                type="button"
-                onClick={handleCopyUrl}
-                className="text-[11px] text-[var(--vanta-accent)] hover:underline inline-flex items-center gap-1"
-              >
-                {copiedUrl ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                <span>{copiedUrl ? 'Copied' : 'Copy'}</span>
-              </button>
-            </div>
-            <p className="p-2 rounded-lg bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] font-mono text-[11px] text-[var(--vanta-text-secondary)] break-all">
-              {task.url}
-            </p>
+        {tab === 'playlist' && (
+          <div className="max-w-4xl space-y-3">
+            <div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-[var(--vanta-text)]">Playlist selection</h3><p className="text-[11px] text-[var(--vanta-muted)] mt-1">{task.playlist_mode === 'playlist' ? 'Playlist download' : 'Single item download'}</p></div><span className="text-xs font-mono text-[var(--vanta-text-secondary)]">{task.tracks_completed ?? 0} / {task.tracks_requested ?? task.selected_items?.length ?? 1} tracks</span></div>
+            {task.selected_items?.length ? <div className="grid grid-cols-1 md:grid-cols-2 gap-2">{task.selected_items.map((item, index) => <div key={`${index}-${item}`} className="rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-[11px] text-[var(--vanta-text-secondary)] break-all"><span className="text-[var(--vanta-muted)] mr-2">{String(index + 1).padStart(2, '0')}</span>{item}</div>)}</div> : <p className="text-xs text-[var(--vanta-muted)]">No playlist item list was stored for this task.</p>}
+            {(task.tracks_failed ?? 0) > 0 && <p className="text-xs text-red-500">{task.tracks_failed} track(s) failed.</p>}
           </div>
+        )}
 
-          {task.output_path && (
-            <div className="space-y-1">
-              <span className="text-[11px] font-medium text-[var(--vanta-muted)] block">
-                Destination Path
-              </span>
-              <p className="p-2 rounded-lg bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] font-mono text-[11px] text-[var(--vanta-text-secondary)] break-all">
-                {task.output_path}
-              </p>
-            </div>
-          )}
-        </div>
+        {tab === 'subtitles' && (
+          <div className="max-w-3xl space-y-3">
+            <h3 className="text-sm font-semibold text-[var(--vanta-text)]">Subtitle tracks</h3>
+            {task.subtitle_languages?.length ? <div className="flex flex-wrap gap-2">{task.subtitle_languages.map((language) => <span key={language} className="px-3 py-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-xs text-[var(--vanta-text)]">{language}</span>)}</div> : <p className="text-xs text-[var(--vanta-muted)]">No subtitle languages were selected for this download.</p>}
+            <p className="text-[11px] text-[var(--vanta-muted)]">{task.write_auto_subtitles ? 'Automatic subtitles were enabled for this task.' : 'Automatic subtitles were not enabled for this task.'} Embedded subtitle tracks remain selectable in compatible media players; they are not burned into the video image.</p>
+          </div>
+        )}
 
-        {/* Sanitized Task Event Log */}
-        <div className="border-t border-[var(--vanta-border)] pt-4 space-y-2">
-          <h3 className="text-[11px] font-mono uppercase tracking-wider text-[var(--vanta-muted)] flex items-center gap-1.5">
-            <Terminal className="w-3.5 h-3.5" />
-            <span>Task Event Log</span>
-          </h3>
-          {task.logs && task.logs.length > 0 ? (
-            <div className="max-h-48 overflow-y-auto rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 space-y-1 font-mono text-[10px]">
-              {task.logs.slice(-40).map((entry, idx) => (
-                <div key={idx} className="flex items-start gap-2 leading-relaxed">
-                  <span className="text-[var(--vanta-muted)] shrink-0">
-                    {new Date(entry.timestamp).toLocaleTimeString([], { hour12: false })}
-                  </span>
-                  <span
-                    className={
-                      entry.level === 'error'
-                        ? 'text-red-600 dark:text-[#f85149]'
-                        : entry.level === 'warn'
-                        ? 'text-amber-600 dark:text-[#e3b341]'
-                        : 'text-[var(--vanta-text-secondary)]'
-                    }
-                  >
-                    {entry.message}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-[11px] text-[var(--vanta-muted)]">No log entries recorded for this transfer yet.</p>
-          )}
-        </div>
+        {tab === 'lyrics' && (
+          <div className="max-w-4xl h-full min-h-0 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3 shrink-0"><div><h3 className="text-sm font-semibold text-[var(--vanta-text)]">Synchronized lyrics</h3><p className="text-[11px] text-[var(--vanta-muted)]">Lyrics supplied for this download · LRC format</p></div><button type="button" disabled={!lyrics} onClick={exportLyrics} className="px-3 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text)] inline-flex items-center gap-1.5 disabled:opacity-40"><Download className="w-3.5 h-3.5" />Export .LRC</button></div>
+            {lyrics ? <pre className="flex-1 min-h-0 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 text-[11px] leading-5 font-mono whitespace-pre-wrap text-[var(--vanta-text-secondary)]">{lyrics}</pre> : <div className="flex-1 min-h-0 rounded-xl border border-dashed border-[var(--vanta-border)] flex flex-col items-center justify-center text-center p-5"><Music2 className="w-7 h-7 text-[var(--vanta-muted)] mb-2" /><p className="text-sm text-[var(--vanta-text)] font-medium">No LRC lyrics attached</p><p className="text-[11px] text-[var(--vanta-muted)] mt-1 max-w-lg">Add an LRC file or paste timestamped lyrics in the Audio section when creating a download. VANTA can then embed the supplied lyrics in MP3 files and keep an LRC sidecar.</p></div>}
+          </div>
+        )}
+
+        {tab === 'options' && (
+          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+            {[
+              ['Engine', task.engine],
+              ['Format', (task.audio_format || task.ext || '—').toUpperCase()],
+              ['Priority', task.priority],
+              ['Duration', task.duration_string || '—'],
+              ['Connections', String(task.active_connections ?? 0)],
+              ['Retries', `${task.retries} / ${task.max_retries}`],
+              ['Created', task.created_at ? new Date(task.created_at).toLocaleString() : '—'],
+              ['Elapsed', task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—'],
+            ].map(([label, value]) => <div key={label} className="rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3"><span className="block text-[10px] text-[var(--vanta-muted)] uppercase tracking-wide">{label}</span><strong className="block mt-1 text-xs text-[var(--vanta-text)] break-words">{value}</strong></div>)}
+            {task.error_message && <div className="col-span-full rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-500"><AlertCircle className="w-4 h-4 inline mr-2" />{task.error_message}</div>}
+          </div>
+        )}
       </div>
     </aside>
   );

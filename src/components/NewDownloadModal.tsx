@@ -1543,15 +1543,39 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           {mode === 'single' && selectedTab === 'audio' &&
             (orderedSpotifyTracks.length === 0 || selectedTrackCount === 1) && (
             <div className="space-y-2 pt-3 border-t border-[var(--vanta-border)]">
-              <label className="block text-xs font-medium text-[var(--vanta-text)]">
-                Synchronized lyrics (optional .LRC)
-              </label>
-              <input
-                type="file"
-                accept=".lrc,text/plain"
-                onChange={handleLrcFileChange}
-                className="block w-full text-[11px] text-[var(--vanta-muted)] file:mr-3 file:rounded-md file:border file:border-[var(--vanta-border)] file:bg-[var(--vanta-surface-2)] file:px-3 file:py-1.5 file:text-[11px] file:text-[var(--vanta-text)]"
+              <div className="flex items-center justify-between gap-3">
+                <label className="block text-xs font-semibold text-[var(--vanta-text)]">
+                  Synchronized lyrics
+                </label>
+                <span className="text-[10px] text-[var(--vanta-muted)]">Optional · .LRC</span>
+              </div>
+              <textarea
+                value={lrcFile?.content || ''}
+                onChange={(event) => {
+                  const content = event.target.value;
+                  if (new TextEncoder().encode(content).length > 512 * 1024) {
+                    setExtractError('Lyrics must be 512 KiB or smaller.');
+                    return;
+                  }
+                  setLrcFile(content.trim() ? { name: 'Pasted lyrics.lrc', content } : null);
+                  if (!content.trim() || /^\s*\[\d{1,3}:\d{2}(?:[.,:]\d{1,3})?\]/m.test(content)) {
+                    setExtractError(null);
+                  } else {
+                    setExtractError('Use timestamped LRC lines such as [00:12.40]...');
+                  }
+                }}
+                rows={4}
+                maxLength={512 * 1024}
+                placeholder={'Paste your synchronized LRC text here…\n[00:12.40] First line\n[00:16.20] Next line'}
+                className="w-full resize-y min-h-[92px] rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-[11px] leading-5 font-mono text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:outline-none focus:border-[var(--vanta-accent)]"
               />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] text-[var(--vanta-muted)]">Paste text directly or import an existing LRC file.</span>
+                <label className="cursor-pointer rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-1.5 text-[11px] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+                  Import .LRC
+                  <input type="file" accept=".lrc,text/plain" onChange={handleLrcFileChange} className="hidden" />
+                </label>
+              </div>
               {lrcFile && (
                 <div className="flex items-center justify-between gap-2 text-[11px]">
                   <span className="truncate text-[var(--vanta-text-secondary)]">{lrcFile.name}</span>

@@ -7,8 +7,6 @@ import {
   Trash2,
   FolderOpen,
   FileCheck2,
-  ArrowUp,
-  ArrowDown,
   Plus,
   MoreHorizontal,
   Info,
@@ -20,7 +18,6 @@ import {
   DownloadTask,
   EngineInstallProgress,
   EngineStatusMap,
-  TaskPriority,
 } from '../types';
 import {
   calculateAggregateSpeed,
@@ -30,7 +27,6 @@ import {
   SortField,
 } from '../utils/queue-logic';
 import { formatBytes } from '../utils/engine-parser';
-import { ProgressDisplay, getStatusLabel, getStatusColorClass } from './ProgressDisplay';
 import { MediaThumbnail } from './MediaThumbnail';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../services/api';
@@ -320,37 +316,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
         )}
       </section>
 
-      {/* Compact Telemetry Summary Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-          <p className="text-[11px] font-medium text-[var(--vanta-muted)]">Active Transfers</p>
-          <p className="text-xl font-semibold font-mono tabular-nums text-[var(--vanta-text)] mt-0.5">
-            {activeCount}
-          </p>
-        </div>
-        <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-          <p className="text-[11px] font-medium text-[var(--vanta-muted)]">Combined Throughput</p>
-          <p className="text-xl font-semibold font-mono tabular-nums text-blue-600 dark:text-[#58a6ff] mt-0.5">
-            {aggregateSpeed.formattedSpeed}
-          </p>
-        </div>
-        <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-          <p className="text-[11px] font-medium text-[var(--vanta-muted)]">Queued / Paused</p>
-          <p className="text-xl font-semibold font-mono tabular-nums text-[var(--vanta-text)] mt-0.5">
-            {queuedCount} <span className="text-sm font-normal text-[var(--vanta-muted)]">/ {pausedCount}</span>
-          </p>
-        </div>
-        <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-          <p className="text-[11px] font-medium text-[var(--vanta-muted)]">Completed / Failed</p>
-          <p className="text-xl font-semibold font-mono tabular-nums text-[var(--vanta-text)] mt-0.5">
-            <span className="text-emerald-700 dark:text-[#3fb950]">{completedCount}</span>{' '}
-            <span className="text-sm font-normal text-[var(--vanta-muted)]">
-              / {failedCount}
-            </span>
-          </p>
-        </div>
-      </div>
-
       {/* Missing Engine Inline Alert (only shown when missing) */}
       {missingRequiredEngines.length > 0 && (
         <div className="px-4 py-3 rounded-xl border border-amber-500/35 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -546,379 +511,92 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
       {/* Main Transfer List */}
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
-        {/* Table Header */}
-        <div className="px-4 py-2 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] flex items-center justify-between gap-3 text-[11px] font-mono text-[var(--vanta-muted)]">
-          <div className="flex items-center gap-3 min-w-0">
-            <input
-              type="checkbox"
-              aria-label="Select all visible downloads"
-              checked={visibleTasks.length > 0 && selectedIds.length === visibleTasks.length}
-              onChange={toggleSelectAll}
-              className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
-            />
-            <span>TRANSFER QUEUE ({visibleTasks.length})</span>
-          </div>
-          <span className="hidden sm:inline">FILE DETAILS · PROGRESS · SPEED / ETA · ACTIONS</span>
-        </div>
-
-        {visibleTasks.length === 0 ? (
-          <div className="py-16 px-4 text-center space-y-3">
-            <Download className="w-9 h-9 text-[var(--vanta-muted)]/60 mx-auto" />
-            <div>
-              <p className="text-sm font-medium text-[var(--vanta-text)]">
-                {searchQuery || scopeFilter !== 'all'
-                  ? 'No matching transfers found'
-                  : 'Download queue is empty'}
-              </p>
-              <p className="text-xs text-[var(--vanta-muted)] mt-1">
-                {searchQuery || scopeFilter !== 'all'
-                  ? 'Clear your active filter or search term to view all transfers.'
-                  : 'Paste a YouTube, video, playlist, or Spotify music URL to inspect and start downloading.'}
-              </p>
+        <div className="overflow-x-auto">
+          <div className="min-w-[1040px]">
+            <div className="grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]">
+              <input type="checkbox" aria-label="Select all visible downloads"
+                checked={visibleTasks.length > 0 && selectedIds.length === visibleTasks.length}
+                onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
+              <span>#</span><span>Name</span><span>Engine</span><span>Progress</span><span>Size</span><span>Speed</span><span>ETA</span><span>Status</span><span>Actions</span>
             </div>
-            <button
-              type="button"
-              onClick={onOpenNewDownload}
-              className="px-4 py-2 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              <span>New Download</span>
-            </button>
-          </div>
-        ) : (
-          <div className="divide-y divide-[var(--vanta-border)]">
-            {visibleTasks.map((task) => {
-              const isSelectedRow = selectedTaskId === task.id;
-              const isChecked = selectedIds.includes(task.id);
-              const isRunning =
-                task.status === 'downloading' ||
-                task.status === 'connecting' ||
-                task.status === 'resuming' ||
-                task.status === 'inspecting' ||
-                task.status === 'processing' ||
-                task.status === 'muxing' ||
-                task.status === 'verifying';
 
-              return (
-                <div
-                  key={task.id}
-                  onClick={() => onSelectTask(task)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setOpenMenuId(openMenuId === task.id ? null : task.id);
-                  }}
-                  className={`px-4 py-3 transition-colors cursor-pointer relative ${
-                    isSelectedRow
-                      ? 'bg-blue-500/8'
-                      : 'hover:bg-[var(--vanta-surface-hover)]/60'
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    {/* Row Checkbox */}
-                    <div
-                      className="pt-1 shrink-0"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${task.title}`}
-                        checked={isChecked}
-                        onChange={() => toggleRowSelected(task.id)}
-                        className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
-                      />
-                    </div>
+            {visibleTasks.length === 0 ? (
+              <div className="py-16 px-4 text-center space-y-3">
+                <Download className="w-9 h-9 text-[var(--vanta-muted)]/60 mx-auto" />
+                <div>
+                  <p className="text-sm font-medium text-[var(--vanta-text)]">{searchQuery || scopeFilter !== 'all' ? 'No matching transfers found' : 'Download queue is empty'}</p>
+                  <p className="text-xs text-[var(--vanta-muted)] mt-1">{searchQuery || scopeFilter !== 'all' ? 'Clear your active filter or search term to view all transfers.' : 'Paste a video, playlist, or Spotify URL to inspect and start downloading.'}</p>
+                </div>
+                <button type="button" onClick={onOpenNewDownload} className="px-4 py-2 rounded-lg bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white text-xs font-medium inline-flex items-center gap-1.5">
+                  <Plus className="w-4 h-4" /><span>New Download</span>
+                </button>
+              </div>
+            ) : (
+              <div className="divide-y divide-[var(--vanta-border)]">
+                {visibleTasks.map((task, index) => {
+                  const isSelectedRow = selectedTaskId === task.id;
+                  const isChecked = selectedIds.includes(task.id);
+                  const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
+                  const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
+                  const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
+                  const downloaded = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0 ? task.total_bytes : task.downloaded_bytes;
 
-                    {/* Thumbnail or Media Type Tile */}
-                    <MediaThumbnail
-                      src={task.thumbnail}
-                      title={task.title}
-                      isAudio={task.is_audio_only || task.engine === 'spotdl'}
-                      ext={task.ext}
-                      size="md"
-                      aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'}
-                    />
-
-                    {/* Main Title, Metadata & Progress */}
-                    <div className="flex-1 min-w-0 space-y-2">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <h3 className="text-xs sm:text-sm font-medium text-[var(--vanta-text)] truncate">
-                              {task.title}
-                            </h3>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-[var(--vanta-muted)] mt-0.5">
-                            <span className={getStatusColorClass(task.status)}>
-                              {getStatusLabel(task.status)}
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <span>
-                              {task.is_audio_only || task.engine === 'spotdl' ? 'Audio' : 'Video'} ·{' '}
-                              {task.engine}
-                            </span>
-                            {task.uploader && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-[var(--vanta-text-secondary)] truncate max-w-[180px]">
-                                  {task.uploader}
-                                </span>
-                              </>
-                            )}
-                            {task.album && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="truncate max-w-[160px]">{task.album}</span>
-                              </>
-                            )}
-                            <span aria-hidden="true">·</span>
-                            <span>
-                              {task.ext.toUpperCase()}
-                              {task.is_audio_only && task.audio_bitrate && !['flac', 'wav'].includes((task.audio_format || '').toLowerCase())
-                                ? ` (${task.audio_bitrate})`
-                                : task.resolution_label
-                                ? ` (${task.resolution_label})`
-                                : ''}
-                            </span>
-                            {(task.tracks_requested ?? 0) > 0 && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="tabular-nums text-[var(--vanta-text-secondary)]">
-                                  {task.tracks_completed ?? 0}/{task.tracks_requested} tracks
-                                  {(task.tracks_failed ?? 0) > 0 ? (
-                                    <span className="text-red-600 dark:text-[#f85149]">
-                                      {' '}({task.tracks_failed} failed)
-                                    </span>
-                                  ) : null}
-                                </span>
-                              </>
-                            )}
-                            {task.duration_string && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="tabular-nums">{task.duration_string}</span>
-                              </>
-                            )}
-                            {task.total_bytes > 0 && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="tabular-nums">{formatBytes(task.total_bytes)}</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Row Action Controls */}
-                        <div
-                          className="flex items-center gap-1 shrink-0"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <select
-                            aria-label={`Priority for ${task.title}`}
-                            value={task.priority}
-                            onChange={(e) =>
-                              api.updateTaskMeta(task.id, {
-                                priority: e.target.value as TaskPriority,
-                              })
-                            }
-                            className="hidden md:block bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded px-1.5 py-1 text-[11px] font-mono text-[var(--vanta-text-secondary)] focus:outline-none"
-                          >
-                            <option value="low">Low</option>
-                            <option value="normal">Normal</option>
-                            <option value="high">High</option>
-                            <option value="highest">Highest</option>
-                          </select>
-
-                          {isRunning ? (
-                            <button
-                              type="button"
-                              onClick={() => onPauseTask(task.id)}
-                              title="Pause"
-                              aria-label="Pause transfer"
-                              className="p-1.5 text-[var(--vanta-muted)] hover:text-amber-600 dark:hover:text-[#e3b341] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                            >
-                              <Pause className="w-3.5 h-3.5" />
-                            </button>
-                          ) : task.status === 'paused' ? (
-                            <button
-                              type="button"
-                              onClick={() => onResumeTask(task.id)}
-                              title="Resume"
-                              aria-label="Resume transfer"
-                              className="p-1.5 text-[var(--vanta-muted)] hover:text-emerald-600 dark:hover:text-[#3fb950] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                            >
-                              <Play className="w-3.5 h-3.5" />
-                            </button>
-                          ) : task.status === 'failed' || task.status === 'cancelled' ? (
-                            <button
-                              type="button"
-                              onClick={() => onRetryTask(task.id)}
-                              title="Retry"
-                              aria-label="Retry transfer"
-                              className="p-1.5 text-[var(--vanta-muted)] hover:text-blue-600 dark:hover:text-[#58a6ff] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                            >
-                              <RotateCw className="w-3.5 h-3.5" />
-                            </button>
-                          ) : null}
-
-                          {task.status === 'completed' && task.output_path && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => api.openTaskFile(task).catch(() => {})}
-                                title="Open file"
-                                aria-label="Open downloaded file"
-                                className="p-1.5 text-[var(--vanta-muted)] hover:text-emerald-600 dark:hover:text-[#3fb950] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                              >
-                                <FileCheck2 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => api.openTaskFolder(task).catch(() => {})}
-                                title="Open folder"
-                                aria-label="Open containing folder"
-                                className="p-1.5 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                              >
-                                <FolderOpen className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
-
-                          {isRunning || task.status === 'queued' ? (
-                            <button
-                              type="button"
-                              onClick={() => onCancelTask(task.id)}
-                              title="Cancel"
-                              aria-label="Cancel transfer"
-                              className="p-1.5 text-[var(--vanta-muted)] hover:text-red-600 dark:hover:text-[#f85149] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setConfirmState({
-                                  title: 'Remove Transfer',
-                                  message: `Remove "${task.title}" from the download queue?`,
-                                  confirmLabel: 'Remove',
-                                  checkboxLabel: task.output_path
-                                    ? 'Also delete file from disk'
-                                    : undefined,
-                                  onConfirm: (deleteFile) => {
-                                    setConfirmState(null);
-                                    onDeleteTask(task.id, deleteFile);
-                                  },
-                                })
-                              }
-                              title="Delete"
-                              aria-label="Remove transfer"
-                              className="p-1.5 text-[var(--vanta-muted)] hover:text-red-600 dark:hover:text-[#f85149] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={() => setOpenMenuId(openMenuId === task.id ? null : task.id)}
-                            title="More actions"
-                            aria-label="More transfer actions"
-                            className="p-1.5 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-2)] rounded-md transition-colors"
-                          >
-                            <MoreHorizontal className="w-3.5 h-3.5" />
-                          </button>
+                  return (
+                    <div key={task.id} onClick={() => onSelectTask(task)}
+                      onContextMenu={(event) => { event.preventDefault(); setOpenMenuId(openMenuId === task.id ? null : task.id); }}
+                      className={\`relative grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors \${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}\`}>
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <input type="checkbox" aria-label={\`Select \${task.title}\`} checked={isChecked} onChange={() => toggleRowSelected(task.id)} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
+                      </div>
+                      <span className="text-xs text-[var(--vanta-muted)] tabular-nums">{index + 1}</span>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={task.is_audio_only || task.engine === 'spotdl'} ext={task.ext} size="md" aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'} />
+                        <div className="min-w-0">
+                          <h3 className="text-xs sm:text-sm font-medium text-[var(--vanta-text)] truncate">{task.title}</h3>
+                          <p className="mt-0.5 text-[10px] text-[var(--vanta-muted)] truncate">{[task.uploader, task.album, task.duration_string, task.ext?.toUpperCase()].filter(Boolean).join(' · ')}</p>
                         </div>
                       </div>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? \`\${progress.toFixed(1)}%\` : '—'}</span>
+                          {task.status === 'downloading' && <span className="text-[10px] text-[var(--vanta-muted)] truncate">{task.current_phase || ''}</span>}
+                        </div>
+                        <div className="h-2 w-full rounded-full bg-[var(--vanta-surface-2)] overflow-hidden border border-[var(--vanta-border)]">
+                          <div className={\`h-full rounded-full transition-[width] duration-200 \${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}\`} style={{ width: \`\${percentKnown ? progress : 0}%\` }} />
+                        </div>
+                      </div>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.total_bytes > 0 ? \`\${formatBytes(downloaded)} / \${formatBytes(task.total_bytes)}\` : downloaded > 0 ? formatBytes(downloaded) : '—'}</span>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>
+                      <span className={\`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate \${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]\`}>{getStatusLabel(task.status)}</span>
 
-                      <ProgressDisplay task={task} compact />
-
-                      {task.error_message && (
-                        <p className="text-[11px] text-red-600 dark:text-[#f85149] truncate">
-                          {task.error_message}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Row Context Menu */}
-                  {openMenuId === task.id && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="absolute right-4 top-10 z-30 w-44 rounded-lg border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-xl py-1 text-xs"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          onSelectTask(task);
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"
-                      >
-                        <Info className="w-3.5 h-3.5" />
-                        <span>Inspect Details</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          api.moveTask(task.id, 'up').catch(() => {});
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"
-                      >
-                        <ArrowUp className="w-3.5 h-3.5" />
-                        <span>Move Up in Queue</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          api.moveTask(task.id, 'down').catch(() => {});
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"
-                      >
-                        <ArrowDown className="w-3.5 h-3.5" />
-                        <span>Move Down in Queue</span>
-                      </button>
-                      {task.output_path && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setOpenMenuId(null);
-                            api.openTaskFolder(task).catch(() => {});
-                          }}
-                          className="w-full px-3 py-1.5 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"
-                        >
-                          <FolderOpen className="w-3.5 h-3.5" />
-                          <span>Open Folder</span>
+                      <div className="flex items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
+                        <button type="button" title={isRunning ? 'Pause' : task.status === 'paused' ? 'Resume' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry' : 'More actions'}
+                          onClick={() => isRunning ? onPauseTask(task.id) : task.status === 'paused' ? onResumeTask(task.id) : task.status === 'failed' || task.status === 'cancelled' ? onRetryTask(task.id) : setOpenMenuId(openMenuId === task.id ? null : task.id)}
+                          className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+                          {isRunning ? <Pause className="w-3.5 h-3.5" /> : task.status === 'paused' ? <Play className="w-3.5 h-3.5" /> : task.status === 'failed' || task.status === 'cancelled' ? <RotateCw className="w-3.5 h-3.5" /> : <MoreHorizontal className="w-3.5 h-3.5" />}
                         </button>
+                        <button type="button" title="More actions" aria-label="More transfer actions" onClick={() => setOpenMenuId(openMenuId === task.id ? null : task.id)} className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+                          <MoreHorizontal className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {openMenuId === task.id && (
+                        <div onClick={(event) => event.stopPropagation()} className="absolute right-3 top-10 z-30 w-48 rounded-lg border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-xl py-1 text-xs">
+                          <button type="button" onClick={() => { setOpenMenuId(null); onSelectTask(task); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><Info className="w-3.5 h-3.5" />Inspect Details</button>
+                          {task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFolder(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FolderOpen className="w-3.5 h-3.5" />Open Folder</button>}
+                          {task.status === 'completed' && task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFile(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FileCheck2 className="w-3.5 h-3.5" />Open File</button>}
+                          {isRunning || task.status === 'queued' ? <button type="button" onClick={() => { setOpenMenuId(null); onCancelTask(task.id); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><X className="w-3.5 h-3.5" />Cancel</button> : <button type="button" onClick={() => { setOpenMenuId(null); setConfirmState({ title: 'Remove Transfer', message: \`Remove "\${task.title}" from the download queue?\`, confirmLabel: 'Remove', checkboxLabel: task.output_path ? 'Also delete file from disk' : undefined, onConfirm: (deleteFile) => { setConfirmState(null); onDeleteTask(task.id, deleteFile); } }); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><Trash2 className="w-3.5 h-3.5" />Remove</button>}
+                        </div>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          setConfirmState({
-                            title: 'Delete Transfer',
-                            message: `Remove "${task.title}" from VANTA?`,
-                            confirmLabel: 'Delete',
-                            checkboxLabel: task.output_path ? 'Also delete file from disk' : undefined,
-                            onConfirm: (deleteFile) => {
-                              setConfirmState(null);
-                              onDeleteTask(task.id, deleteFile);
-                            },
-                          });
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-600 dark:text-[#f85149]"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Delete</span>
-                      </button>
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
       {/* Confirmation Modal */}

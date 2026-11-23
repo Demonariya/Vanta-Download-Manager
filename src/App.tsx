@@ -212,7 +212,11 @@ export default function App() {
         }
       })
       .catch(console.error);
-    api.getTasks().then((t) => mounted && setTasks(t)).catch(console.error);
+    api.getTasks().then((nextTasks) => {
+      if (!mounted) return;
+      setTasks(nextTasks);
+      if (nextTasks.length > 0) setSelectedTaskId((current) => current || nextTasks[0].id);
+    }).catch(console.error);
     api.getQueues().then((next) => {
       if (!mounted) return;
       setQueues(next);
@@ -363,6 +367,10 @@ export default function App() {
           <TopBar
             onOpenNewDownload={() => {
               setInitialInspectUrl('');
+              setIsNewDownloadOpen(true);
+            }}
+            onAddUrl={(url) => {
+              setInitialInspectUrl(url);
               setIsNewDownloadOpen(true);
             }}
             onOpenNotifications={() => setIsNotificationsOpen(true)}

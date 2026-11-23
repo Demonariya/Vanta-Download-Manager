@@ -16,8 +16,8 @@
     --vanta-text: #111827;
     --vanta-text-secondary: #374151;
     --vanta-muted: #5b6573;
-    --vanta-accent: #1d4ed8;
-    --vanta-accent-hover: #1e40af;
+    --vanta-accent: #6d28d9;
+    --vanta-accent-hover: #5b21b6;
     --vanta-success: #15803d;
     --vanta-warning: #b45309;
     --vanta-danger: #b91c1c;
@@ -27,17 +27,17 @@
 
   .dark {
     /* Dark Mode Obsidian Tokens */
-    --vanta-bg: #0b0e13;
-    --vanta-surface: #11161d;
-    --vanta-surface-2: #161c25;
-    --vanta-surface-hover: #1c2430;
-    --vanta-border: #232b36;
-    --vanta-border-strong: #313b4a;
+    --vanta-bg: #0c0b14;
+    --vanta-surface: #11101c;
+    --vanta-surface-2: #191729;
+    --vanta-surface-hover: #25213a;
+    --vanta-border: #2a2540;
+    --vanta-border-strong: #3d355c;
     --vanta-text: #eef2f7;
     --vanta-text-secondary: #c9d1d9;
     --vanta-muted: #8b949e;
-    --vanta-accent: #3b82f6;
-    --vanta-accent-hover: #2563eb;
+    --vanta-accent: #7c3aed;
+    --vanta-accent-hover: #6d28d9;
     --vanta-success: #3fb950;
     --vanta-warning: #e3b341;
     --vanta-danger: #f85149;

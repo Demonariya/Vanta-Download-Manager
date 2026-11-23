@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   AlertTriangle,
   ChevronLeft,
-  Download,
+  Layers,
   X,
 } from 'lucide-react';
 import { EngineStatusMap } from '../types';
@@ -51,7 +51,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   }> = [
     {
       id: 'downloads',
-      label: 'Download Center',
+      label: 'All Downloads',
       icon: ListVideo,
       count: activeCount > 0 ? activeCount : undefined,
     },
@@ -102,7 +102,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               title={isCollapsed && !isDrawer ? 'Expand sidebar' : undefined}
               aria-label={isCollapsed && !isDrawer ? 'Expand sidebar' : 'VANTA Download Manager'}
             >
-              <Download className="w-4 h-4" />
+              <Layers className="w-4 h-4" />
             </button>
             {(!isCollapsed || isDrawer) && (
               <div className="truncate">
@@ -110,7 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   VANTA
                 </span>
                 <span className="text-[11px] text-[var(--vanta-muted)] block font-mono">
-                  Download Workstation
+                  Download Manager
                 </span>
               </div>
             )}
