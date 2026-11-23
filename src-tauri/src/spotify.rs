@@ -613,6 +613,8 @@ pub fn build_media_metadata_from_entity(
             thumbnail: artwork.clone(),
             description,
             formats: Vec::new(),
+            subtitles: Vec::new(),
+            automatic_subtitles: Vec::new(),
             is_playlist: false,
             playlist_count: None,
             extractor: "spotdl".to_string(),
@@ -854,6 +856,8 @@ pub fn build_media_metadata_from_entity(
                 thumbnail: artwork.clone(),
                 description,
                 formats: Vec::new(),
+                subtitles: Vec::new(),
+                automatic_subtitles: Vec::new(),
                 is_playlist,
                 playlist_count: total_tracks,
                 extractor: "spotdl".to_string(),
@@ -905,6 +909,8 @@ pub fn build_media_metadata_from_oembed(
         thumbnail: thumbnail.clone(),
         description: Some("Partial Spotify metadata retrieved via oEmbed fallback.".to_string()),
         formats: Vec::new(),
+        subtitles: Vec::new(),
+        automatic_subtitles: Vec::new(),
         is_playlist: matches!(
             content_type,
             SpotifyContentType::Album | SpotifyContentType::Playlist
