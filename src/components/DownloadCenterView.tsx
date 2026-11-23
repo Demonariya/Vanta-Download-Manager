@@ -544,9 +544,9 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                   return (
                     <div key={task.id} onClick={() => onSelectTask(task)}
                       onContextMenu={(event) => { event.preventDefault(); setOpenMenuId(openMenuId === task.id ? null : task.id); }}
-                      className={\`relative grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors \${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}\`}>
+                      className={`relative grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
                       <div onClick={(event) => event.stopPropagation()}>
-                        <input type="checkbox" aria-label={\`Select \${task.title}\`} checked={isChecked} onChange={() => toggleRowSelected(task.id)} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
+                        <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => toggleRowSelected(task.id)} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
                       <span className="text-xs text-[var(--vanta-muted)] tabular-nums">{index + 1}</span>
                       <div className="flex items-center gap-2.5 min-w-0">
@@ -559,17 +559,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                       <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? \`\${progress.toFixed(1)}%\` : '—'}</span>
+                          <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(1)}%` : '—'}</span>
                           {task.status === 'downloading' && <span className="text-[10px] text-[var(--vanta-muted)] truncate">{task.current_phase || ''}</span>}
                         </div>
                         <div className="h-2 w-full rounded-full bg-[var(--vanta-surface-2)] overflow-hidden border border-[var(--vanta-border)]">
-                          <div className={\`h-full rounded-full transition-[width] duration-200 \${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}\`} style={{ width: \`\${percentKnown ? progress : 0}%\` }} />
+                          <div className={`h-full rounded-full transition-[width] duration-200 ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
                         </div>
                       </div>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.total_bytes > 0 ? \`\${formatBytes(downloaded)} / \${formatBytes(task.total_bytes)}\` : downloaded > 0 ? formatBytes(downloaded) : '—'}</span>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.total_bytes > 0 ? `${formatBytes(downloaded)} / ${formatBytes(task.total_bytes)}` : downloaded > 0 ? formatBytes(downloaded) : '—'}</span>
                       <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>
                       <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>
-                      <span className={\`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate \${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]\`}>{getStatusLabel(task.status)}</span>
+                      <span className={`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>
 
                       <div className="flex items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
                         <button type="button" title={isRunning ? 'Pause' : task.status === 'paused' ? 'Resume' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry' : 'More actions'}
@@ -587,7 +587,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           <button type="button" onClick={() => { setOpenMenuId(null); onSelectTask(task); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><Info className="w-3.5 h-3.5" />Inspect Details</button>
                           {task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFolder(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FolderOpen className="w-3.5 h-3.5" />Open Folder</button>}
                           {task.status === 'completed' && task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFile(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FileCheck2 className="w-3.5 h-3.5" />Open File</button>}
-                          {isRunning || task.status === 'queued' ? <button type="button" onClick={() => { setOpenMenuId(null); onCancelTask(task.id); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><X className="w-3.5 h-3.5" />Cancel</button> : <button type="button" onClick={() => { setOpenMenuId(null); setConfirmState({ title: 'Remove Transfer', message: \`Remove "\${task.title}" from the download queue?\`, confirmLabel: 'Remove', checkboxLabel: task.output_path ? 'Also delete file from disk' : undefined, onConfirm: (deleteFile) => { setConfirmState(null); onDeleteTask(task.id, deleteFile); } }); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><Trash2 className="w-3.5 h-3.5" />Remove</button>}
+                          {isRunning || task.status === 'queued' ? <button type="button" onClick={() => { setOpenMenuId(null); onCancelTask(task.id); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><X className="w-3.5 h-3.5" />Cancel</button> : <button type="button" onClick={() => { setOpenMenuId(null); setConfirmState({ title: 'Remove Transfer', message: `Remove "${task.title}" from the download queue?`, confirmLabel: 'Remove', checkboxLabel: task.output_path ? 'Also delete file from disk' : undefined, onConfirm: (deleteFile) => { setConfirmState(null); onDeleteTask(task.id, deleteFile); } }); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><Trash2 className="w-3.5 h-3.5" />Remove</button>}
                         </div>
                       )}
                     </div>
