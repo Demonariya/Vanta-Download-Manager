@@ -508,30 +508,29 @@ pub fn delete_downloaded_file(
 
 #[tauri::command]
 pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Mark queued and running work first, so a worker starting concurrently will
+    // observe the paused state when it registers its process id.
+    let tasks = state.get_tasks();
+    for mut task in tasks {
+        if task.status.is_active() || task.status == TaskStatus::Queued {
+            task.status = TaskStatus::Paused;
+            task.current_phase = "Paused".to_string();
+            task.speed_str = "0 B/s".to_string();
+            task.speed_bytes_per_sec = 0.0;
+            task.eta_seconds = None;
+            task.eta_str = "--".to_string();
+            task.active_connections = 0;
+            state.upsert_task(&task);
+            let _ = app.emit("task_updated", &task);
+        }
+    }
+
     let pids: Vec<u32> = {
-        let mut procs = state
-            .active_processes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.drain().map(|(_id, pid)| pid).collect()
     };
     for pid in pids {
         process::kill_process_tree(pid);
-    }
-
-    let tasks = state.get_tasks();
-    for mut t in tasks {
-        if t.status.is_active() || t.status == TaskStatus::Queued {
-            t.status = TaskStatus::Paused;
-            t.current_phase = "Paused".to_string();
-            t.speed_str = "0 B/s".to_string();
-            t.speed_bytes_per_sec = 0.0;
-            t.eta_seconds = None;
-            t.eta_str = "--".to_string();
-            t.active_connections = 0;
-            state.upsert_task(&t);
-            let _ = app.emit("task_updated", &t);
-        }
     }
     Ok(())
 }
@@ -1864,6 +1863,17 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                             let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
                             procs.insert(task_id.to_string(), pid);
                         }
+                        let stop_after_spawn = state
+                            .get_task_by_id(task_id)
+                            .map(|current| matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled))
+                            .unwrap_or(true);
+                        if stop_after_spawn {
+                            let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+                            procs.remove(task_id);
+                            drop(procs);
+                            process::kill_process_tree(pid);
+                            return;
+                        }
                         let stream_res = process::stream_child_lines_with_tick(
                             child,
                             Duration::from_millis(400),
@@ -2381,6 +2391,18 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         procs.insert(task_id.to_string(), pid);
+    }
+
+    let stop_after_spawn = state
+        .get_task_by_id(task_id)
+        .map(|current| matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled))
+        .unwrap_or(true);
+    if stop_after_spawn {
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+        procs.remove(task_id);
+        drop(procs);
+        process::kill_process_tree(pid);
+        return;
     }
 
     let stream_res = process::stream_child_lines_with_tick(
