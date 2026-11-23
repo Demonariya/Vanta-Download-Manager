@@ -799,7 +799,7 @@ pub fn save_settings(
 #[tauri::command]
 pub fn reset_settings(app: AppHandle, state: State<'_, AppState>) -> Result<AppSettings, String> {
     sync_windows_startup_registration(&AppSettings::default())?;
-    let saved = state.reset_settings()?
+    let saved = state.reset_settings()?;
     let _ = app.emit("settings_updated", &saved);
     Ok(saved)
 }
