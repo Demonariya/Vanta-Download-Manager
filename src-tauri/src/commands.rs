@@ -2241,9 +2241,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         }
 
         if task.retries > 0 {
+            // Avoid stale cached extractor responses on retry. YouTube player clients
+            // are selected centrally by build_ytdlp_request_args for inspection and download.
             args.push("--no-cache-dir".to_string());
-            args.push("--extractor-args".to_string());
-            args.push("youtube:player_client=default,web,android".to_string());
         }
 
         if task.is_audio_only {
