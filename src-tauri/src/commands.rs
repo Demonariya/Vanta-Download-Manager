@@ -28,6 +28,45 @@ impl<'a> Drop for InspectionDropGuard<'a> {
     }
 }
 
+fn validate_lrc_content(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("The selected LRC file is empty.".to_string());
+    }
+    if content.len() > 512 * 1024 {
+        return Err("The selected LRC file exceeds the 512 KiB size limit.".to_string());
+    }
+    let has_timestamp = content.lines().any(|line| {
+        let line = line.trim();
+        if !line.starts_with('[') {
+            return false;
+        }
+        let Some(end) = line.find(']') else {
+            return false;
+        };
+        let timestamp = &line[1..end];
+        let Some((minutes, seconds)) = timestamp.split_once(':') else {
+            return false;
+        };
+        let Ok(_minutes) = minutes.parse::<u64>() else {
+            return false;
+        };
+        let seconds = seconds.replace(',', ".");
+        seconds.parse::<f64>().map(|value| value >= 0.0 && value < 60.0).unwrap_or(false)
+    });
+    if !has_timestamp {
+        return Err("The selected file does not contain valid LRC timestamp lines.".to_string());
+    }
+    Ok(())
+}
+
+fn write_lrc_sidecar(audio_path: &Path, content: &str) -> Result<PathBuf, String> {
+    validate_lrc_content(content)?;
+    let sidecar = audio_path.with_extension("lrc");
+    fs::write(&sidecar, content)
+        .map_err(|e| format!("Could not write LRC sidecar '{}': {}", sidecar.display(), e))?;
+    Ok(sidecar)
+}
+
 fn format_bytes_rust(bytes: f64) -> String {
     if !bytes.is_finite() || bytes <= 0.0 {
         return "0 B".to_string();
@@ -68,6 +107,12 @@ pub async fn create_task(
     let trimmed_url = EngineManager::validate_inspection_url(&payload.url)?;
     let is_spotify = crate::spotify::is_spotify_url(&trimmed_url);
     let is_audio = payload.is_audio_only.unwrap_or(is_spotify);
+    if let Some(ref lrc) = payload.lyrics_lrc_content {
+        validate_lrc_content(lrc)?;
+        if !is_audio {
+            return Err("LRC sidecar files can only be attached to audio downloads.".to_string());
+        }
+    }
 
     let requires_ffmpeg = is_audio
         || is_spotify
@@ -219,6 +264,7 @@ pub async fn create_task(
         format_note: payload.format_note,
         subtitle_languages: payload.subtitle_languages.unwrap_or_default(),
         write_auto_subtitles: payload.write_auto_subtitles.unwrap_or(false),
+        lyrics_lrc_content: payload.lyrics_lrc_content,
         ext,
         video_codec: None,
         audio_codec: None,
@@ -1943,17 +1989,35 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     }
                 }
                 let relative_track_dir = track_dir.strip_prefix(&out_dir).unwrap_or(Path::new(""));
-                if let Err(error) = promote_staged_output_tree(
+                let moved_files = match promote_staged_output_tree(
                     &out_dir,
                     &destination_dir,
                     settings.conflict_strategy == "overwrite",
                 ) {
-                    final_t.status = TaskStatus::Failed;
-                    final_t.current_phase = "Could not move completed files".to_string();
-                    final_t.error_message = Some(error);
-                    state.upsert_task(&final_t);
-                    let _ = app.emit("task_updated", &final_t);
-                    return;
+                    Ok(files) => files,
+                    Err(error) => {
+                        final_t.status = TaskStatus::Failed;
+                        final_t.current_phase = "Could not move completed files".to_string();
+                        final_t.error_message = Some(error);
+                        state.upsert_task(&final_t);
+                        let _ = app.emit("task_updated", &final_t);
+                        return;
+                    }
+                };
+                if let (Some(content), Some(source_audio)) =
+                    (final_t.lyrics_lrc_content.as_deref(), last_output_file.as_ref())
+                {
+                    if let Some(promoted_audio) = moved_files.get(source_audio) {
+                        if let Err(error) = write_lrc_sidecar(promoted_audio, content) {
+                            final_t.status = TaskStatus::Failed;
+                            final_t.current_phase = "Could not write LRC sidecar".to_string();
+                            final_t.error_message = Some(error);
+                            state.upsert_task(&final_t);
+                            let _ = app.emit("task_updated", &final_t);
+                            return;
+                        }
+                    }
+                    final_t.lyrics_lrc_content = None;
                 }
                 final_t.output_path = destination_dir.join(relative_track_dir).to_string_lossy().to_string();
                 final_t.status = TaskStatus::Completed;
@@ -2773,6 +2837,16 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 return;
             };
             let file_size = fs::metadata(&final_path).map(|meta| meta.len()).unwrap_or(file_size);
+            if let Some(content) = t.lyrics_lrc_content.take() {
+                if let Err(error) = write_lrc_sidecar(&final_path, &content) {
+                    t.status = TaskStatus::Failed;
+                    t.current_phase = "Could not write LRC sidecar".to_string();
+                    t.error_message = Some(error);
+                    state.upsert_task(&t);
+                    let _ = app.emit("task_updated", &t);
+                    return;
+                }
+            }
             t.status = TaskStatus::Completed;
             t.progress_percentage = 100.0;
             t.percentage_known = true;

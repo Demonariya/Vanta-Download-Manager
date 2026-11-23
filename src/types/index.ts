@@ -145,6 +145,7 @@ export interface DownloadTask {
   format_note?: string;
   subtitle_languages?: string[];
   write_auto_subtitles?: boolean;
+  lyrics_lrc_content?: string | null;
   ext: string;
   video_codec?: string | null;
   audio_codec?: string | null;

@@ -183,6 +183,8 @@ pub struct DownloadTask {
     pub subtitle_languages: Vec<String>,
     #[serde(default)]
     pub write_auto_subtitles: bool,
+    #[serde(default)]
+    pub lyrics_lrc_content: Option<String>,
     pub ext: String,
     #[serde(default)]
     pub video_codec: Option<String>,
@@ -243,6 +245,7 @@ pub struct CreateTaskPayload {
     pub format_note: Option<String>,
     pub subtitle_languages: Option<Vec<String>>,
     pub write_auto_subtitles: Option<bool>,
+    pub lyrics_lrc_content: Option<String>,
     pub ext: Option<String>,
     pub is_audio_only: Option<bool>,
     pub audio_format: Option<String>,

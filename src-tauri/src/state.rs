@@ -228,7 +228,8 @@ impl AppState {
                 retries INTEGER DEFAULT 0,
                 max_retries INTEGER DEFAULT 3,
                 album TEXT,
-                content_type TEXT
+                content_type TEXT,
+                lyrics_lrc_content TEXT
             );
 
             CREATE TABLE IF NOT EXISTS settings (
@@ -272,6 +273,7 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
             "ALTER TABLE tasks ADD COLUMN subtitle_languages_json TEXT",
             "ALTER TABLE tasks ADD COLUMN write_auto_subtitles INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -384,6 +386,7 @@ impl AppState {
             .flatten()
             .map(|value| value != 0)
             .unwrap_or(false);
+        let lyrics_lrc_content: Option<String> = row.get("lyrics_lrc_content").ok().flatten();
 
         Ok(DownloadTask {
             id: row.get("id")?,
@@ -415,6 +418,7 @@ impl AppState {
             format_note: row.get("format_note")?,
             subtitle_languages,
             write_auto_subtitles,
+            lyrics_lrc_content,
             ext: row.get("ext")?,
             video_codec: row.get("video_codec").ok().flatten(),
             audio_codec: row.get("audio_codec").ok().flatten(),
@@ -536,7 +540,8 @@ impl AppState {
                 audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
                 verified_audio_info, output_path, custom_filename, playlist_mode,
                 selected_items_json, tracks_requested, tracks_completed, tracks_failed,
-                error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries
+                error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries,
+                lyrics_lrc_content
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
@@ -546,7 +551,7 @@ impl AppState {
                 ?36, ?37, ?38, ?39, ?40,
                 ?41, ?42, ?43, ?44,
                 ?45, ?46, ?47, ?48,
-                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57
+                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58
             )",
             params![
                 task.id,
@@ -606,6 +611,7 @@ impl AppState {
                 task.completed_at,
                 task.retries,
                 task.max_retries,
+                task.lyrics_lrc_content,
             ],
         ) {
             logging::error("state", &format!("Failed upserting task '{}': {}", task.id, e));

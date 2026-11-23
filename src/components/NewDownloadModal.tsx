@@ -114,6 +114,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [includeAutoSubtitles, setIncludeAutoSubtitles] = useState(true);
   const [selectedSubtitleLanguages, setSelectedSubtitleLanguages] = useState<string[]>([]);
   const [subtitleDropdownOpen, setSubtitleDropdownOpen] = useState(false);
+  const [lrcFile, setLrcFile] = useState<{ name: string; content: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const lastInspectedUrlRef = useRef(initialUrl);
@@ -195,6 +196,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   };
 
   const handleCloseModal = () => {
+    setLrcFile(null);
     handleCancelInspection();
     onClose();
   };
@@ -317,6 +319,31 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
     } catch {
       // ignore
+    }
+  };
+
+  const handleLrcFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.lrc')) {
+      setExtractError('Choose a .lrc synchronized lyrics file.');
+      return;
+    }
+    if (file.size > 512 * 1024) {
+      setExtractError('The LRC file must be 512 KiB or smaller.');
+      return;
+    }
+    try {
+      const content = await file.text();
+      if (!/^\s*\[\d{1,3}:\d{2}(?:[.,:]\d{1,3})?\]/m.test(content)) {
+        setExtractError('This file does not contain valid LRC timestamps.');
+        return;
+      }
+      setLrcFile({ name: file.name, content });
+      setExtractError(null);
+    } catch {
+      setExtractError('Could not read the selected LRC file.');
     }
   };
 
@@ -507,6 +534,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           playlist_mode: trackUrls.length === 1 && !metadata?.is_playlist ? 'single' : 'playlist',
           selected_items: trackUrls.length > 0 ? trackUrls : undefined,
           tracks_requested: trackUrls.length > 0 ? trackUrls.length : undefined,
+          lyrics_lrc_content: trackUrls.length === 1 ? lrcFile?.content : undefined,
           priority,
         });
         handleCloseModal();
@@ -536,6 +564,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         custom_filename: customFilename.trim() || undefined,
         subtitle_languages: downloadSubtitles ? selectedSubtitleLanguages : [],
         write_auto_subtitles: downloadSubtitles && includeAutoSubtitles,
+        lyrics_lrc_content: isAudioOnly ? lrcFile?.content : undefined,
         playlist_mode:
           downloadWholeCollection && includePlaylistMode && metadata?.is_playlist
             ? 'playlist'
@@ -1408,6 +1437,37 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Optional local synchronized lyrics sidecar */}
+          {mode === 'single' && selectedTab === 'audio' &&
+            (orderedSpotifyTracks.length === 0 || selectedTrackCount === 1) && (
+            <div className="space-y-2 pt-3 border-t border-[var(--vanta-border)]">
+              <label className="block text-xs font-medium text-[var(--vanta-text)]">
+                Synchronized lyrics (optional .LRC)
+              </label>
+              <input
+                type="file"
+                accept=".lrc,text/plain"
+                onChange={handleLrcFileChange}
+                className="block w-full text-[11px] text-[var(--vanta-muted)] file:mr-3 file:rounded-md file:border file:border-[var(--vanta-border)] file:bg-[var(--vanta-surface-2)] file:px-3 file:py-1.5 file:text-[11px] file:text-[var(--vanta-text)]"
+              />
+              {lrcFile && (
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="truncate text-[var(--vanta-text-secondary)]">{lrcFile.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => setLrcFile(null)}
+                    className="shrink-0 text-[var(--vanta-muted)] hover:text-red-500"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+              <p className="text-[10px] text-[var(--vanta-muted)]">
+                The selected local LRC file is copied beside the downloaded audio file after verification.
+              </p>
+            </div>
+          )}
 
           {/* Subtitle selection */}
           {selectedTab === 'video' && !isSpotifyContent && subtitleLanguageOptions.length > 0 && (
