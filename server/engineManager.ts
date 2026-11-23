@@ -896,9 +896,10 @@ export class EngineManager {
             const entries: PlaylistEntry[] | undefined =
               isPlaylist && Array.isArray(raw.entries)
                 ? raw.entries
-                    .filter((e: any) => Boolean(e))
+                    .map((entry: any, rawIndex: number) => ({ entry, rawIndex }))
+                    .filter(({ entry }: { entry: any }) => Boolean(entry))
                     .slice(0, 1000)
-                    .map((e: any, idx: number): PlaylistEntry => {
+                    .map(({ entry: e, rawIndex }: { entry: any; rawIndex: number }): PlaylistEntry => {
                       const candidateUrl = e.webpage_url || e.original_url || e.url;
                       const isAbsoluteMediaUrl =
                         typeof candidateUrl === 'string' && /^https?:\/\//i.test(candidateUrl);
@@ -909,7 +910,7 @@ export class EngineManager {
                           : url);
                       return {
                         id: String(e.id || idx + 1),
-                        index: idx + 1,
+                        index: Number.isInteger(e.playlist_index) && e.playlist_index > 0 ? e.playlist_index : rawIndex + 1,
                         title: String(e.title || `Item ${idx + 1}`),
                         url: String(entryUrl),
                         duration: typeof e.duration === 'number' ? e.duration : undefined,
