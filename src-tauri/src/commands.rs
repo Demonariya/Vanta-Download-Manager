@@ -332,27 +332,29 @@ pub async fn create_task(
 
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // Persist the paused state before terminating the child. The worker checks this
+    // state before finalization, preventing a pause/exit race from marking the task complete.
+    if let Some(mut task) = state.get_task_by_id(&id) {
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
+            return Ok(());
+        }
+        task.status = TaskStatus::Paused;
+        task.current_phase = "Paused by user".to_string();
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.eta_seconds = None;
+        task.eta_str = "--".to_string();
+        task.active_connections = 0;
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+    }
+
     let removed_pid = {
-        let mut procs = state
-            .active_processes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.remove(&id)
     };
     if let Some(pid) = removed_pid {
         process::kill_process_tree(pid);
-    }
-
-    if let Some(mut t) = state.get_task_by_id(&id) {
-        t.status = TaskStatus::Paused;
-        t.current_phase = "Paused by user".to_string();
-        t.speed_str = "0 B/s".to_string();
-        t.speed_bytes_per_sec = 0.0;
-        t.eta_seconds = None;
-        t.eta_str = "--".to_string();
-        t.active_connections = 0;
-        state.upsert_task(&t);
-        let _ = app.emit("task_updated", &t);
     }
 
     schedule_next(&app, &state);
@@ -361,11 +363,14 @@ pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
 
 #[tauri::command]
 pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    if let Some(mut t) = state.get_task_by_id(&id) {
-        t.status = TaskStatus::Queued;
-        t.current_phase = "Queued to resume".to_string();
-        state.upsert_task(&t);
-        let _ = app.emit("task_updated", &t);
+    if let Some(mut task) = state.get_task_by_id(&id) {
+        if task.status != TaskStatus::Paused {
+            return Ok(());
+        }
+        task.status = TaskStatus::Queued;
+        task.current_phase = "Queued to resume".to_string();
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
         schedule_next(&app, &state);
     }
     Ok(())
@@ -1347,11 +1352,25 @@ fn snapshot_dir_file_sizes(dir: &Path) -> HashMap<PathBuf, u64> {
     map
 }
 
+fn is_audio_output_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "opus" | "ogg" | "oga" | "aiff" | "aif" | "alac" | "wma" | "m4b"
+    )
+}
+
 fn measure_dir_growth_bytes(dir: &Path, baseline: &HashMap<PathBuf, u64>) -> u64 {
     let mut files = Vec::new();
     collect_files_recursive(dir, 0, &mut files);
     let mut total = 0u64;
     for path in files {
+        if !is_audio_output_path(&path) {
+            continue;
+        }
         if let Ok(meta) = fs::metadata(&path) {
             let len = meta.len();
             let prev = baseline.get(&path).copied().unwrap_or(0);
@@ -1408,6 +1427,75 @@ fn find_new_output_file(
         }
     }
     best.map(|(_, p)| p)
+}
+
+fn promote_staged_output_tree(
+    staging_root: &Path,
+    destination_root: &Path,
+    overwrite: bool,
+) -> Result<HashMap<PathBuf, PathBuf>, String> {
+    let mut files = Vec::new();
+    collect_files_recursive(staging_root, 0, &mut files);
+    let mut moved = HashMap::new();
+
+    for source in files {
+        let relative = source
+            .strip_prefix(staging_root)
+            .map_err(|e| format!("Invalid staged output path '{}': {}", source.display(), e))?;
+        let mut destination = destination_root.join(relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| format!("Invalid destination path '{}'.", destination.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create output directory '{}': {}", parent.display(), e))?;
+
+        if destination.exists() && !overwrite {
+            let stem = destination.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+            let extension = destination.extension().and_then(|s| s.to_str());
+            let mut index = 1u32;
+            loop {
+                let file_name = match extension {
+                    Some(ext) => format!("{} ({}).{}", stem, index, ext),
+                    None => format!("{} ({})", stem, index),
+                };
+                let candidate = parent.join(file_name);
+                if !candidate.exists() {
+                    destination = candidate;
+                    break;
+                }
+                index = index.saturating_add(1);
+            }
+        } else if destination.exists() && overwrite {
+            fs::remove_file(&destination).map_err(|e| {
+                format!("Could not replace existing output '{}': {}", destination.display(), e)
+            })?;
+        }
+
+        match fs::rename(&source, &destination) {
+            Ok(()) => {}
+            Err(rename_error) => {
+                fs::copy(&source, &destination).map_err(|copy_error| {
+                    format!(
+                        "Could not move '{}' to '{}' (rename: {}; copy: {}).",
+                        source.display(),
+                        destination.display(),
+                        rename_error,
+                        copy_error
+                    )
+                })?;
+                fs::remove_file(&source).map_err(|e| {
+                    format!("Copied '{}' but could not remove staging copy: {}", source.display(), e)
+                })?;
+            }
+        }
+        moved.insert(source, destination);
+    }
+
+    if staging_root.exists() {
+        fs::remove_dir_all(staging_root)
+            .map_err(|e| format!("Outputs were moved, but staging cleanup failed: {}", e))?;
+    }
+    Ok(moved)
 }
 
 fn parse_eta_str_seconds(eta_raw: &str) -> Option<u64> {
@@ -1534,11 +1622,26 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         return;
     }
 
-    let out_dir = PathBuf::from(&task.output_path);
-    if let Err(e) = fs::create_dir_all(&out_dir) {
+    let destination_dir = PathBuf::from(&task.output_path);
+    if let Err(e) = fs::create_dir_all(&destination_dir) {
         task.status = TaskStatus::Failed;
         task.current_phase = "Failed".to_string();
         task.error_message = Some(format!("Failed creating output directory: {}", e));
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        return;
+    }
+
+    // Keep partial downloads and temporary media out of the user-visible destination.
+    // The task-specific folder survives pause/retry, and is promoted only after verification.
+    let out_dir = std::env::temp_dir()
+        .join("VANTA")
+        .join("staging")
+        .join(&task.id);
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        task.status = TaskStatus::Failed;
+        task.current_phase = "Failed".to_string();
+        task.error_message = Some(format!("Failed creating staging directory: {}", e));
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
         return;
@@ -1773,7 +1876,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         match stream_res {
                             Ok((st, _)) if st.success() => {
                                 let newly_created = find_new_output_file(&track_dir, &dir_baseline, true)
-                                    .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true).filter(|p| !dir_baseline.contains_key(p)));
+                                    .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true)
+                                        .filter(|p| !dir_baseline.contains_key(p)));
                                 if let Some(found) = newly_created {
                                     completed_count += 1;
                                     if let Ok(m) = fs::metadata(&found) {
@@ -1825,9 +1929,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     "{} of {} tracks succeeded; {} failed. {}",
                     completed_count, total_tracks, failed_count, last_error
                 ));
-                if let Some(ref p) = last_output_file {
-                    final_t.output_path = p.parent().unwrap_or(&track_dir).to_string_lossy().to_string();
-                }
+                // Keep partial files in private staging for retry; the user-visible
+                // output directory must never point into the temporary area.
                 state.upsert_task(&final_t);
                 let _ = app.emit("task_updated", &final_t);
             } else {
@@ -1838,8 +1941,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         final_t.verified_audio_info = audio_sum;
                         final_t.audio_codec = acodec;
                     }
-                    final_t.output_path = track_dir.to_string_lossy().to_string();
                 }
+                let relative_track_dir = track_dir.strip_prefix(&out_dir).unwrap_or(Path::new(""));
+                if let Err(error) = promote_staged_output_tree(
+                    &out_dir,
+                    &destination_dir,
+                    settings.conflict_strategy == "overwrite",
+                ) {
+                    final_t.status = TaskStatus::Failed;
+                    final_t.current_phase = "Could not move completed files".to_string();
+                    final_t.error_message = Some(error);
+                    state.upsert_task(&final_t);
+                    let _ = app.emit("task_updated", &final_t);
+                    return;
+                }
+                final_t.output_path = destination_dir.join(relative_track_dir).to_string_lossy().to_string();
                 final_t.status = TaskStatus::Completed;
                 final_t.progress_percentage = 100.0;
                 final_t.percentage_known = true;
@@ -2101,6 +2217,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         ema_speed: f64,
         stream_known_total: u64,
         stream_max_downloaded: u64,
+        completed_stream_total: u64,
+        completed_stream_downloaded: u64,
         last_activity_at: Instant,
         last_emit_at: Instant,
         spotdl_prev_bytes: u64,
@@ -2110,16 +2228,15 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
     let started_unix = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
-    let spotdl_baseline = if is_spotdl {
-        snapshot_dir_file_sizes(&out_dir)
-    } else {
-        HashMap::new()
-    };
+    let output_baseline = snapshot_dir_file_sizes(&out_dir);
+    let spotdl_baseline = output_baseline.clone();
 
     let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
         ema_speed: 0.0,
-        stream_known_total: task.total_bytes,
+        stream_known_total: 0,
         stream_max_downloaded: 0,
+        completed_stream_total: 0,
+        completed_stream_downloaded: 0,
         last_activity_at: Instant::now(),
         last_emit_at: Instant::now(),
         spotdl_prev_bytes: 0,
@@ -2275,7 +2392,13 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     .trim()
                     .trim_matches(|c| c == '"' || c == '\'');
                 if !dest.is_empty() {
-                    if tel.detected_output_path.as_deref() != Some(dest) {
+                    if tel.detected_output_path.as_deref().map(|previous| previous != dest).unwrap_or(false) {
+                        tel.completed_stream_downloaded = tel
+                            .completed_stream_downloaded
+                            .saturating_add(tel.stream_max_downloaded);
+                        tel.completed_stream_total = tel
+                            .completed_stream_total
+                            .saturating_add(tel.stream_known_total);
                         tel.stream_known_total = 0;
                         tel.stream_max_downloaded = 0;
                     }
@@ -2393,15 +2516,17 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 if raw_total > 0 {
                     tel.stream_known_total = tel.stream_known_total.max(raw_total);
                 }
-                let total = if tel.stream_known_total > 0 {
-                    tel.stream_known_total
-                } else {
-                    raw_total
-                };
+                if raw_total > tel.stream_known_total {
+                    tel.stream_known_total = raw_total;
+                }
                 if raw_downloaded > tel.stream_max_downloaded {
                     tel.stream_max_downloaded = raw_downloaded;
                 }
-                let downloaded = tel.stream_max_downloaded.max(raw_downloaded);
+                let active_total = tel.stream_known_total.max(raw_total);
+                let total = tel.completed_stream_total.saturating_add(active_total);
+                let downloaded = tel
+                    .completed_stream_downloaded
+                    .saturating_add(tel.stream_max_downloaded.max(raw_downloaded));
 
                 if speed_bytes > 0.0 {
                     tel.ema_speed = if tel.ema_speed == 0.0 {
@@ -2585,7 +2710,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let candidate_path = detected_output_path
                 .map(PathBuf::from)
                 .filter(|p| p.is_file())
-                .or_else(|| find_recent_output_file(&out_dir, started_unix, t.is_audio_only));
+                .or_else(|| find_new_output_file(&out_dir, &output_baseline, t.is_audio_only))
+                .or_else(|| find_recent_output_file(&out_dir, started_unix, t.is_audio_only)
+                    .filter(|p| !output_baseline.contains_key(p)));
 
             let valid_file = candidate_path.and_then(|p| {
                 fs::metadata(&p)
@@ -2597,7 +2724,10 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let Some((final_path, file_size)) = valid_file else {
                 t.status = TaskStatus::Failed;
                 t.current_phase = "Verification failed".to_string();
-                t.error_message = Some("Engine exited cleanly, but no non-empty output file was found on disk.".to_string());
+                t.error_message = Some(format!(
+                    "Engine exited successfully, but no new non-empty media file was detected in staging '{}'. Existing files were excluded; check the engine log for the actual output path.",
+                    out_dir.display()
+                ));
                 state.upsert_task(&t);
                 let _ = app.emit("task_updated", &t);
                 return;
@@ -2619,6 +2749,30 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 t.ext = ext_str.to_lowercase();
             }
 
+            let moved_files = match promote_staged_output_tree(
+                &out_dir,
+                &destination_dir,
+                settings.conflict_strategy == "overwrite",
+            ) {
+                Ok(files) => files,
+                Err(error) => {
+                    t.status = TaskStatus::Failed;
+                    t.current_phase = "Could not move completed file".to_string();
+                    t.error_message = Some(error);
+                    state.upsert_task(&t);
+                    let _ = app.emit("task_updated", &t);
+                    return;
+                }
+            };
+            let Some(final_path) = moved_files.get(&final_path).cloned() else {
+                t.status = TaskStatus::Failed;
+                t.current_phase = "Output promotion verification failed".to_string();
+                t.error_message = Some("The verified file was not present in the staging promotion map.".to_string());
+                state.upsert_task(&t);
+                let _ = app.emit("task_updated", &t);
+                return;
+            };
+            let file_size = fs::metadata(&final_path).map(|meta| meta.len()).unwrap_or(file_size);
             t.status = TaskStatus::Completed;
             t.progress_percentage = 100.0;
             t.percentage_known = true;

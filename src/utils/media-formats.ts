@@ -128,7 +128,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '2160',
     label: '4K Ultra HD (2160p)',
-    formatSelector: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best',
+    formatSelector: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
     detail: 'Up to 2160p video + best audio muxed via FFmpeg',
     height: 2160,
     hasAudio: true,
@@ -137,7 +137,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '1440',
     label: '2K Quad HD (1440p)',
-    formatSelector: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+    formatSelector: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
     detail: 'Up to 1440p video + best audio muxed via FFmpeg',
     height: 1440,
     hasAudio: true,
@@ -146,7 +146,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '1080',
     label: 'Full HD (1080p)',
-    formatSelector: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    formatSelector: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
     detail: '1080p video + best audio muxed via FFmpeg',
     height: 1080,
     hasAudio: true,
@@ -155,7 +155,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '720',
     label: 'HD (720p)',
-    formatSelector: 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+    formatSelector: 'bestvideo[height<=720]+bestaudio/best[height<=720]',
     detail: '720p video + best audio',
     height: 720,
     hasAudio: true,
@@ -164,7 +164,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '480',
     label: 'Standard (480p)',
-    formatSelector: 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+    formatSelector: 'bestvideo[height<=480]+bestaudio/best[height<=480]',
     detail: '480p compact video + audio',
     height: 480,
     hasAudio: true,

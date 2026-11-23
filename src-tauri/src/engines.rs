@@ -2025,10 +2025,19 @@ impl EngineManager {
 
         if let Some(scheme_idx) = url.find("://") {
             let after_scheme = &url[scheme_idx + 3..];
-            let host = after_scheme.split('/').next().unwrap_or("");
+            let host = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or("").to_ascii_lowercase();
             if !host.is_empty() {
                 args.push("--referer".to_string());
                 args.push(format!("{}://{}/", &url[..scheme_idx], host));
+            }
+            if host == "youtu.be"
+                || host == "youtube.com"
+                || host.ends_with(".youtube.com")
+                || host == "youtube-nocookie.com"
+                || host.ends_with(".youtube-nocookie.com")
+            {
+                args.push("--extractor-args".to_string());
+                args.push("youtube:player_client=default,web_embedded".to_string());
             }
         }
 

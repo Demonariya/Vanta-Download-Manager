@@ -104,7 +104,12 @@ pub fn is_valid_thumbnail_url(raw: &str) -> bool {
     if lower.contains(' ') || lower.contains('"') || lower.contains('\'') || lower.contains('<') || lower.contains('>') {
         return false;
     }
-    if lower.contains("storyboard") || lower.contains(".vtt") || lower.ends_with(".mhtml") {
+    if lower.contains("storyboard")
+        || lower.contains("/sb/")
+        || lower.contains("_sb_")
+        || lower.contains(".vtt")
+        || lower.ends_with(".mhtml")
+    {
         return false;
     }
     let after_scheme = if lower.starts_with("https://") {

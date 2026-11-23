@@ -85,7 +85,7 @@ describe('Unified media kind auto-detection', () => {
     const options = buildCuratedVideoOptions(videoMeta.formats);
     assert.equal(
       options[1].formatSelector,
-      'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+      'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     );
     assert.equal(resolveVideoFormatSelector('137', videoMeta.formats), '137+bestaudio/best');
 
