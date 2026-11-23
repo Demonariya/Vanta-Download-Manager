@@ -1315,9 +1315,6 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
             if meta.len() == 0 {
                 continue;
             }
-            if baseline.get(&p).map(|previous_size| *previous_size == meta.len()).unwrap_or(false) {
-                continue;
-            }
             if let Ok(mtime) = meta.modified() {
                 let mtime_secs = mtime
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1394,6 +1391,9 @@ fn find_new_output_file(
         }
         if let Ok(meta) = fs::metadata(&p) {
             if meta.len() == 0 {
+                continue;
+            }
+            if baseline.get(&p).map(|previous_size| *previous_size == meta.len()).unwrap_or(false) {
                 continue;
             }
             if let Ok(mtime) = meta.modified() {
