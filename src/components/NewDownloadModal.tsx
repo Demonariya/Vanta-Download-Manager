@@ -113,6 +113,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [downloadSubtitles, setDownloadSubtitles] = useState(false);
   const [includeAutoSubtitles, setIncludeAutoSubtitles] = useState(true);
   const [selectedSubtitleLanguages, setSelectedSubtitleLanguages] = useState<string[]>([]);
+  const [subtitleDropdownOpen, setSubtitleDropdownOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const lastInspectedUrlRef = useRef(initialUrl);
@@ -1415,13 +1416,73 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 <input
                   type="checkbox"
                   checked={downloadSubtitles}
-                  onChange={(e) => setDownloadSubtitles(e.target.checked)}
+                  onChange={(e) => {
+                    setDownloadSubtitles(e.target.checked);
+                    if (e.target.checked) setSubtitleDropdownOpen(true);
+                  }}
                   className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
                 />
-                Download available subtitles ({subtitleLanguageOptions.length} languages)
+                Download subtitles ({subtitleLanguageOptions.length} languages available)
               </label>
               {downloadSubtitles && (
                 <>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSubtitleDropdownOpen((open) => !open)}
+                      aria-expanded={subtitleDropdownOpen}
+                      className="w-full flex items-center justify-between gap-2 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-xs text-[var(--vanta-text)]"
+                    >
+                      <span className="truncate text-left">
+                        {selectedSubtitleLanguages.length === 0
+                          ? 'Select subtitle languages'
+                          : selectedSubtitleLanguages.length === subtitleLanguageOptions.length
+                            ? 'All languages selected'
+                            : subtitleLanguageOptions.filter((item) => selectedSubtitleLanguages.includes(item.code)).map((item) => item.name).join(', ')}
+                      </span>
+                      <span className="text-[var(--vanta-muted)] shrink-0">{subtitleDropdownOpen ? '▲' : '▼'}</span>
+                    </button>
+                    {subtitleDropdownOpen && (
+                      <div className="absolute z-30 mt-1 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] shadow-xl p-2">
+                        <div className="flex items-center justify-between px-1 pb-2 text-[11px]">
+                          <span className="text-[var(--vanta-muted)]">{selectedSubtitleLanguages.length} / {subtitleLanguageOptions.length} selected</span>
+                          <div className="flex gap-3">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSubtitleLanguages(subtitleLanguageOptions.map((item) => item.code))}
+                              className="text-[var(--vanta-accent)] hover:underline"
+                            >Select all</button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSubtitleLanguages([])}
+                              className="text-[var(--vanta-muted)] hover:underline"
+                            >Clear</button>
+                          </div>
+                        </div>
+                        <div className="max-h-48 overflow-y-auto space-y-1">
+                          {subtitleLanguageOptions.map((item) => (
+                            <label key={item.code} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-[var(--vanta-surface-2)] text-[11px] cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={selectedSubtitleLanguages.includes(item.code)}
+                                onChange={(e) => setSelectedSubtitleLanguages((prev) =>
+                                  e.target.checked
+                                    ? [...new Set([...prev, item.code])]
+                                    : prev.filter((code) => code !== item.code)
+                                )}
+                                className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
+                              />
+                              <span className="truncate text-[var(--vanta-text)]">{item.name}</span>
+                              <span className="font-mono text-[var(--vanta-muted)] ml-auto shrink-0">{item.code}</span>
+                              <span className="text-[9px] text-[var(--vanta-muted)] shrink-0">
+                                {item.manual && item.automatic ? 'Manual + Auto' : item.manual ? 'Manual' : 'Auto'}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   <label className="flex items-center gap-2 text-[11px] text-[var(--vanta-text-secondary)] cursor-pointer">
                     <input
                       type="checkbox"
@@ -1431,51 +1492,6 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     />
                     Include auto-generated captions
                   </label>
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-[var(--vanta-muted)]">
-                      {selectedSubtitleLanguages.length} of {subtitleLanguageOptions.length} languages selected
-                    </span>
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedSubtitleLanguages(subtitleLanguageOptions.map((item) => item.code))}
-                        className="text-[var(--vanta-accent)] hover:underline"
-                      >
-                        Select all
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedSubtitleLanguages([])}
-                        className="text-[var(--vanta-muted)] hover:underline"
-                      >
-                        None
-                      </button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-36 overflow-y-auto rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2">
-                    {subtitleLanguageOptions.map((item) => (
-                      <label key={item.code} className="flex items-center gap-2 min-w-0 text-[11px] cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedSubtitleLanguages.includes(item.code)}
-                          onChange={(e) => setSelectedSubtitleLanguages((prev) =>
-                            e.target.checked
-                              ? [...new Set([...prev, item.code])]
-                              : prev.filter((code) => code !== item.code)
-                          )}
-                          className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
-                        />
-                        <span className="truncate text-[var(--vanta-text)]">{item.name}</span>
-                        <span className="font-mono text-[var(--vanta-muted)] shrink-0">{item.code}</span>
-                        <span className="ml-auto text-[9px] text-[var(--vanta-muted)] shrink-0">
-                          {item.manual && item.automatic ? 'Manual + Auto' : item.manual ? 'Manual' : 'Auto'}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-[var(--vanta-muted)]">
-                    Subtitles are saved as separate SRT files beside the downloaded video.
-                  </p>
                 </>
               )}
             </div>
