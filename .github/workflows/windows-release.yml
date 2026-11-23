@@ -147,7 +147,7 @@ jobs:
       - name: Run PowerShell Lockfile Validation Tests (Repo Root & External Dir)
         shell: pwsh
         run: |
-          pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-LockfileConsistency.ps1 -IncludeSubprocessTests
+          & .\scripts\Test-LockfileConsistency.ps1 -IncludeSubprocessTests
 
       - name: Verify Application Version Consistency Across Manifests & Lockfiles
         shell: pwsh
