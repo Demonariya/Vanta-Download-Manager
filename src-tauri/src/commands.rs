@@ -1315,6 +1315,9 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
             if meta.len() == 0 {
                 continue;
             }
+            if baseline.get(&p).map(|previous_size| *previous_size == meta.len()).unwrap_or(false) {
+                continue;
+            }
             if let Ok(mtime) = meta.modified() {
                 let mtime_secs = mtime
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1376,9 +1379,6 @@ fn find_new_output_file(
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
     ];
     for p in files {
-        if baseline.contains_key(&p) {
-            continue;
-        }
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
