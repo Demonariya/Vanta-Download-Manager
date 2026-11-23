@@ -27,6 +27,7 @@ import {
   SortField,
 } from '../utils/queue-logic';
 import { formatBytes } from '../utils/engine-parser';
+import { getStatusLabel, getStatusColorClass } from './ProgressDisplay';
 import { MediaThumbnail } from './MediaThumbnail';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../services/api';
