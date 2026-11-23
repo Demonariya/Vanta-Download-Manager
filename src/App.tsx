@@ -24,7 +24,6 @@ import { HistoryView } from './components/HistoryView';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { SettingsView } from './components/SettingsView';
 import { NewDownloadModal } from './components/NewDownloadModal';
-import { FloatingProgressDock } from './components/FloatingProgressDock';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
 import { TitleBar } from './components/TitleBar';
 import { SafeCloseDialog } from './components/SafeCloseDialog';
@@ -450,17 +449,6 @@ export default function App() {
           </div>
         </div>
       </div>
-
-      {/* Floating Active Transfers Dock */}
-      {settings?.floating_notifications_enabled && (
-        <FloatingProgressDock
-          tasks={tasks}
-          onPauseTask={(id) => api.pauseTask(id)}
-          onResumeTask={(id) => api.resumeTask(id)}
-          onCancelTask={(id) => api.cancelTask(id)}
-          onOpenQueue={() => setActiveTab('downloads')}
-        />
-      )}
 
       {/* New Download Modal */}
       <NewDownloadModal

@@ -448,20 +448,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={form.floating_notifications_enabled}
-                  onChange={(e) =>
-                    setForm({ ...form, floating_notifications_enabled: e.target.checked })
-                  }
-                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
-                />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Show floating active transfers dock
-                </span>
-              </label>
-
-              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
-                <input
-                  type="checkbox"
                   checked={Boolean(form.tray_minimize_on_close)}
                   onChange={(e) => setForm({ ...form, tray_minimize_on_close: e.target.checked })}
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
