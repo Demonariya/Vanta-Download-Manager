@@ -385,8 +385,8 @@ export default function App() {
             onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
           />
 
-          <div className="flex flex-1 min-h-0 overflow-hidden relative">
-            <main className="flex-1 min-w-0 overflow-y-auto p-3 sm:p-5 pb-24 sm:pb-10 select-text">
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
+            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-3 sm:p-4 pb-4 select-text">
               <ClipboardMonitorBanner
                 detectedUrl={clipboardUrl}
                 onInspect={handleQuickInspect}
