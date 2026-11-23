@@ -897,12 +897,14 @@ export class EngineManager {
               isPlaylist && Array.isArray(raw.entries)
                 ? raw.entries
                     .filter((e: any) => Boolean(e))
-                    .slice(0, 200)
+                    .slice(0, 1000)
                     .map((e: any, idx: number): PlaylistEntry => {
+                      const candidateUrl = e.webpage_url || e.original_url || e.url;
+                      const isAbsoluteMediaUrl =
+                        typeof candidateUrl === 'string' && /^https?:\/\//i.test(candidateUrl);
                       const entryUrl =
-                        e.webpage_url ||
-                        e.url ||
-                        (e.id && raw.extractor_key?.toLowerCase().includes('youtube')
+                        (isAbsoluteMediaUrl ? candidateUrl : undefined) ||
+                        (e.id && /youtube/i.test(String(raw.extractor_key || raw.extractor || ''))
                           ? `https://www.youtube.com/watch?v=${e.id}`
                           : url);
                       return {
