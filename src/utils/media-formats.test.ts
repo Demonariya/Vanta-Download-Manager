@@ -83,7 +83,10 @@ describe('Unified media kind auto-detection', () => {
     assert.equal(formatMediaRoutingLabel(videoMeta, 'video', videoMeta.url), 'Video · yt-dlp');
 
     const options = buildCuratedVideoOptions(videoMeta.formats);
-    assert.equal(options[1].formatSelector, '137+bestaudio/best');
+    assert.equal(
+      options[1].formatSelector,
+      'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+    );
     assert.equal(resolveVideoFormatSelector('137', videoMeta.formats), '137+bestaudio/best');
 
     const codecSummary = summarizeVideoOptionCodecs(videoMeta.formats, '137+bestaudio/best');
