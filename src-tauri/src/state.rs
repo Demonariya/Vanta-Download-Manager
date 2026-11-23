@@ -1072,6 +1072,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SchedulerSettings;
 
     fn make_temp_state_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vanta_state_{}_{}", label, uuid::Uuid::new_v4()));
