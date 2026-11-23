@@ -2033,6 +2033,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 let _ = app.emit("task_updated", &final_t);
             } else {
                 let final_file = last_output_file
+                    .as_ref()
+                    .cloned()
                     .or_else(|| find_recent_output_file(&track_dir, started_unix, true));
                 if let Some(ref fp) = final_file {
                     if let Some((audio_sum, acodec, _vcodec, _res)) = EngineManager::verify_media_file(fp) {
