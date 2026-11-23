@@ -727,7 +727,7 @@ export class EngineManager {
     const reqId = requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const timeoutMs = options?.timeoutMs ?? INSPECT_URL_TIMEOUT_MS;
     const maxStdoutBytes = options?.maxStdoutBytes ?? INSPECT_MAX_STDOUT_BYTES;
-    const wantsPlaylist = options?.includePlaylist ?? isPlaylistCandidateUrl(url);
+    const wantsPlaylist = isPlaylistCandidateUrl(url) && (options?.includePlaylist ?? true);
 
     const args = [
       '--dump-single-json',
