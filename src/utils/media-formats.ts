@@ -230,7 +230,7 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const h of sortedHeights) {
     const fmt = byHeight.get(h)!;
     const isVideoOnly = fmt.is_video_only || !fmt.acodec || fmt.acodec === 'none';
-    const selector = isVideoOnly ? `${fmt.format_id}+bestaudio/best` : fmt.format_id;
+    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
@@ -239,9 +239,9 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
 
     realOptions.push({
       id: selector,
-      label: `${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
+      label: `Up to ${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
       formatSelector: selector,
-      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · stream #${fmt.format_id}`,
+      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · best matching stream (detected #${fmt.format_id})`,
       height: h,
       hasAudio: true,
       needsMux: Boolean(isVideoOnly),

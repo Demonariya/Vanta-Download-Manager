@@ -36,6 +36,11 @@ export interface SchedulerSettings {
   days: number[]; // 0 (Sun) - 6 (Sat)
 }
 
+export interface SubtitleLanguage {
+  code: string;
+  name: string;
+}
+
 export interface FormatOption {
   format_id: string;
   ext: string;
@@ -90,6 +95,8 @@ export interface MediaMetadata {
   thumbnail?: string;
   description?: string;
   formats: FormatOption[];
+  subtitles?: SubtitleLanguage[];
+  automatic_subtitles?: SubtitleLanguage[];
   is_playlist: boolean;
   playlist_count?: number;
   extractor: string;
@@ -136,6 +143,8 @@ export interface DownloadTask {
   current_phase: string;
   format_id: string;
   format_note?: string;
+  subtitle_languages?: string[];
+  write_auto_subtitles?: boolean;
   ext: string;
   video_codec?: string | null;
   audio_codec?: string | null;

@@ -3,7 +3,7 @@ use crate::logging;
 use crate::models::{
     AppSettings, DiagnosticResult, EngineInfo, EngineInstallProgress, EngineStatusMap,
     EngineUpdateResult, FormatOption, ManagedEngineInfo, MediaMetadata, PlaylistEntry,
-    PythonValidationResult,
+    PythonValidationResult, SubtitleLanguage,
 };
 use crate::process::{
     self, ProcessError, ProcessOptions, DIAGNOSTICS_TIMEOUT, ENGINE_VERSION_TIMEOUT,
@@ -2580,6 +2580,36 @@ impl EngineManager {
             None
         };
 
+        let parse_subtitle_languages = |field: &str| -> Vec<SubtitleLanguage> {
+            let mut languages = val
+                .get(field)
+                .and_then(|value| value.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(code, entries)| {
+                            let entries = entries.as_array()?;
+                            if entries.is_empty() {
+                                return None;
+                            }
+                            let name = entries
+                                .iter()
+                                .find_map(|entry| entry.get("name").and_then(|v| v.as_str()))
+                                .unwrap_or(code)
+                                .to_string();
+                            Some(SubtitleLanguage {
+                                code: code.clone(),
+                                name,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            languages.sort_by(|a, b| a.code.cmp(&b.code));
+            languages
+        };
+        let subtitles = parse_subtitle_languages("subtitles");
+        let automatic_subtitles = parse_subtitle_languages("automatic_captions");
+
         Ok(MediaMetadata {
             url: validated_url,
             id: val
@@ -2613,6 +2643,8 @@ impl EngineManager {
                 .and_then(|v| v.as_str())
                 .map(|s| s.chars().take(500).collect()),
             formats,
+            subtitles,
+            automatic_subtitles,
             is_playlist,
             playlist_count: val.get("entries").and_then(|v| v.as_array()).map(|a| a.len()),
             entries,

@@ -217,6 +217,8 @@ pub async fn create_task(
         current_phase: "Queued".to_string(),
         format_id: payload.format_id.unwrap_or_else(|| "best".to_string()),
         format_note: payload.format_note,
+        subtitle_languages: payload.subtitle_languages.unwrap_or_default(),
+        write_auto_subtitles: payload.write_auto_subtitles.unwrap_or(false),
         ext,
         video_codec: None,
         audio_codec: None,
@@ -1267,18 +1269,35 @@ async fn run_download_task(app: AppHandle, task_id: String) {
     schedule_next(&app, &state);
 }
 
+fn collect_files_recursive(dir: &Path, depth: usize, output: &mut Vec<PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() {
+            output.push(path);
+        } else if kind.is_dir() {
+            collect_files_recursive(&path, depth + 1, output);
+        }
+    }
+}
+
 fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
     let media_exts = [
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
     ];
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
+    for p in files {
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
@@ -1318,34 +1337,26 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
 
 fn snapshot_dir_file_sizes(dir: &Path) -> HashMap<PathBuf, u64> {
     let mut map = HashMap::new();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return map;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Ok(meta) = fs::metadata(&p) {
-                map.insert(p, meta.len());
-            }
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    for path in files {
+        if let Ok(meta) = fs::metadata(&path) {
+            map.insert(path, meta.len());
         }
     }
     map
 }
 
 fn measure_dir_growth_bytes(dir: &Path, baseline: &HashMap<PathBuf, u64>) -> u64 {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut total = 0u64;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Ok(meta) = fs::metadata(&p) {
-                let len = meta.len();
-                let prev = baseline.get(&p).copied().unwrap_or(0);
-                if len > prev {
-                    total = total.saturating_add(len - prev);
-                }
+    for path in files {
+        if let Ok(meta) = fs::metadata(&path) {
+            let len = meta.len();
+            let prev = baseline.get(&path).copied().unwrap_or(0);
+            if len > prev {
+                total = total.saturating_add(len - prev);
             }
         }
     }
@@ -1357,15 +1368,15 @@ fn find_new_output_file(
     baseline: &HashMap<PathBuf, u64>,
     is_audio: bool,
 ) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
     let media_exts = [
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
     ];
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() || baseline.contains_key(&p) {
+    for p in files {
+        if baseline.contains_key(&p) {
             continue;
         }
         let ext = p
@@ -1738,6 +1749,27 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                                 return;
                             }
                         }
+                        match &stream_res {
+                            Ok((st, diagnostic)) => {
+                                let clean = logging::redact_secrets(diagnostic);
+                                let tail = clean.lines().rev().take(6).collect::<Vec<_>>()
+                                    .into_iter().rev().collect::<Vec<_>>().join(" | ");
+                                logging::info(
+                                    "queue",
+                                    &format!(
+                                        "spotDL task '{}', track {}/{}: exit={:?}, success={}, diagnostics='{}'",
+                                        task_id, idx + 1, total_tracks, st.code(), st.success(), tail
+                                    ),
+                                );
+                            }
+                            Err(error) => logging::error(
+                                "queue",
+                                &format!(
+                                    "spotDL task '{}', track {}/{}: stream failed: {}",
+                                    task_id, idx + 1, total_tracks, logging::redact_secrets(error)
+                                ),
+                            ),
+                        }
                         match stream_res {
                             Ok((st, _)) if st.success() => {
                                 let newly_created = find_new_output_file(&track_dir, &dir_baseline, true)
@@ -2027,6 +2059,19 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push(selector);
             args.push("--merge-output-format".to_string());
             args.push("mp4".to_string());
+        }
+
+        if !is_spotdl && !task.is_audio_only && !task.subtitle_languages.is_empty() {
+            args.push("--write-subs".to_string());
+            if task.write_auto_subtitles {
+                args.push("--write-auto-subs".to_string());
+            }
+            args.push("--sub-langs".to_string());
+            args.push(task.subtitle_languages.join(","));
+            args.push("--sub-format".to_string());
+            args.push("best".to_string());
+            args.push("--convert-subs".to_string());
+            args.push("srt".to_string());
         }
 
         if settings.embed_thumbnail {
@@ -2513,6 +2558,27 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     }
 
     let detected_output_path = loop_telemetry.into_inner().detected_output_path;
+
+    if is_spotdl {
+        match &stream_res {
+            Ok((status, diagnostic)) => {
+                let clean = logging::redact_secrets(diagnostic);
+                let tail = clean.lines().rev().take(8).collect::<Vec<_>>()
+                    .into_iter().rev().collect::<Vec<_>>().join(" | ");
+                logging::info(
+                    "queue",
+                    &format!(
+                        "spotDL task '{}': process exit={:?}, success={}, output scan starting; diagnostics='{}'",
+                        task_id, status.code(), status.success(), tail
+                    ),
+                );
+            }
+            Err(error) => logging::error(
+                "queue",
+                &format!("spotDL task '{}': process wait/stream failed: {}", task_id, logging::redact_secrets(error)),
+            ),
+        }
+    }
 
     match stream_res {
         Ok((status, _err_log)) if status.success() => {

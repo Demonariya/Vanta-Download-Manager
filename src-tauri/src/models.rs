@@ -179,6 +179,10 @@ pub struct DownloadTask {
     pub current_phase: String,
     pub format_id: String,
     pub format_note: Option<String>,
+    #[serde(default)]
+    pub subtitle_languages: Vec<String>,
+    #[serde(default)]
+    pub write_auto_subtitles: bool,
     pub ext: String,
     #[serde(default)]
     pub video_codec: Option<String>,
@@ -237,6 +241,8 @@ pub struct CreateTaskPayload {
     pub content_type: Option<String>,
     pub format_id: Option<String>,
     pub format_note: Option<String>,
+    pub subtitle_languages: Option<Vec<String>>,
+    pub write_auto_subtitles: Option<bool>,
     pub ext: Option<String>,
     pub is_audio_only: Option<bool>,
     pub audio_format: Option<String>,
@@ -251,6 +257,12 @@ pub struct CreateTaskPayload {
     pub playlist_mode: Option<String>,
     pub selected_items: Option<Vec<String>>,
     pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SubtitleLanguage {
+    pub code: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -322,6 +334,10 @@ pub struct MediaMetadata {
     pub thumbnail: Option<String>,
     pub description: Option<String>,
     pub formats: Vec<FormatOption>,
+    #[serde(default)]
+    pub subtitles: Vec<SubtitleLanguage>,
+    #[serde(default)]
+    pub automatic_subtitles: Vec<SubtitleLanguage>,
     pub is_playlist: bool,
     pub playlist_count: Option<usize>,
     pub extractor: String,

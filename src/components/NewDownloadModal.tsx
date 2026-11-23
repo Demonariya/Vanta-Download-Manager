@@ -110,6 +110,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [customFilename, setCustomFilename] = useState('');
   const [outputDir, setOutputDir] = useState('');
   const [downloadWholeCollection, setDownloadWholeCollection] = useState(true);
+  const [downloadSubtitles, setDownloadSubtitles] = useState(false);
+  const [includeAutoSubtitles, setIncludeAutoSubtitles] = useState(true);
+  const [selectedSubtitleLanguages, setSelectedSubtitleLanguages] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const lastInspectedUrlRef = useRef(initialUrl);
@@ -135,7 +138,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           patch.metadata.url || lastInspectedUrlRef.current
         );
         setSelectedTab(detectedKind);
+        setSelectedFormatId('bestvideo+bestaudio/best');
         setDownloadWholeCollection(true);
+        const subtitleCodes = new Set([
+          ...(patch.metadata.subtitles || []).map((item) => item.code),
+          ...(patch.metadata.automatic_subtitles || []).map((item) => item.code),
+        ]);
+        setSelectedSubtitleLanguages([...subtitleCodes]);
         if (patch.metadata.entries && patch.metadata.entries.length > 0) {
           setOrderedEntries([...patch.metadata.entries]);
           setOrderedSpotifyTracks([]);
@@ -161,6 +170,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         setOrderedEntries([]);
         setOrderedSpotifyTracks([]);
         setSelectedPlaylistKeys({});
+        setSelectedSubtitleLanguages([]);
       }
     }
     if (patch.extractError !== undefined) setExtractError(patch.extractError);
@@ -278,6 +288,22 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const isSpotifyContent = metadata?.extractor === 'spotdl' || isSpotifyUrl(url.trim());
   const detectedMediaKind = detectInspectedMediaKind(metadata, url);
   const routingLabel = formatMediaRoutingLabel(metadata, selectedTab, url);
+  const subtitleLanguageOptions = (() => {
+    const map = new Map<string, { code: string; name: string; manual: boolean; automatic: boolean }>();
+    for (const item of metadata?.subtitles || []) {
+      const current = map.get(item.code) || { code: item.code, name: item.name, manual: false, automatic: false };
+      current.name = item.name || current.name;
+      current.manual = true;
+      map.set(item.code, current);
+    }
+    for (const item of metadata?.automatic_subtitles || []) {
+      const current = map.get(item.code) || { code: item.code, name: item.name, manual: false, automatic: false };
+      current.name = item.name || current.name;
+      current.automatic = true;
+      map.set(item.code, current);
+    }
+    return [...map.values()].sort((a, b) => a.code.localeCompare(b.code));
+  })();
 
   const handlePasteClipboard = async () => {
     try {
@@ -433,6 +459,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           custom_filename: customFilename.trim() || undefined,
           playlist_mode: 'playlist',
           selected_items: pickedEntries.map((e) => String(e.index)),
+          subtitle_languages: downloadSubtitles ? selectedSubtitleLanguages : [],
+          write_auto_subtitles: downloadSubtitles && includeAutoSubtitles,
           tracks_requested: pickedEntries.length,
           priority,
         });
@@ -505,6 +533,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         is_lossy_source: isSourceLossy,
         output_path: resolvedOutputDir,
         custom_filename: customFilename.trim() || undefined,
+        subtitle_languages: downloadSubtitles ? selectedSubtitleLanguages : [],
+        write_auto_subtitles: downloadSubtitles && includeAutoSubtitles,
         playlist_mode:
           downloadWholeCollection && includePlaylistMode && metadata?.is_playlist
             ? 'playlist'
@@ -1377,6 +1407,79 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Subtitle selection */}
+          {selectedTab === 'video' && !isSpotifyContent && subtitleLanguageOptions.length > 0 && (
+            <div className="space-y-2.5 pt-3 border-t border-[var(--vanta-border)]">
+              <label className="flex items-center gap-2 text-xs font-medium text-[var(--vanta-text)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={downloadSubtitles}
+                  onChange={(e) => setDownloadSubtitles(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
+                />
+                Download available subtitles ({subtitleLanguageOptions.length} languages)
+              </label>
+              {downloadSubtitles && (
+                <>
+                  <label className="flex items-center gap-2 text-[11px] text-[var(--vanta-text-secondary)] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includeAutoSubtitles}
+                      onChange={(e) => setIncludeAutoSubtitles(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
+                    />
+                    Include auto-generated captions
+                  </label>
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-[var(--vanta-muted)]">
+                      {selectedSubtitleLanguages.length} of {subtitleLanguageOptions.length} languages selected
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSubtitleLanguages(subtitleLanguageOptions.map((item) => item.code))}
+                        className="text-[var(--vanta-accent)] hover:underline"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSubtitleLanguages([])}
+                        className="text-[var(--vanta-muted)] hover:underline"
+                      >
+                        None
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-36 overflow-y-auto rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2">
+                    {subtitleLanguageOptions.map((item) => (
+                      <label key={item.code} className="flex items-center gap-2 min-w-0 text-[11px] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedSubtitleLanguages.includes(item.code)}
+                          onChange={(e) => setSelectedSubtitleLanguages((prev) =>
+                            e.target.checked
+                              ? [...new Set([...prev, item.code])]
+                              : prev.filter((code) => code !== item.code)
+                          )}
+                          className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
+                        />
+                        <span className="truncate text-[var(--vanta-text)]">{item.name}</span>
+                        <span className="font-mono text-[var(--vanta-muted)] shrink-0">{item.code}</span>
+                        <span className="ml-auto text-[9px] text-[var(--vanta-muted)] shrink-0">
+                          {item.manual && item.automatic ? 'Manual + Auto' : item.manual ? 'Manual' : 'Auto'}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[var(--vanta-muted)]">
+                    Subtitles are saved as separate SRT files beside the downloaded video.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Filename, Priority & Output Directory */}
           <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
