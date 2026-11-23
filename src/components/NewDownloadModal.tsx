@@ -121,8 +121,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const lastInspectedUrlRef = useRef(initialUrl);
 
   const entryKey = (e: PlaylistEntry) => `entry-${e.index}-${e.id}`;
-  const trackKey = (t: SpotifyTrackItem, fallbackIdx: number) =>
-    `track-${t.track_number ?? fallbackIdx + 1}-${t.id}`;
+  const trackKey = (t: SpotifyTrackItem, _fallbackIdx: number) => `track-${t.id}`;
 
   const applyInspectionPatch = (
     patch: Partial<{
