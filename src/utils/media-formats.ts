@@ -230,7 +230,7 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const h of sortedHeights) {
     const fmt = byHeight.get(h)!;
     const isVideoOnly = fmt.is_video_only || !fmt.acodec || fmt.acodec === 'none';
-    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
+    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
