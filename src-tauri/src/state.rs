@@ -625,6 +625,12 @@ impl AppState {
             if p.is_file() && fs::remove_file(p).is_ok() {
                 removed = true;
             }
+            if p.is_file() {
+                let lrc_p = p.with_extension("lrc");
+                if lrc_p.is_file() && fs::remove_file(&lrc_p).is_ok() {
+                    removed = true;
+                }
+            }
             let part_p = PathBuf::from(format!("{}.part", task.output_path));
             if part_p.is_file() && fs::remove_file(&part_p).is_ok() {
                 removed = true;

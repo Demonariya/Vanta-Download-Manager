@@ -50,7 +50,7 @@ fn validate_lrc_content(content: &str) -> Result<(), String> {
         let Ok(_minutes) = minutes.parse::<u64>() else {
             return false;
         };
-        let seconds = seconds.replace(',', ".");
+        let seconds = seconds.replace(',', ".").replace(':', ".");
         seconds.parse::<f64>().map(|value| value >= 0.0 && value < 60.0).unwrap_or(false)
     });
     if !has_timestamp {
@@ -1344,9 +1344,13 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
     let mut files = Vec::new();
     collect_files_recursive(dir, 0, &mut files);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
+    let audio_exts = [
+        "mp3", "flac", "wav", "m4a", "aac", "opus", "ogg", "oga", "aiff", "aif", "alac",
+        "wma", "m4b",
+    ];
     let media_exts = [
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
+        "ogg", "oga", "aiff", "aif", "alac", "wma", "m4b",
     ];
     for p in files {
         let ext = p
@@ -1542,6 +1546,35 @@ fn promote_staged_output_tree(
             .map_err(|e| format!("Outputs were moved, but staging cleanup failed: {}", e))?;
     }
     Ok(moved)
+}
+
+fn find_track_audio_output(dir: &Path, track_number: usize) -> Option<PathBuf> {
+    let prefix = format!("{:02} - ", track_number);
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    files.into_iter()
+        .filter(|path| {
+            is_audio_output_path(path)
+                && path.file_stem().and_then(|s| s.to_str())
+                    .map(|stem| stem.starts_with(&prefix)).unwrap_or(false)
+                && fs::metadata(path).map(|meta| meta.is_file() && meta.len() > 0).unwrap_or(false)
+        })
+        .max_by_key(|path| {
+            fs::metadata(path).and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
+}
+
+fn find_latest_audio_output_file(dir: &Path) -> Option<PathBuf> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    files.into_iter()
+        .filter(|path| is_audio_output_path(path)
+            && fs::metadata(path).map(|meta| meta.is_file() && meta.len() > 0).unwrap_or(false))
+        .max_by_key(|path| {
+            fs::metadata(path).and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
 }
 
 fn parse_eta_str_seconds(eta_raw: &str) -> Option<u64> {
@@ -1773,6 +1806,14 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
                 let track_started_unix = chrono::Utc::now().timestamp();
                 let dir_baseline = snapshot_dir_file_sizes(&track_dir);
+                if let Some(existing_output) = find_track_audio_output(&track_dir, idx + 1) {
+                    completed_count += 1;
+                    if let Ok(meta) = fs::metadata(&existing_output) {
+                        accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                    }
+                    last_output_file = Some(existing_output);
+                    continue;
+                }
                 let mut prev_track_bytes: u64 = 0;
                 let mut prev_sample_at = Instant::now();
                 let mut last_emit_at = Instant::now();
@@ -1923,7 +1964,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                             Ok((st, _)) if st.success() => {
                                 let newly_created = find_new_output_file(&track_dir, &dir_baseline, true)
                                     .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true)
-                                        .filter(|p| !dir_baseline.contains_key(p)));
+                                        .filter(|p| !dir_baseline.contains_key(p)))
+                                    .or_else(|| find_track_audio_output(&track_dir, idx + 1));
                                 if let Some(found) = newly_created {
                                     completed_count += 1;
                                     if let Ok(m) = fs::metadata(&found) {
@@ -2776,7 +2818,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 .filter(|p| p.is_file())
                 .or_else(|| find_new_output_file(&out_dir, &output_baseline, t.is_audio_only))
                 .or_else(|| find_recent_output_file(&out_dir, started_unix, t.is_audio_only)
-                    .filter(|p| !output_baseline.contains_key(p)));
+                    .filter(|p| !output_baseline.contains_key(p)))
+                .or_else(|| if is_spotdl { find_latest_audio_output_file(&out_dir) } else { None });
 
             let valid_file = candidate_path.and_then(|p| {
                 fs::metadata(&p)
