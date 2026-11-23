@@ -115,7 +115,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-[var(--vanta-text)] line-clamp-2">{task.title}</h3>
-                <p className="mt-1 text-[11px] text-[var(--vanta-muted)] truncate">{task.uploader || task.album || (audioTask ? 'Audio download' : 'Video download')}</p>
+                <p className="mt-1 text-[11px] text-[var(--vanta-muted)] truncate">{[task.uploader, task.album, task.duration_string].filter(Boolean).join(' · ') || (audioTask ? 'Audio download' : 'Video download')}</p>
                 <span className={`inline-flex mt-2 px-2 py-1 rounded-md text-[10px] font-semibold ${getStatusColorClass(task.status)} bg-[var(--vanta-surface)]`}>{getStatusLabel(task.status)}</span>
               </div>
             </div>
