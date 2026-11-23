@@ -92,6 +92,7 @@ test('validateMediaUrl rejects non-media files, bad schemes, and CLI injection f
 });
 
 test('isPlaylistCandidateUrl and formatYtDlpPlaylistItems handle ordered collections cleanly', () => {
+  assert.equal(isPlaylistCandidateUrl('https://www.youtube.com/watch?v=abc'), false);
   assert.equal(isPlaylistCandidateUrl('https://www.youtube.com/watch?v=abc&list=PL123'), true);
   assert.equal(isPlaylistCandidateUrl('https://www.youtube.com/playlist?list=PL123'), true);
   assert.equal(isPlaylistCandidateUrl('https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M'), true);
