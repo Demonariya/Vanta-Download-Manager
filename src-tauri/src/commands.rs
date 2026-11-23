@@ -3,13 +3,13 @@ use crate::engines::EngineManager;
 use crate::logging;
 use crate::models::{
     AppSettings, CookieStatus, CookieTestResult, CookieValidationResult, CreateTaskPayload,
-    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask, EngineStatusMap,
+    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadQueue, DownloadTask, EngineStatusMap,
     EngineUpdateInfo, EngineUpdateResult, ManagedEngineInfo, MediaMetadata, NotificationItem,
     PythonValidationResult, TaskLogEntry, TaskPriority, TaskStatus,
 };
 use crate::process;
 use crate::state::AppState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -220,10 +220,15 @@ pub async fn create_task(
     let tracks_completed = tracks_requested.map(|_| 0u32);
     let tracks_failed = tracks_requested.map(|_| 0u32);
 
+    let queue_id = payload.queue_id.clone().unwrap_or_else(|| "main".to_string());
+    if !state.get_queues().iter().any(|queue| queue.id == queue_id) {
+        return Err("Selected download queue does not exist.".to_string());
+    }
     let max_order = state
         .get_tasks()
         .iter()
-        .map(|t| t.queue_order)
+        .filter(|task| task.queue_id == queue_id)
+        .map(|task| task.queue_order)
         .max()
         .unwrap_or(0);
     let known_total = payload.total_bytes.unwrap_or(0);
@@ -301,6 +306,7 @@ pub async fn create_task(
         }],
         priority: payload.priority.unwrap_or(TaskPriority::Normal),
         queue_order: max_order + 1,
+        queue_id,
         created_at: chrono::Utc::now().to_rfc3339(),
         started_at: None,
         completed_at: None,
@@ -583,6 +589,73 @@ pub fn clear_all(
     Ok(())
 }
 
+
+#[tauri::command]
+pub fn get_queues(state: State<'_, AppState>) -> Result<Vec<DownloadQueue>, String> {
+    Ok(state.get_queues())
+}
+
+#[tauri::command]
+pub fn create_queue(app: AppHandle, state: State<'_, AppState>, name: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.create_queue(&name)?;
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn rename_queue(app: AppHandle, state: State<'_, AppState>, id: String, name: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.rename_queue(&id, &name)?;
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn delete_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.delete_queue(&id)?;
+    let _ = app.emit("queues_updated", &queues);
+    let tasks = state.get_tasks();
+    let _ = app.emit("tasks_cleared", &tasks);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    state.set_queue_paused(&id, true)?;
+    let task_ids: Vec<String> = state.get_tasks().into_iter()
+        .filter(|task| task.queue_id == id && (task.status.is_active() || task.status == TaskStatus::Queued))
+        .map(|task| task.id)
+        .collect();
+    for task_id in task_ids {
+        pause_task(app.clone(), state.clone(), task_id)?;
+    }
+    let queues = state.get_queues();
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    state.set_queue_paused(&id, false)?;
+    for mut task in state.get_tasks().into_iter().filter(|task| task.queue_id == id && task.status == TaskStatus::Paused) {
+        task.status = TaskStatus::Queued;
+        task.current_phase = "Queued in active queue".to_string();
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+    }
+    schedule_next(&app, &state);
+    let queues = state.get_queues();
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn move_tasks_to_queue(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>, queue_id: String) -> Result<Vec<DownloadTask>, String> {
+    let tasks = state.move_tasks_to_queue(&ids, &queue_id)?;
+    let _ = app.emit("tasks_cleared", &tasks);
+    schedule_next(&app, &state);
+    Ok(tasks)
+}
+
 #[tauri::command]
 pub fn move_task(
     app: AppHandle,
@@ -665,20 +738,68 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.get_settings())
 }
 
+fn sync_windows_startup_registration(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        const VALUE_NAME: &str = "VANTA Download Manager";
+        if settings.launch_on_startup {
+            let executable = std::env::current_exe()
+                .map_err(|error| format!("Could not locate VANTA executable: {}", error))?;
+            let mut launch_command = format!("\"{}\"", executable.display());
+            if settings.start_minimized {
+                launch_command.push_str(" --background");
+            }
+            let output = Command::new("reg.exe")
+                .args(["ADD", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", &launch_command, "/f"])
+                .output()
+                .map_err(|error| format!("Could not update Windows startup registration: {}", error))?;
+            if !output.status.success() {
+                return Err(format!("Windows rejected the startup entry: {}", String::from_utf8_lossy(&output.stderr).trim()));
+            }
+        } else {
+            // Removing a missing entry is intentionally idempotent.
+            let _ = Command::new("reg.exe")
+                .args(["DELETE", RUN_KEY, "/v", VALUE_NAME, "/f"])
+                .output();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if settings.launch_on_startup {
+        return Err("Launch at Windows sign-in is only available on Windows.".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    settings: AppSettings,
+    settings: serde_json::Value,
 ) -> Result<AppSettings, String> {
-    let saved = state.save_settings(&settings)?;
+    // Frontend settings controls send small patches. Merge with persisted values
+    // so toggling startup/tray does not reset unrelated IDM-style preferences.
+    let mut merged = serde_json::to_value(state.get_settings())
+        .map_err(|error| format!("Could not read current settings: {}", error))?;
+    let patch = settings.as_object()
+        .ok_or_else(|| "Settings payload must be a JSON object.".to_string())?;
+    let target = merged.as_object_mut()
+        .ok_or_else(|| "Stored settings are invalid.".to_string())?;
+    for (key, value) in patch {
+        target.insert(key.clone(), value.clone());
+    }
+    let normalized: AppSettings = serde_json::from_value(merged)
+        .map_err(|error| format!("Invalid settings payload: {}", error))?;
+    sync_windows_startup_registration(&normalized)?;
+    let saved = state.save_settings(&normalized)?;
     let _ = app.emit("settings_updated", &saved);
     Ok(saved)
 }
 
 #[tauri::command]
 pub fn reset_settings(app: AppHandle, state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let saved = state.reset_settings()?;
+    sync_windows_startup_registration(&AppSettings::default())?;
+    let saved = state.reset_settings()?
     let _ = app.emit("settings_updated", &saved);
     Ok(saved)
 }
@@ -1234,6 +1355,13 @@ pub fn app_safe_shutdown(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn exit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.safe_shutdown();
+    app.exit(0);
+    Ok(())
+}
+
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
@@ -1241,6 +1369,10 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
     let settings = state.get_settings();
     let tasks = state.get_tasks();
+    let paused_queues: HashSet<String> = state.get_queues().into_iter()
+        .filter(|queue| queue.is_paused)
+        .map(|queue| queue.id)
+        .collect();
 
     let active_count = tasks.iter().filter(|t| t.status.is_active()).count();
     let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
@@ -1251,7 +1383,7 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
     let mut queued: Vec<DownloadTask> = tasks
         .into_iter()
-        .filter(|t| t.status == TaskStatus::Queued)
+        .filter(|t| t.status == TaskStatus::Queued && !paused_queues.contains(&t.queue_id))
         .collect();
 
     queued.sort_by(|a, b| {

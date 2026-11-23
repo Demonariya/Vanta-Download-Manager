@@ -1,7 +1,7 @@
 use crate::logging;
 use crate::models::{
-    AppSettings, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry, TaskPriority,
-    TaskStatus,
+    AppSettings, DownloadQueue, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry,
+    TaskPriority, TaskStatus,
 };
 use crate::process;
 use rusqlite::{params, Connection};
@@ -237,6 +237,14 @@ impl AppState {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS download_queues (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                is_default INTEGER DEFAULT 0,
+                is_paused INTEGER DEFAULT 0,
+                queue_order INTEGER DEFAULT 0
+            );
+
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
@@ -270,6 +278,7 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN tracks_failed INTEGER",
             "ALTER TABLE tasks ADD COLUMN logs_json TEXT",
             "ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN queue_id TEXT DEFAULT 'main'",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
             "ALTER TABLE tasks ADD COLUMN subtitle_languages_json TEXT",
             "ALTER TABLE tasks ADD COLUMN write_auto_subtitles INTEGER DEFAULT 0",
@@ -278,6 +287,14 @@ impl AppState {
         for sql in migrations {
             let _ = conn.execute(sql, []);
         }
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES ('main', 'Main Queue', 1, 0, 0)",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE tasks SET queue_id = 'main' WHERE queue_id IS NULL OR queue_id = ''",
+            [],
+        );
 
         // Preserve existing user tasks while gracefully normalizing abandoned in-flight statuses
         let _ = conn.execute(
@@ -442,6 +459,7 @@ impl AppState {
             logs,
             priority: TaskPriority::from_str(&priority_str),
             queue_order: row.get("queue_order").unwrap_or(0),
+            queue_id: row.get("queue_id").unwrap_or_else(|_| "main".to_string()),
             created_at: row.get("created_at")?,
             started_at: row.get("started_at").ok().flatten(),
             completed_at: row.get("completed_at")?,
@@ -466,6 +484,141 @@ impl AppState {
         };
 
         rows.flatten().collect()
+    }
+
+
+
+    pub fn get_queues(&self) -> Vec<DownloadQueue> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT id, name, is_default, is_paused, queue_order FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                logging::error("queues", &format!("Failed preparing queue query: {}", error));
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok(DownloadQueue {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                is_default: row.get::<_, i32>(2)? != 0,
+                is_paused: row.get::<_, i32>(3)? != 0,
+                queue_order: row.get(4)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.flatten().collect()
+    }
+
+    pub fn create_queue(&self, raw_name: &str) -> Result<Vec<DownloadQueue>, String> {
+        let name = raw_name.trim();
+        if name.is_empty() || name.chars().count() > 40 || name.eq_ignore_ascii_case("Main Queue") {
+            return Err("Choose a queue name between 1 and 40 characters.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let next_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM download_queues", [], |row| row.get(0)
+        ).unwrap_or(1);
+        let id = format!("queue_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+        conn.execute(
+            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES (?1, ?2, 0, 0, ?3)",
+            params![id, name, next_order],
+        ).map_err(|error| {
+            if error.to_string().to_ascii_lowercase().contains("unique") {
+                "A queue with that name already exists.".to_string()
+            } else {
+                format!("Could not create queue: {}", error)
+            }
+        })?;
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn rename_queue(&self, id: &str, raw_name: &str) -> Result<Vec<DownloadQueue>, String> {
+        let name = raw_name.trim();
+        if id == "main" {
+            return Err("Main Queue cannot be renamed.".to_string());
+        }
+        if name.is_empty() || name.chars().count() > 40 || name.eq_ignore_ascii_case("Main Queue") {
+            return Err("Choose a queue name between 1 and 40 characters.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET name = ?1 WHERE id = ?2 AND is_default = 0",
+            params![name, id],
+        ).map_err(|error| {
+            if error.to_string().to_ascii_lowercase().contains("unique") {
+                "A queue with that name already exists.".to_string()
+            } else {
+                format!("Could not rename queue: {}", error)
+            }
+        })?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn delete_queue(&self, id: &str) -> Result<Vec<DownloadQueue>, String> {
+        if id == "main" {
+            return Err("Main Queue cannot be deleted.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM download_queues WHERE id = ?1 AND is_default = 0",
+            params![id], |row| row.get(0)
+        ).unwrap_or(0);
+        if exists == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        conn.execute("UPDATE tasks SET queue_id = 'main' WHERE queue_id = ?1", params![id])
+            .map_err(|error| format!("Could not move queue items to Main Queue: {}", error))?;
+        conn.execute("DELETE FROM download_queues WHERE id = ?1", params![id])
+            .map_err(|error| format!("Could not delete queue: {}", error))?;
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn set_queue_paused(&self, id: &str, paused: bool) -> Result<Vec<DownloadQueue>, String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET is_paused = ?1 WHERE id = ?2",
+            params![if paused { 1 } else { 0 }, id],
+        ).map_err(|error| format!("Could not update queue: {}", error))?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn move_tasks_to_queue(&self, ids: &[String], queue_id: &str) -> Result<Vec<DownloadTask>, String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM download_queues WHERE id = ?1",
+            params![queue_id], |row| row.get(0)
+        ).unwrap_or(0);
+        if exists == 0 {
+            return Err("Destination queue was not found.".to_string());
+        }
+        let mut next_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM tasks WHERE queue_id = ?1",
+            params![queue_id], |row| row.get(0)
+        ).unwrap_or(1);
+        for id in ids {
+            conn.execute(
+                "UPDATE tasks SET queue_id = ?1, queue_order = ?2 WHERE id = ?3",
+                params![queue_id, next_order, id],
+            ).map_err(|error| format!("Could not move download to queue: {}", error))?;
+            next_order += 1;
+        }
+        drop(conn);
+        Ok(self.get_tasks())
     }
 
     pub fn get_task_by_id(&self, id: &str) -> Option<DownloadTask> {
@@ -541,7 +694,7 @@ impl AppState {
                 verified_audio_info, output_path, custom_filename, playlist_mode,
                 selected_items_json, tracks_requested, tracks_completed, tracks_failed,
                 error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries,
-                lyrics_lrc_content
+                lyrics_lrc_content, queue_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
@@ -551,7 +704,7 @@ impl AppState {
                 ?36, ?37, ?38, ?39, ?40,
                 ?41, ?42, ?43, ?44,
                 ?45, ?46, ?47, ?48,
-                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58
+                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59
             )",
             params![
                 task.id,
@@ -612,6 +765,7 @@ impl AppState {
                 task.retries,
                 task.max_retries,
                 task.lyrics_lrc_content,
+                task.queue_id,
             ],
         ) {
             logging::error("state", &format!("Failed upserting task '{}': {}", task.id, e));
@@ -691,22 +845,22 @@ impl AppState {
     }
 
     pub fn move_task_order(&self, task_id: &str, direction: &str) -> Vec<DownloadTask> {
-        let mut tasks = self.get_tasks();
-        if let Some(idx) = tasks.iter().position(|t| t.id == task_id) {
-            let swap_idx = if direction == "down" {
-                idx.saturating_add(1)
-            } else {
-                idx.saturating_sub(1)
-            };
-            if swap_idx < tasks.len() && swap_idx != idx {
-                tasks.swap(idx, swap_idx);
-            }
+        let all_tasks = self.get_tasks();
+        let Some(target) = all_tasks.iter().find(|task| task.id == task_id) else {
+            return all_tasks;
+        };
+        let queue_id = target.queue_id.clone();
+        let mut tasks: Vec<DownloadTask> = all_tasks.into_iter()
+            .filter(|task| task.queue_id == queue_id).collect();
+        if let Some(idx) = tasks.iter().position(|task| task.id == task_id) {
+            let swap_idx = if direction == "down" { idx.saturating_add(1) } else { idx.saturating_sub(1) };
+            if swap_idx < tasks.len() && swap_idx != idx { tasks.swap(idx, swap_idx); }
         }
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        for (i, t) in tasks.iter().enumerate() {
+        for (index, task) in tasks.iter().enumerate() {
             let _ = conn.execute(
                 "UPDATE tasks SET queue_order = ?1 WHERE id = ?2",
-                params![(i + 1) as i64, t.id],
+                params![(index + 1) as i64, task.id],
             );
         }
         drop(conn);

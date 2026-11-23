@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import {
   AppSettings,
+  DownloadQueue,
   CookieStatus,
   CookieValidationResult,
   DownloadTask,
@@ -50,6 +51,8 @@ interface NewDownloadModalProps {
   initialUrl?: string;
   tasks: DownloadTask[];
   settings: AppSettings | null;
+  queues: DownloadQueue[];
+  defaultQueueId: string;
   onTaskCreated: () => void;
   onOpenCookieSettings?: () => void;
 }
@@ -71,11 +74,14 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   initialUrl = '',
   tasks,
   settings,
+  queues,
+  defaultQueueId,
   onTaskCreated,
   onOpenCookieSettings,
 }) => {
   const [url, setUrl] = useState(initialUrl);
   const [mode, setMode] = useState<'single' | 'batch'>('single');
+  const [selectedQueueId, setSelectedQueueId] = useState(defaultQueueId || 'main');
   const [batchUrls, setBatchUrls] = useState('');
   const [isExtracting, setIsExtracting] = useState(false);
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
@@ -234,6 +240,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      setSelectedQueueId(queues.some((queue) => queue.id === defaultQueueId) ? defaultQueueId : 'main');
       refreshCookies();
       if (settings) {
         setSelectedContainer(settings.default_video_format || 'mp4');
@@ -410,6 +417,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
           await api.createTask({
             url: line,
+            queue_id: selectedQueueId,
             title: lineIsSpotify ? undefined : `Batch Media: ${line.substring(0, 48)}`,
             engine: lineIsSpotify ? 'spotdl' : 'yt-dlp',
             format_id: isAudioOnly ? 'bestaudio' : 'best',
@@ -515,6 +523,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         }
         await api.createTask({
           url: checked.normalized,
+          queue_id: selectedQueueId,
           title: metadata?.title || 'Media Playlist',
           uploader: resolvedUploader,
           duration: metadata?.duration,
@@ -559,6 +568,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
         await api.createTask({
           url: checked.normalized,
+          queue_id: selectedQueueId,
           title: metadata?.title,
           uploader: resolvedUploader,
           duration: metadata?.duration,
@@ -590,6 +600,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
       await api.createTask({
         url: effectiveUrl,
+        queue_id: selectedQueueId,
         title: effectiveTitle,
         uploader: effectiveUploader,
         duration: effectiveDuration,
@@ -668,6 +679,23 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
         {/* Body */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-4 text-xs">
+          <div className="flex items-center gap-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <label htmlFor="download-queue" className="block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Add to Queue</label>
+              <select
+                id="download-queue"
+                value={selectedQueueId}
+                onChange={(e) => setSelectedQueueId(e.target.value)}
+                className="mt-0.5 w-full bg-transparent text-xs font-medium text-[var(--vanta-text)] outline-none"
+              >
+                {queues.map((queue) => (
+                  <option key={queue.id} value={queue.id}>{queue.name}{queue.is_paused ? ' · Stopped' : ''}</option>
+                ))}
+              </select>
+            </div>
+            <span className="shrink-0 text-[10px] text-[var(--vanta-muted)]">Downloads are grouped here</span>
+          </div>
+
           {/* Mode Switcher */}
           <div className="flex items-center gap-1 p-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
             <button

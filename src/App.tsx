@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  DownloadQueue,
   DownloadTask,
   EngineInfo,
   EngineStatusMap,
@@ -66,6 +67,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }]);
+  const [selectedQueueId, setSelectedQueueId] = useState('main');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
@@ -152,11 +155,10 @@ export default function App() {
   const executeNativeClose = async () => {
     try {
       if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().close();
+        await api.exitApp();
       }
     } catch (err) {
-      console.warn('Native close called in non-Tauri context', err);
+      console.warn('Native application exit failed', err);
     }
   };
 
@@ -211,6 +213,11 @@ export default function App() {
       })
       .catch(console.error);
     api.getTasks().then((t) => mounted && setTasks(t)).catch(console.error);
+    api.getQueues().then((next) => {
+      if (!mounted) return;
+      setQueues(next);
+      setSelectedQueueId((current) => next.some((queue) => queue.id === current) ? current : 'main');
+    }).catch(console.error);
     api.getNotifications().then((n) => mounted && setNotifications(n)).catch(console.error);
 
     const unsubscribe = api.subscribeEvents({
@@ -387,6 +394,13 @@ export default function App() {
               {activeTab === 'downloads' && (
                 <DownloadCenterView
                   tasks={tasks}
+                  queues={queues}
+                  selectedQueueId={selectedQueueId}
+                  onSelectQueue={setSelectedQueueId}
+                  onQueuesChanged={(next) => {
+                    setQueues(next);
+                    setSelectedQueueId((current) => next.some((queue) => queue.id === current) ? current : 'main');
+                  }}
                   engineStatus={engineStatus}
                   scopeFilter={scopeFilter}
                   setScopeFilter={setScopeFilter}
@@ -457,6 +471,8 @@ export default function App() {
         initialUrl={initialInspectUrl}
         tasks={tasks}
         settings={settings}
+        queues={queues}
+        defaultQueueId={selectedQueueId === 'all' ? 'main' : selectedQueueId}
         onTaskCreated={() => {
           setActiveTab('downloads');
           setScopeFilter('all');

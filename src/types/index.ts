@@ -115,6 +115,14 @@ export interface MediaMetadata {
   metadata_source?: string;
 }
 
+export interface DownloadQueue {
+  id: string;
+  name: string;
+  is_default: boolean;
+  is_paused: boolean;
+  queue_order: number;
+}
+
 export interface DownloadTask {
   id: string;
   url: string;
@@ -169,6 +177,7 @@ export interface DownloadTask {
   logs?: TaskLogEntry[];
   priority: TaskPriority;
   queue_order?: number;
+  queue_id?: string;
   created_at: string;
   started_at?: string | null;
   completed_at?: string;
@@ -295,6 +304,8 @@ export interface AppSettings {
   theme: ThemeMode;
   auto_retry_failed: boolean;
   auto_resume_on_startup: boolean;
+  launch_on_startup?: boolean;
+  start_minimized?: boolean;
   clipboard_monitoring?: boolean;
   conflict_strategy?: ConflictStrategy;
   verify_media_on_complete?: boolean;

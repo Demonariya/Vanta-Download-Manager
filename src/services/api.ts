@@ -1,4 +1,5 @@
 import {
+  DownloadQueue,
   DownloadTask,
   AppSettings,
   MediaMetadata,
@@ -207,6 +208,49 @@ export class ApiService {
       throw new Error(err.error || 'Failed to inspect URL');
     }
     return res.json();
+  }
+
+  public async getQueues(): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) {
+      return [{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }];
+    }
+    return invoke<DownloadQueue[]>('get_queues');
+  }
+
+  public async createQueue(name: string): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue management requires the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('create_queue', { name });
+  }
+
+  public async renameQueue(id: string, name: string): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue management requires the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('rename_queue', { id, name });
+  }
+
+  public async deleteQueue(id: string): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue management requires the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('delete_queue', { id });
+  }
+
+  public async startQueue(id: string): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue controls require the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('start_queue', { id });
+  }
+
+  public async stopQueue(id: string): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue controls require the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('stop_queue', { id });
+  }
+
+  public async moveTasksToQueue(ids: string[], queueId: string): Promise<DownloadTask[]> {
+    if (!ids.length) return this.getTasks();
+    if (!this.isTauri()) throw new Error('Moving downloads between queues requires the VANTA desktop app.');
+    return invoke<DownloadTask[]>('move_tasks_to_queue', { ids, queueId });
+  }
+
+  public async exitApp(): Promise<void> {
+    if (!this.isTauri()) return;
+    return invoke('exit_app');
   }
 
   public async getTasks(): Promise<DownloadTask[]> {

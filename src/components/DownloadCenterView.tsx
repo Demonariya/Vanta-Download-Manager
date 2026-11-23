@@ -16,6 +16,7 @@ import {
   Download,
 } from 'lucide-react';
 import {
+  DownloadQueue,
   DownloadTask,
   EngineInstallProgress,
   EngineStatusMap,
@@ -46,6 +47,10 @@ export type QueueScopeFilter =
 
 interface DownloadCenterViewProps {
   tasks: DownloadTask[];
+  queues: DownloadQueue[];
+  selectedQueueId: string;
+  onSelectQueue: (id: string) => void;
+  onQueuesChanged: (queues: DownloadQueue[]) => void;
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
   setScopeFilter: (scope: QueueScopeFilter) => void;
@@ -70,6 +75,10 @@ interface DownloadCenterViewProps {
 
 export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   tasks,
+  queues,
+  selectedQueueId,
+  onSelectQueue,
+  onQueuesChanged,
   engineStatus,
   scopeFilter,
   setScopeFilter,
@@ -93,6 +102,11 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const [sortField, setSortField] = useState<SortField>('queue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showNewQueue, setShowNewQueue] = useState(false);
+  const [newQueueName, setNewQueueName] = useState('');
+  const [renameQueueId, setRenameQueueId] = useState<string | null>(null);
+  const [renameQueueName, setRenameQueueName] = useState('');
+  const [moveTargetQueueId, setMoveTargetQueueId] = useState('');
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -102,15 +116,21 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     onConfirm: (checked: boolean) => void;
   } | null>(null);
 
+  const queueTasks = useMemo(
+    () => selectedQueueId === 'all' ? tasks : tasks.filter((task) => (task.queue_id || 'main') === selectedQueueId),
+    [tasks, selectedQueueId]
+  );
+  const activeQueue = queues.find((queue) => queue.id === selectedQueueId) || null;
+
   const visibleTasks = useMemo(
     () =>
-      filterAndSortTasks(tasks, {
+      filterAndSortTasks(queueTasks, {
         statusFilter: scopeFilter,
         searchQuery,
         sortField,
         sortDirection,
       }),
-    [tasks, scopeFilter, searchQuery, sortField, sortDirection]
+    [queueTasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
   const activeCount = useMemo(() => getActiveDownloadCount(tasks), [tasks]);
@@ -182,6 +202,124 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
   return (
     <div className="space-y-4">
+      {/* IDM-style Queue Manager */}
+      <section className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-3 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--vanta-muted)]">Queues</span>
+            <span className="text-[10px] text-[var(--vanta-muted)]">{queues.length} queue{queues.length === 1 ? '' : 's'}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowNewQueue((value) => !value)}
+            className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)] text-[11px] font-medium text-[var(--vanta-text)] inline-flex items-center gap-1.5"
+          >
+            <Plus className="w-3.5 h-3.5" /> New Queue
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => { onSelectQueue('all'); setSelectedIds([]); }}
+            className={`px-3 py-2 rounded-lg border text-left min-w-[110px] transition-colors ${selectedQueueId === 'all' ? 'border-[var(--vanta-accent)] bg-[var(--vanta-accent)]/10' : 'border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)]'}`}
+          >
+            <span className="block text-xs font-semibold text-[var(--vanta-text)]">All Queues</span>
+            <span className="block text-[10px] text-[var(--vanta-muted)]">{tasks.length} transfers</span>
+          </button>
+          {queues.map((queue) => {
+            const count = tasks.filter((task) => (task.queue_id || 'main') === queue.id).length;
+            const running = tasks.filter((task) => (task.queue_id || 'main') === queue.id && ['connecting','downloading','processing','muxing','verifying','resuming'].includes(task.status)).length;
+            const active = selectedQueueId === queue.id;
+            return (
+              <button
+                key={queue.id}
+                type="button"
+                onClick={() => { onSelectQueue(queue.id); setSelectedIds([]); }}
+                className={`px-3 py-2 rounded-lg border text-left min-w-[110px] transition-colors ${active ? 'border-[var(--vanta-accent)] bg-[var(--vanta-accent)]/10' : 'border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)]'}`}
+              >
+                <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--vanta-text)]">
+                  <span className={`w-1.5 h-1.5 rounded-full ${queue.is_paused ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                  <span className="truncate">{queue.name}</span>
+                </span>
+                <span className="block mt-0.5 text-[10px] text-[var(--vanta-muted)]">{count} items · {running} active</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {showNewQueue && (
+          <form
+            className="flex flex-wrap items-center gap-2 border-t border-[var(--vanta-border)] pt-3"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const name = newQueueName.trim();
+              if (!name) return;
+              try {
+                const next = await api.createQueue(name);
+                onQueuesChanged(next);
+                const created = next.find((queue) => queue.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+                if (created) onSelectQueue(created.id);
+                setNewQueueName('');
+                setShowNewQueue(false);
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : 'Could not create queue.');
+              }
+            }}
+          >
+            <input
+              autoFocus
+              value={newQueueName}
+              onChange={(event) => setNewQueueName(event.target.value)}
+              maxLength={40}
+              placeholder="Queue name (e.g. Film)"
+              className="min-w-[180px] flex-1 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-xs text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
+            />
+            <button type="submit" disabled={!newQueueName.trim()} className="px-3 py-2 rounded-lg bg-[var(--vanta-accent)] text-white text-xs font-medium disabled:opacity-40">Create Queue</button>
+            <button type="button" onClick={() => { setShowNewQueue(false); setNewQueueName(''); }} className="px-3 py-2 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-muted)]">Cancel</button>
+          </form>
+        )}
+
+        {activeQueue && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--vanta-border)] pt-3">
+            {renameQueueId === activeQueue.id ? (
+              <form
+                className="flex flex-wrap items-center gap-2 flex-1"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  try {
+                    const next = await api.renameQueue(activeQueue.id, renameQueueName);
+                    onQueuesChanged(next);
+                    setRenameQueueId(null);
+                  } catch (error) {
+                    window.alert(error instanceof Error ? error.message : 'Could not rename queue.');
+                  }
+                }}
+              >
+                <input value={renameQueueName} onChange={(event) => setRenameQueueName(event.target.value)} maxLength={40} className="min-w-[150px] flex-1 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 py-1.5 text-xs text-[var(--vanta-text)]" />
+                <button type="submit" className="px-2.5 py-1.5 rounded-lg bg-[var(--vanta-accent)] text-white text-xs">Save name</button>
+                <button type="button" onClick={() => setRenameQueueId(null)} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs">Cancel</button>
+              </form>
+            ) : (
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-[var(--vanta-text)]">{activeQueue.name}</div>
+                <div className="text-[10px] text-[var(--vanta-muted)]">{activeQueue.is_paused ? 'Queue stopped · new downloads will wait' : 'Queue is running'}</div>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button type="button" onClick={async () => { try { onQueuesChanged(activeQueue.is_paused ? await api.startQueue(activeQueue.id) : await api.stopQueue(activeQueue.id)); } catch (error) { window.alert(error instanceof Error ? error.message : 'Queue action failed.'); } }} className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${activeQueue.is_paused ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400'}`}>
+                {activeQueue.is_paused ? 'Start Queue' : 'Stop Queue'}
+              </button>
+              {!activeQueue.is_default && renameQueueId !== activeQueue.id && (
+                <>
+                  <button type="button" onClick={() => { setRenameQueueId(activeQueue.id); setRenameQueueName(activeQueue.name); }} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">Rename</button>
+                  <button type="button" onClick={() => setConfirmState({ title: 'Delete Queue', message: `Delete "${activeQueue.name}"? Its downloads will be moved to Main Queue.`, confirmLabel: 'Delete Queue', onConfirm: async () => { try { const next = await api.deleteQueue(activeQueue.id); onQueuesChanged(next); onSelectQueue('main'); setSelectedIds([]); } catch (error) { window.alert(error instanceof Error ? error.message : 'Could not delete queue.'); } finally { setConfirmState(null); } } })} className="px-2.5 py-1.5 rounded-lg border border-red-500/30 text-xs text-red-600 dark:text-red-400 hover:bg-red-500/5">Delete</button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Compact Telemetry Summary Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
@@ -377,6 +515,24 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             >
               Delete
             </button>
+            {queues.length > 1 && (
+              <div className="flex items-center gap-1.5">
+                <select value={moveTargetQueueId} onChange={(event) => setMoveTargetQueueId(event.target.value)} className="max-w-[150px] rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] px-2 py-1 text-xs text-[var(--vanta-text)]">
+                  <option value="">Move to queue…</option>
+                  {queues.filter((queue) => queue.id !== selectedQueueId).map((queue) => <option key={queue.id} value={queue.id}>{queue.name}</option>)}
+                </select>
+                <button type="button" disabled={!moveTargetQueueId} onClick={async () => {
+                  try {
+                    await api.moveTasksToQueue(selectedIds, moveTargetQueueId);
+                    onSelectQueue(moveTargetQueueId);
+                    setSelectedIds([]);
+                    setMoveTargetQueueId('');
+                  } catch (error) {
+                    window.alert(error instanceof Error ? error.message : 'Could not move selected downloads.');
+                  }
+                }} className="px-2.5 py-1 rounded border border-[var(--vanta-border)] bg-[var(--vanta-surface)] text-[var(--vanta-text)] disabled:opacity-40">Move</button>
+              </div>
+            )}
             <button
               type="button"
               onClick={() => setSelectedIds([])}

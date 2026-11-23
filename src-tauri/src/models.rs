@@ -219,6 +219,8 @@ pub struct DownloadTask {
     pub priority: TaskPriority,
     #[serde(default)]
     pub queue_order: i64,
+    #[serde(default = "default_queue_id")]
+    pub queue_id: String,
     pub created_at: String,
     #[serde(default)]
     pub started_at: Option<String>,
@@ -229,6 +231,10 @@ pub struct DownloadTask {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_queue_id() -> String {
+    "main".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +265,8 @@ pub struct CreateTaskPayload {
     pub custom_filename: Option<String>,
     pub playlist_mode: Option<String>,
     pub selected_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub queue_id: Option<String>,
     pub total_bytes: Option<u64>,
 }
 
@@ -552,6 +560,15 @@ pub struct NotificationItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DownloadQueue {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+    pub is_paused: bool,
+    pub queue_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppSettings {
     pub schema_version: u32,
@@ -578,6 +595,8 @@ pub struct AppSettings {
     pub theme: String,
     pub auto_retry_failed: bool,
     pub auto_resume_on_startup: bool,
+    pub launch_on_startup: bool,
+    pub start_minimized: bool,
     pub clipboard_monitoring: bool,
     pub conflict_strategy: String,
     pub verify_media_on_complete: bool,
@@ -621,6 +640,8 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             auto_retry_failed: true,
             auto_resume_on_startup: true,
+            launch_on_startup: false,
+            start_minimized: false,
             clipboard_monitoring: false,
             conflict_strategy: "rename".to_string(),
             verify_media_on_complete: true,

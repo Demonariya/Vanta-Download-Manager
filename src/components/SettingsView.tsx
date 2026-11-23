@@ -453,8 +453,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
                 />
                 <span className="text-[var(--vanta-text-secondary)]">
-                  Minimize to background tray when closing with active transfers
+                  Close to System Tray instead of exiting the application
                 </span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.launch_on_startup)}
+                  onChange={(e) => setForm({ ...form, launch_on_startup: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Launch VANTA when I sign in to Windows</span>
+              </label>
+
+              <label className={`flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] ${form.launch_on_startup ? 'cursor-pointer' : 'opacity-50'}`}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.start_minimized)}
+                  disabled={!form.launch_on_startup}
+                  onChange={(e) => setForm({ ...form, start_minimized: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Start minimized in the system tray</span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.auto_resume_on_startup)}
+                  onChange={(e) => setForm({ ...form, auto_resume_on_startup: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Restore queued downloads when VANTA starts</span>
               </label>
 
               <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
