@@ -747,6 +747,8 @@ pub fn build_media_metadata_from_entity(
                 thumbnail: artwork.clone(),
                 description,
                 formats: Vec::new(),
+                subtitles: Vec::new(),
+                automatic_subtitles: Vec::new(),
                 is_playlist: true,
                 playlist_count: total_tracks,
                 extractor: "spotdl".to_string(),
