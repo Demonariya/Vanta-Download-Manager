@@ -909,9 +909,9 @@ export class EngineManager {
                           ? `https://www.youtube.com/watch?v=${e.id}`
                           : url);
                       return {
-                        id: String(e.id || idx + 1),
+                        id: String(e.id || rawIndex + 1),
                         index: Number.isInteger(e.playlist_index) && e.playlist_index > 0 ? e.playlist_index : rawIndex + 1,
-                        title: String(e.title || `Item ${idx + 1}`),
+                        title: String(e.title || `Item ${rawIndex + 1}`),
                         url: String(entryUrl),
                         duration: typeof e.duration === 'number' ? e.duration : undefined,
                         duration_string: e.duration ? formatDuration(e.duration) : undefined,
