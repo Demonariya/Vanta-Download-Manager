@@ -82,7 +82,7 @@ test('resolveVideoFormatSelector and buildCuratedVideoOptions always pair video-
 
   const curated = buildCuratedVideoOptions(formats);
   assert.ok(curated.some((o) =>
-    o.formatSelector === 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' && o.needsMux
+    o.formatSelector === 'bestvideo[height<=1080]+bestaudio/best[height<=1080]' && o.needsMux
   ));
 });
 
