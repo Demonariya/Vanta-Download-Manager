@@ -374,12 +374,6 @@ export default function App() {
             setSearchQuery={setSearchQuery}
             theme={theme}
             onCycleTheme={handleCycleTheme}
-            floatingDockEnabled={Boolean(settings?.floating_notifications_enabled)}
-            onToggleFloatingDock={() =>
-              handleSaveSettings({
-                floating_notifications_enabled: !settings?.floating_notifications_enabled,
-              })
-            }
             onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
           />
 

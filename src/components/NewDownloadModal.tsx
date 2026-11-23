@@ -1565,7 +1565,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               )}
               <p className="text-[10px] text-[var(--vanta-muted)]">
-                The selected local LRC file is copied beside the downloaded audio file after verification.
+                VANTA embeds timestamped lyrics in MP3 ID3 tags (SYLT) and also saves an .LRC sidecar. Other audio formats keep the .LRC sidecar beside the track.
               </p>
             </div>
           )}
@@ -1583,7 +1583,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   }}
                   className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
                 />
-                Download subtitles ({subtitleLanguageOptions.length} languages available)
+                Embed subtitles in video ({subtitleLanguageOptions.length} languages available)
               </label>
               {downloadSubtitles && (
                 <>

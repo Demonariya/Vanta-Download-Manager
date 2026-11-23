@@ -9,6 +9,10 @@ use crate::models::{
 };
 use crate::process;
 use crate::state::AppState;
+use id3::{
+    frame::{Lyrics as Id3Lyrics, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat},
+    Error as Id3Error, ErrorKind as Id3ErrorKind, Tag as Id3Tag, TagLike, Version as Id3Version,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,33 +32,66 @@ impl<'a> Drop for InspectionDropGuard<'a> {
     }
 }
 
+fn parse_lrc_timestamp(value: &str) -> Option<u32> {
+    let (minutes_text, seconds_text) = value.split_once(':')?;
+    let minutes = minutes_text.parse::<u64>().ok()?;
+    let separator = seconds_text.find('.').or_else(|| seconds_text.find(','));
+    let (whole_seconds_text, fraction_text) = match separator {
+        Some(index) => (&seconds_text[..index], &seconds_text[index + 1..]),
+        None => (seconds_text, ""),
+    };
+    let seconds = whole_seconds_text.parse::<u64>().ok()?;
+    if seconds >= 60 { return None; }
+    let fraction_digits = fraction_text.chars().take(3).collect::<String>();
+    if !fraction_digits.chars().all(|ch| ch.is_ascii_digit()) { return None; }
+    let fraction_value = if fraction_digits.is_empty() {
+        0
+    } else {
+        let parsed = fraction_digits.parse::<u32>().ok()?;
+        match fraction_digits.len() { 1 => parsed * 100, 2 => parsed * 10, _ => parsed }
+    };
+    let total = minutes.checked_mul(60_000)?
+        .checked_add(seconds.checked_mul(1_000)?)?
+        .checked_add(fraction_value as u64)?;
+    u32::try_from(total).ok()
+}
+
+fn parse_lrc_entries(content: &str) -> Vec<(u32, String)> {
+    let offset_ms = content.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("[offset:")?.strip_suffix(']')?;
+        value.trim().parse::<i64>().ok()
+    }).unwrap_or(0);
+    let mut entries = Vec::new();
+
+    for line in content.lines() {
+        let mut remaining = line.trim();
+        let mut timestamps = Vec::new();
+        while let Some(after_open) = remaining.strip_prefix('[') {
+            let Some(end) = after_open.find(']') else { break; };
+            let Some(timestamp) = parse_lrc_timestamp(&after_open[..end]) else { break; };
+            timestamps.push(timestamp);
+            remaining = &after_open[end + 1..];
+        }
+        let lyric_text = remaining.trim();
+        if lyric_text.is_empty() { continue; }
+        for timestamp in timestamps {
+            let adjusted = (timestamp as i64 + offset_ms).clamp(0, u32::MAX as i64) as u32;
+            entries.push((adjusted, lyric_text.to_string()));
+        }
+    }
+    entries.sort_by_key(|(timestamp, _)| *timestamp);
+    entries
+}
+
 fn validate_lrc_content(content: &str) -> Result<(), String> {
     if content.trim().is_empty() {
         return Err("The selected LRC file is empty.".to_string());
     }
     if content.len() > 512 * 1024 {
-        return Err("The selected LRC file exceeds the 512 KiB size limit.".to_string());
+        return Err("The LRC file exceeds the 512 KiB size limit.".to_string());
     }
-    let has_timestamp = content.lines().any(|line| {
-        let line = line.trim();
-        if !line.starts_with('[') {
-            return false;
-        }
-        let Some(end) = line.find(']') else {
-            return false;
-        };
-        let timestamp = &line[1..end];
-        let Some((minutes, seconds)) = timestamp.split_once(':') else {
-            return false;
-        };
-        let Ok(_minutes) = minutes.parse::<u64>() else {
-            return false;
-        };
-        let seconds = seconds.replace(',', ".").replace(':', ".");
-        seconds.parse::<f64>().map(|value| value >= 0.0 && value < 60.0).unwrap_or(false)
-    });
-    if !has_timestamp {
-        return Err("The selected file does not contain valid LRC timestamp lines.".to_string());
+    if parse_lrc_entries(content).is_empty() {
+        return Err("The selected file does not contain valid timestamped LRC lyrics.".to_string());
     }
     Ok(())
 }
@@ -65,6 +102,67 @@ fn write_lrc_sidecar(audio_path: &Path, content: &str) -> Result<PathBuf, String
     fs::write(&sidecar, content)
         .map_err(|e| format!("Could not write LRC sidecar '{}': {}", sidecar.display(), e))?;
     Ok(sidecar)
+}
+
+fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
+    if !audio_path.extension().and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("mp3")).unwrap_or(false) {
+        return Ok(false);
+    }
+    let entries = parse_lrc_entries(content);
+    if entries.is_empty() {
+        return Err("No valid timestamped lyric lines were found to embed.".to_string());
+    }
+    let mut tag = match Id3Tag::read_from_path(audio_path) {
+        Ok(tag) => tag,
+        Err(Id3Error { kind: Id3ErrorKind::NoTag, .. }) => Id3Tag::new(),
+        Err(error) => return Err(format!("Could not read existing MP3 ID3 tags: {}", error)),
+    };
+    let plain_text = entries.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
+    tag.remove_all_synchronised_lyrics();
+    tag.remove_all_lyrics();
+    tag.add_frame(SynchronisedLyrics {
+        lang: "und".to_string(),
+        timestamp_format: TimestampFormat::Ms,
+        content_type: SynchronisedLyricsType::Lyrics,
+        content: entries,
+        description: "VANTA synchronized lyrics".to_string(),
+    });
+    tag.add_frame(Id3Lyrics {
+        lang: "und".to_string(),
+        description: "VANTA lyrics".to_string(),
+        text: plain_text,
+    });
+    tag.write_to_path(audio_path, Id3Version::Id3v24)
+        .map_err(|error| format!("Could not embed synchronized lyrics into MP3: {}", error))?;
+    Ok(true)
+}
+
+fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
+    if let Err(error) = embed_lrc_lyrics(audio_path, content) {
+        logging::warn("lyrics", &format!(
+            "Could not embed synchronized lyrics into '{}'; preserving the LRC sidecar: {}",
+            audio_path.display(), error
+        ));
+    }
+    write_lrc_sidecar(audio_path, content)?;
+    Ok(())
+}
+
+fn build_subtitle_args(languages: &[String], include_auto: bool) -> Vec<String> {
+    if languages.is_empty() { return Vec::new(); }
+    let mut args = vec!["--write-subs".to_string()];
+    if include_auto { args.push("--write-auto-subs".to_string()); }
+    args.extend([
+        "--sub-langs".to_string(), languages.join(","),
+        "--sub-format".to_string(), "best".to_string(),
+        "--convert-subs".to_string(), "srt".to_string(),
+        "--remux-video".to_string(), "mp4".to_string(),
+        "--embed-subs".to_string(),
+        "--ppa".to_string(),
+        "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default".to_string(),
+    ]);
+    args
 }
 
 fn format_bytes_rust(bytes: f64) -> String {
@@ -110,7 +208,7 @@ pub async fn create_task(
     if let Some(ref lrc) = payload.lyrics_lrc_content {
         validate_lrc_content(lrc)?;
         if !is_audio {
-            return Err("LRC sidecar files can only be attached to audio downloads.".to_string());
+            return Err("Synchronized LRC lyrics can only be attached to audio downloads.".to_string());
         }
     }
 
@@ -2194,7 +2292,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     (final_t.lyrics_lrc_content.as_deref(), last_output_file.as_ref())
                 {
                     if let Some(promoted_audio) = moved_files.get(source_audio) {
-                        if let Err(error) = write_lrc_sidecar(promoted_audio, content) {
+                        if let Err(error) = write_lrc_assets(promoted_audio, content) {
                             final_t.status = TaskStatus::Failed;
                             final_t.current_phase = "Could not write LRC sidecar".to_string();
                             final_t.error_message = Some(error);
@@ -2427,17 +2525,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push("mp4".to_string());
         }
 
-        if !is_spotdl && !task.is_audio_only && !task.subtitle_languages.is_empty() {
-            args.push("--write-subs".to_string());
-            if task.write_auto_subtitles {
-                args.push("--write-auto-subs".to_string());
-            }
-            args.push("--sub-langs".to_string());
-            args.push(task.subtitle_languages.join(","));
-            args.push("--sub-format".to_string());
-            args.push("best".to_string());
-            args.push("--convert-subs".to_string());
-            args.push("srt".to_string());
+        if !is_spotdl && !task.is_audio_only {
+            args.extend(build_subtitle_args(
+                &task.subtitle_languages,
+                task.write_auto_subtitles,
+            ));
         }
 
         if settings.embed_thumbnail {
@@ -3037,7 +3129,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             };
             let file_size = fs::metadata(&final_path).map(|meta| meta.len()).unwrap_or(file_size);
             if let Some(content) = t.lyrics_lrc_content.take() {
-                if let Err(error) = write_lrc_sidecar(&final_path, &content) {
+                if let Err(error) = write_lrc_assets(&final_path, &content) {
                     t.status = TaskStatus::Failed;
                     t.current_phase = "Could not write LRC sidecar".to_string();
                     t.error_message = Some(error);
@@ -3137,5 +3229,32 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
         }
+    }
+}
+
+#[cfg(test)]
+mod subtitle_and_lyrics_tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_lrc_timestamps_and_offsets() {
+        let content = "[offset:100]\n[00:01.2][00:02.34]Hello\n[00:03,005]World\n[ar:Artist]";
+        assert_eq!(parse_lrc_entries(content), vec![
+            (1300, "Hello".to_string()),
+            (2440, "Hello".to_string()),
+            (3105, "World".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn builds_embedded_subtitle_arguments_with_default_track() {
+        let args = build_subtitle_args(&["en".to_string(), "fa".to_string()], true);
+        assert!(args.contains(&"--write-subs".to_string()));
+        assert!(args.contains(&"--write-auto-subs".to_string()));
+        assert!(args.contains(&"--embed-subs".to_string()));
+        assert!(args.contains(&"--remux-video".to_string()));
+        assert!(args.windows(2).any(|pair| pair[0] == "--ppa"
+            && pair[1] == "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default"));
+        assert_eq!(build_subtitle_args(&[], false), Vec::<String>::new());
     }
 }

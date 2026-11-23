@@ -298,8 +298,6 @@ export interface AppSettings {
   embed_metadata: boolean;
   filename_template: string;
   proxy_url: string;
-  floating_notifications_enabled: boolean;
-  floating_widget_enabled?: boolean;
   auto_dismiss_seconds: number;
   theme: ThemeMode;
   auto_retry_failed: boolean;

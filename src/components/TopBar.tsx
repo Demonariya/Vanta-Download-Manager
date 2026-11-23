@@ -9,7 +9,6 @@ import {
   Sun,
   Moon,
   Monitor,
-  PictureInPicture2,
 } from 'lucide-react';
 import { ThemeMode } from '../types';
 
@@ -24,8 +23,6 @@ interface TopBarProps {
   setSearchQuery: (query: string) => void;
   theme: ThemeMode;
   onCycleTheme: () => void;
-  floatingDockEnabled: boolean;
-  onToggleFloatingDock: () => void;
   onToggleMobileMenu?: () => void;
 }
 
@@ -39,8 +36,6 @@ export const TopBar: React.FC<TopBarProps> = ({
   setSearchQuery,
   theme,
   onCycleTheme,
-  floatingDockEnabled,
-  onToggleFloatingDock,
   onToggleMobileMenu,
 }) => {
   const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
@@ -102,20 +97,6 @@ export const TopBar: React.FC<TopBarProps> = ({
           className="p-2 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] rounded-lg border border-transparent hover:border-[var(--vanta-border)] transition-colors shrink-0"
         >
           <ThemeIcon className="w-4 h-4" />
-        </button>
-
-        <button
-          type="button"
-          onClick={onToggleFloatingDock}
-          title={floatingDockEnabled ? 'Hide floating progress dock' : 'Show floating progress dock'}
-          aria-label="Toggle floating progress dock"
-          className={`hidden sm:inline-flex p-2 rounded-lg border transition-colors shrink-0 ${
-            floatingDockEnabled
-              ? 'text-[var(--vanta-accent)] border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]'
-              : 'text-[var(--vanta-muted)] border-transparent hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'
-          }`}
-        >
-          <PictureInPicture2 className="w-4 h-4" />
         </button>
 
         <button
