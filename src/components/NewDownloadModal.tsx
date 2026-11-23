@@ -86,6 +86,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [orderedEntries, setOrderedEntries] = useState<PlaylistEntry[]>([]);
   const [orderedSpotifyTracks, setOrderedSpotifyTracks] = useState<SpotifyTrackItem[]>([]);
   const [selectedPlaylistKeys, setSelectedPlaylistKeys] = useState<Record<string, boolean>>({});
+  const [playlistSearch, setPlaylistSearch] = useState('');
   const [includePlaylistMode, setIncludePlaylistMode] = useState(true);
 
   // Live cookie status & inline import panel
@@ -135,6 +136,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     if (patch.metadata !== undefined) {
       setMetadata(patch.metadata);
       if (patch.metadata) {
+        setPlaylistSearch('');
         const detectedKind = detectInspectedMediaKind(
           patch.metadata,
           patch.metadata.url || lastInspectedUrlRef.current
@@ -456,6 +458,39 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           ? metadata.artists.join(', ')
           : metadata?.owner || metadata?.uploader;
       const resolvedArtwork = metadata?.album_artwork || metadata?.thumbnail;
+      let effectiveUrl = checked.normalized;
+      let effectiveTitle = metadata?.title || (urlIsSpotify ? undefined : 'Media Download');
+      let effectiveUploader = resolvedUploader;
+
+      // In single-item mode, use the selected item's own URL instead of passing the
+      // parent playlist URL with --no-playlist (which would otherwise grab its first item).
+      if (!downloadWholeCollection && orderedEntries.length > 0) {
+        const picked = orderedEntries.filter((entry) => selectedPlaylistKeys[entryKey(entry)] !== false);
+        if (picked.length !== 1) {
+          setExtractError('Select exactly one video from the playlist for single-item mode.');
+          setIsSubmitting(false);
+          return;
+        }
+        const selected = picked[0];
+        if (!/^https?:\/\//i.test(selected.url) || selected.url === checked.normalized) {
+          setExtractError('The selected playlist item does not have a direct media URL. Use Playlist / Album mode instead.');
+          setIsSubmitting(false);
+          return;
+        }
+        effectiveUrl = selected.url;
+        effectiveTitle = selected.title;
+        effectiveUploader = selected.uploader || resolvedUploader;
+      } else if (!downloadWholeCollection && orderedSpotifyTracks.length > 0) {
+        const picked = orderedSpotifyTracks.filter((track, idx) => selectedPlaylistKeys[trackKey(track, idx)] !== false);
+        if (picked.length !== 1) {
+          setExtractError('Select exactly one track for single-item mode.');
+          setIsSubmitting(false);
+          return;
+        }
+        effectiveUrl = picked[0].url || checked.normalized;
+        effectiveTitle = picked[0].title;
+        effectiveUploader = picked[0].artists.join(', ') || resolvedUploader;
+      }
 
       // Playlist / Album selection + custom ordering for yt-dlp
       if (orderedEntries.length > 0 && downloadWholeCollection && !quickDownload) {
@@ -543,9 +578,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
 
       await api.createTask({
-        url: checked.normalized,
-        title: metadata?.title || (urlIsSpotify ? undefined : 'Media Download'),
-        uploader: resolvedUploader,
+        url: effectiveUrl,
+        title: effectiveTitle,
+        uploader: effectiveUploader,
         duration: metadata?.duration,
         duration_string: metadata?.duration_string,
         thumbnail: resolvedArtwork,
@@ -587,6 +622,15 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const selectedTrackCount = orderedSpotifyTracks.filter(
     (t, idx) => selectedPlaylistKeys[trackKey(t, idx)] !== false
   ).length;
+  const playlistQuery = playlistSearch.trim().toLocaleLowerCase();
+  const visibleEntries = orderedEntries.filter((entry) =>
+    !playlistQuery ||
+    `${entry.title} ${entry.uploader || ''} ${entry.id}`.toLocaleLowerCase().includes(playlistQuery)
+  );
+  const visibleSpotifyTracks = orderedSpotifyTracks.filter((track) =>
+    !playlistQuery ||
+    `${track.title} ${track.artists.join(' ')} ${track.album || ''}`.toLocaleLowerCase().includes(playlistQuery)
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/70 backdrop-blur-xs select-none">
@@ -1084,6 +1128,20 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               )}
 
+              {(orderedEntries.length > 0 || orderedSpotifyTracks.length > 0) && downloadWholeCollection && (
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--vanta-muted)]" />
+                  <input
+                    type="search"
+                    value={playlistSearch}
+                    onChange={(e) => setPlaylistSearch(e.target.value)}
+                    placeholder="Search playlist items by title, artist, or ID..."
+                    aria-label="Search playlist items"
+                    className="w-full pl-9 pr-3 py-2 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none text-[11px] text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)]"
+                  />
+                </div>
+              )}
+
               {/* yt-dlp Playlist Selection & Ordering */}
               {orderedEntries.length > 0 && downloadWholeCollection && (
                 <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
@@ -1112,7 +1170,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     </div>
                   </div>
                   <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {orderedEntries.map((entry, idx) => {
+                    {visibleEntries.map((entry) => {
+                      const idx = orderedEntries.findIndex((item) => entryKey(item) === entryKey(entry));
                       const key = entryKey(entry);
                       const checked = selectedPlaylistKeys[key] !== false;
                       return (
@@ -1201,7 +1260,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     </div>
                   </div>
                   <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {orderedSpotifyTracks.map((track, idx) => {
+                    {visibleSpotifyTracks.map((track) => {
+                      const idx = orderedSpotifyTracks.findIndex((item) => trackKey(item, orderedSpotifyTracks.indexOf(item)) === trackKey(track, orderedSpotifyTracks.indexOf(track)));
                       const key = trackKey(track, idx);
                       const checked = selectedPlaylistKeys[key] !== false;
                       return (
