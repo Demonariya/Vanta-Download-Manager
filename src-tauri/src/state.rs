@@ -209,8 +209,6 @@ impl AppState {
                 current_phase TEXT DEFAULT 'Queued',
                 format_id TEXT DEFAULT 'best',
                 format_note TEXT,
-                subtitle_languages_json TEXT,
-                write_auto_subtitles INTEGER DEFAULT 0,
                 ext TEXT DEFAULT 'mp4',
                 is_audio_only INTEGER DEFAULT 0,
                 audio_format TEXT,
@@ -270,8 +268,6 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN logs_json TEXT",
             "ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
-            "ALTER TABLE tasks ADD COLUMN subtitle_languages_json TEXT",
-            "ALTER TABLE tasks ADD COLUMN write_auto_subtitles INTEGER DEFAULT 0",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -373,17 +369,6 @@ impl AppState {
         let selected_items: Option<Vec<String>> = selected_items_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-        let subtitle_languages_json: Option<String> = row.get("subtitle_languages_json").ok().flatten();
-        let subtitle_languages: Vec<String> = subtitle_languages_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let write_auto_subtitles: bool = row
-            .get::<_, Option<i32>>("write_auto_subtitles")
-            .ok()
-            .flatten()
-            .map(|value| value != 0)
-            .unwrap_or(false);
 
         Ok(DownloadTask {
             id: row.get("id")?,
@@ -413,8 +398,6 @@ impl AppState {
             current_phase: row.get("current_phase")?,
             format_id: row.get("format_id")?,
             format_note: row.get("format_note")?,
-            subtitle_languages,
-            write_auto_subtitles,
             ext: row.get("ext")?,
             video_codec: row.get("video_codec").ok().flatten(),
             audio_codec: row.get("audio_codec").ok().flatten(),
@@ -521,8 +504,6 @@ impl AppState {
             .selected_items
             .as_ref()
             .and_then(|items| serde_json::to_string(items).ok());
-        let subtitle_languages_json =
-            serde_json::to_string(&to_save.subtitle_languages).unwrap_or_else(|_| "[]".to_string());
         let task = &to_save;
 
         if let Err(e) = conn.execute(
@@ -530,8 +511,7 @@ impl AppState {
                 id, url, title, uploader, duration, duration_string, thumbnail, album, content_type, engine, status,
                 progress_percentage, percentage_known, speed_str, speed_bytes_per_sec, avg_speed_bytes_per_sec,
                 downloaded_bytes, total_bytes, remaining_bytes, eta_str, eta_seconds, elapsed_seconds,
-                active_connections, last_progress_at, current_phase, format_id, format_note,
-                subtitle_languages_json, write_auto_subtitles, ext,
+                active_connections, last_progress_at, current_phase, format_id, format_note, ext,
                 video_codec, audio_codec, resolution_label, is_audio_only, audio_format,
                 audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
                 verified_audio_info, output_path, custom_filename, playlist_mode,
@@ -541,12 +521,12 @@ impl AppState {
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21, ?22,
-                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                ?31, ?32, ?33, ?34, ?35,
-                ?36, ?37, ?38, ?39, ?40,
-                ?41, ?42, ?43, ?44,
-                ?45, ?46, ?47, ?48,
-                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57
+                ?23, ?24, ?25, ?26, ?27, ?28,
+                ?29, ?30, ?31, ?32, ?33,
+                ?34, ?35, ?36, ?37, ?38,
+                ?39, ?40, ?41, ?42,
+                ?43, ?44, ?45, ?46,
+                ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55
             )",
             params![
                 task.id,
@@ -576,8 +556,6 @@ impl AppState {
                 task.current_phase,
                 task.format_id,
                 task.format_note,
-                subtitle_languages_json,
-                if task.write_auto_subtitles { 1 } else { 0 },
                 task.ext,
                 task.video_codec,
                 task.audio_codec,

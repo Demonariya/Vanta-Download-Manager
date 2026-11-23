@@ -693,8 +693,6 @@ mod tests {
                     is_video_only: false,
                 },
             ],
-            subtitles: Vec::new(),
-            automatic_subtitles: Vec::new(),
             is_playlist: true,
             playlist_count: Some(1),
             extractor: "youtube".to_string(),
