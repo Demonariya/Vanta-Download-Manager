@@ -464,9 +464,7 @@ export default function App() {
               onDeleteSelected={() => { void handleDeleteSelectedTask(); }}
               onPauseAll={() => { void api.pauseAll(); }}
               onResumeAll={() => { void api.resumeAll(); }}
-              onOpenSettings={() => setActiveTab('settings')}
-              onOpenDiagnostics={() => setActiveTab('diagnostics')}
-  
+            />
           )}
 
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">

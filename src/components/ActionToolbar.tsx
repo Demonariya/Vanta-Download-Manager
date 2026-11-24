@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Pause, Play, RotateCcw, Trash2 } from 'lucide-react';
+import { Activity, Check, Pause, Play, RotateCcw, Trash2 } from 'lucide-react';
 import { DownloadTask } from '../types';
 
 interface ActionToolbarProps {
