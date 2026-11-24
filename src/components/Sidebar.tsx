@@ -40,13 +40,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const musicCount = tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length;
   const videoCount = tasks.length - musicCount;
 
-  const statusItems: FilterItem[] = [
-    { id: 'all', label: 'All Downloads', icon: ListVideo, count: tasks.length },
-    { id: 'active', label: 'Downloading', icon: Download, count: downloadingCount },
-    { id: 'paused', label: 'Paused', icon: PauseCircle, count: pausedCount },
-    { id: 'completed', label: 'Completed', icon: CheckCircle2, count: completedCount },
-    { id: 'failed', label: 'Failed', icon: AlertCircle, count: failedCount },
-  ];
   const mediaItems: FilterItem[] = [
     { id: 'audio', label: 'Music', icon: Music2, count: musicCount },
     { id: 'video', label: 'Video', icon: Video, count: videoCount },
