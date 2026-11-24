@@ -191,7 +191,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={handleCheckUpdates}
+            onClick={() => handleCheckUpdates()}
             disabled={isCheckingUpdates || Boolean(updatingEngine)}
             className="px-3 py-1.5 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] disabled:opacity-50 border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-colors"
           >

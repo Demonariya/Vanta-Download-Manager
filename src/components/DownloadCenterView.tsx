@@ -54,6 +54,8 @@ interface DownloadCenterViewProps {
   selectedQueueId: string;
   onSelectQueue: (id: string) => void;
   onTasksChanged: (tasks: DownloadTask[]) => void;
+  /** Backward-compatible prop used by older view fixtures; queues are managed in the Sidebar. */
+  onQueuesChanged?: (queues: DownloadQueue[]) => void;
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
   searchQuery: string;
