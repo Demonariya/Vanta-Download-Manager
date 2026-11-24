@@ -6,6 +6,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use vanta_lib::commands::*;
 use vanta_lib::logging;
 use vanta_lib::AppState;
+use std::time::Duration;
 
 fn main() {
     let cli_args: Vec<String> = std::env::args().collect();
@@ -88,6 +89,17 @@ fn main() {
                     schedule_next(app.handle(), &state);
                 }
             }
+
+            // Re-evaluate the scheduler window periodically so start/stop boundaries
+            // are enforced even when the user leaves the application running.
+            let scheduler_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    scheduler_tick(&scheduler_app);
+                }
+            });
+
             if start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
