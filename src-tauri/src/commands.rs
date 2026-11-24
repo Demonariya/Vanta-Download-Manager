@@ -742,13 +742,27 @@ pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
     Ok(queues)
 }
 
+fn should_resume_queue_paused_task(
+    task_queue_id: &str,
+    status: &TaskStatus,
+    current_phase: &str,
+    queue_id: &str,
+) -> bool {
+    task_queue_id == queue_id
+        && *status == TaskStatus::Paused
+        && current_phase == "Paused by queue"
+}
+
 #[tauri::command]
 pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
     state.set_queue_paused(&id, false)?;
     for mut task in state.get_tasks().into_iter().filter(|task| {
-        task.queue_id == id
-            && task.status == TaskStatus::Paused
-            && task.current_phase == "Paused by queue"
+        should_resume_queue_paused_task(
+            &task.queue_id,
+            &task.status,
+            &task.current_phase,
+            &id,
+        )
     }) {
         task.status = TaskStatus::Queued;
         task.current_phase = "Queued in active queue".to_string();
@@ -3379,6 +3393,25 @@ mod scheduler_window_tests {
             pause_on_stop: true,
             days,
         }
+    }
+
+    #[test]
+    fn queue_start_only_resumes_tasks_paused_by_that_queue() {
+        assert!(should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by queue", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by user", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by scheduler", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_b", &TaskStatus::Paused, "Paused by queue", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
+        ));
     }
 
     #[test]
