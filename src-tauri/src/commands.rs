@@ -724,8 +724,18 @@ pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
         .filter(|task| task.queue_id == id && (task.status.is_active() || task.status == TaskStatus::Queued))
         .map(|task| task.id)
         .collect();
+
+    // Only tasks paused by this queue operation are resumed when the queue starts.
+    // A user's manually paused downloads and scheduler-paused downloads remain paused.
     for task_id in task_ids {
-        pause_task(app.clone(), state.clone(), task_id)?;
+        pause_task(app.clone(), state.clone(), task_id.clone())?;
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            if task.status == TaskStatus::Paused {
+                task.current_phase = "Paused by queue".to_string();
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+            }
+        }
     }
     let queues = state.get_queues();
     let _ = app.emit("queues_updated", &queues);
@@ -735,7 +745,11 @@ pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
 #[tauri::command]
 pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
     state.set_queue_paused(&id, false)?;
-    for mut task in state.get_tasks().into_iter().filter(|task| task.queue_id == id && task.status == TaskStatus::Paused) {
+    for mut task in state.get_tasks().into_iter().filter(|task| {
+        task.queue_id == id
+            && task.status == TaskStatus::Paused
+            && task.current_phase == "Paused by queue"
+    }) {
         task.status = TaskStatus::Queued;
         task.current_phase = "Queued in active queue".to_string();
         state.upsert_task(&task);
