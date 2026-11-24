@@ -1,6 +1,10 @@
 import React from 'react';
 import {
   ListVideo,
+  Music2,
+  Video,
+  CheckCircle2,
+  Clock3,
   PlusCircle,
   History,
   Terminal,
@@ -55,6 +59,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: ListVideo,
       count: activeCount > 0 ? activeCount : undefined,
     },
+
+    { id: 'downloads', label: 'Music', icon: Music2 },
+    { id: 'downloads', label: 'Video', icon: Video },
+    { id: 'history', label: 'Finished', icon: CheckCircle2 },
+    { id: 'history', label: 'Unfinished', icon: Clock3 },
     {
       id: 'new-download',
       label: 'New Download',
