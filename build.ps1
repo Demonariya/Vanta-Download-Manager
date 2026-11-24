@@ -448,7 +448,7 @@ if ([string]::IsNullOrWhiteSpace($buildScriptPath)) {
     $buildScriptPath = $MyInvocation.MyCommand.Path
 }
 $buildScriptDir = if (-not [string]::IsNullOrWhiteSpace($buildScriptPath)) {
-    Split-Path -LiteralPath (Resolve-Path -LiteralPath $buildScriptPath).Path -Parent
+    [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($buildScriptPath))
 } else {
     Resolve-RepoRoot
 }

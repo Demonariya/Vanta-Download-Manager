@@ -324,8 +324,6 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0",
             "ALTER TABLE tasks ADD COLUMN queue_id TEXT DEFAULT 'main'",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
-            "ALTER TABLE tasks ADD COLUMN subtitle_languages_json TEXT",
-            "ALTER TABLE tasks ADD COLUMN write_auto_subtitles INTEGER DEFAULT 0",
             "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
         ];
         for sql in migrations {
