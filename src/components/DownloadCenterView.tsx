@@ -281,14 +281,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
 
   const tableGridClassName = 'grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3';
-  const quickFilters: Array<{ id: QueueScopeFilter; label: string; count: number }> = [
-    { id: 'all', label: 'All Downloads', count: queueTasks.length },
-    { id: 'active', label: 'Downloading', count: activeCount },
-    { id: 'paused', label: 'Paused', count: pausedCount },
-    { id: 'completed', label: 'Completed', count: completedCount },
-    { id: 'failed', label: 'Failed', count: failedCount },
-  ];
-
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
       {/* Missing Engine Inline Alert (only shown when missing) */}
@@ -403,31 +395,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
           )}
         </div>
       </div>
-
-      {/* Unified IDM-style download status filters */}
-      <nav aria-label="Download status filters" className="flex items-center gap-1.5 overflow-x-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-1.5">
-        {quickFilters.map((filter) => {
-          const active = scopeFilter === filter.id;
-          return (
-            <button
-              key={filter.id}
-              type="button"
-              aria-pressed={active}
-              onClick={() => setScopeFilter?.(filter.id)}
-              className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                active
-                  ? 'bg-[var(--vanta-accent)] text-white shadow-sm'
-                  : 'text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]'
-              }`}
-            >
-              <span>{filter.label}</span>
-              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-mono tabular-nums ${
-                active ? 'bg-white/15 text-white' : 'bg-[var(--vanta-surface-2)] text-[var(--vanta-muted)]'
-              }`}>{filter.count}</span>
-            </button>
-          );
-        })}
-      </nav>
 
       {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
