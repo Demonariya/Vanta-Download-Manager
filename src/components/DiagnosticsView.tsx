@@ -27,7 +27,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 
 interface DiagnosticsViewProps {
   engineStatus: EngineStatusMap | null;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   installProgress?: Record<string, EngineInstallProgress>;
 }
 
@@ -76,7 +76,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
     try {
       const res = await api.runDiagnostics();
       setResults(res.results);
-      onRefresh();
+      await onRefresh();
     } catch {
       // ignore
     } finally {
@@ -84,9 +84,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
     }
   };
 
-  const handleCheckUpdates = async () => {
+  const handleCheckUpdates = async (preserveResults = false) => {
     setIsCheckingUpdates(true);
-    setUpdateResults(null);
+    if (!preserveResults) setUpdateResults(null);
     try {
       const data = await api.checkEngineUpdates();
       setUpdatesInfo(data);
@@ -104,8 +104,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
       setUpdateResults((prev) =>
         prev ? [...prev.filter((r) => r.engine !== res.engine), res] : [res]
       );
-      onRefresh();
-      handleCheckUpdates();
+      await onRefresh();
+      await loadManagedInfo();
+      await handleCheckUpdates(true);
     } catch (err: any) {
       setUpdateResults((prev) => [
         ...(prev || []),
@@ -117,6 +118,8 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           message: err.message || 'Update failed',
         },
       ]);
+      await onRefresh();
+      await handleCheckUpdates(true);
     } finally {
       setUpdatingEngine(null);
     }
@@ -129,7 +132,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
       setUpdateResults((prev) =>
         prev ? [...prev.filter((r) => r.engine !== res.engine), res] : [res]
       );
-      onRefresh();
+      await onRefresh();
+      await loadManagedInfo();
+      await handleCheckUpdates(true);
     } catch (err: any) {
       setUpdateResults((prev) => [
         ...(prev || []),
@@ -141,6 +146,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           message: err.message || 'Removal failed',
         },
       ]);
+      await onRefresh();
     } finally {
       setUpdatingEngine(null);
     }
@@ -151,11 +157,13 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
     try {
       const res = await api.updateAllEngines();
       setUpdateResults(res.results);
-      onRefresh();
-      handleCheckUpdates();
-      loadManagedInfo();
+      await onRefresh();
+      await loadManagedInfo();
+      await handleCheckUpdates(true);
     } catch (err: any) {
       console.error('Update all failed:', err);
+      await onRefresh();
+      await handleCheckUpdates(true);
     } finally {
       setUpdatingEngine(null);
     }

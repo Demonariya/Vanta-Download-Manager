@@ -999,79 +999,67 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
     res
 }
 
+fn invalidate_engine_status_cache(state: &AppState) {
+    let mut cache = state
+        .cached_engine_status
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *cache = None;
+}
+
 #[tauri::command]
 pub async fn check_engine_updates() -> Result<HashMap<String, EngineUpdateInfo>, String> {
-    let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
-        .await
-        .map_err(|e| format!("Update check failed: {}", e))?;
-
-    let mut updates = HashMap::new();
-    updates.insert(
-        "ytdlp".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ytdlp.version.clone(),
-            latest_version: status.ytdlp.version,
-            update_available: !status.ytdlp.available,
-        },
-    );
-    updates.insert(
-        "spotdl".to_string(),
-        EngineUpdateInfo {
-            current_version: status.spotdl.version.clone(),
-            latest_version: status.spotdl.version,
-            update_available: !status.spotdl.available,
-        },
-    );
-    updates.insert(
-        "ffmpeg".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ffmpeg.version.clone(),
-            latest_version: status.ffmpeg.version,
-            update_available: !status.ffmpeg.available,
-        },
-    );
-    updates.insert(
-        "ffprobe".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ffprobe.version.clone(),
-            latest_version: status.ffprobe.version,
-            update_available: !status.ffprobe.available,
-        },
-    );
-    Ok(updates)
+    EngineManager::check_engine_updates().await
 }
 
 #[tauri::command]
 pub async fn install_engine(
     app: AppHandle,
+    state: State<'_, AppState>,
     name: String,
     force: Option<bool>,
 ) -> Result<EngineUpdateResult, String> {
-    Ok(EngineManager::install_engine_async(Some(&app), &name, force.unwrap_or(false)).await)
+    let result = EngineManager::install_engine_async(Some(&app), &name, force.unwrap_or(false)).await;
+    invalidate_engine_status_cache(&state);
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn install_all_engines(
     app: AppHandle,
+    state: State<'_, AppState>,
     include_spotdl: Option<bool>,
     force: Option<bool>,
 ) -> Result<Vec<EngineUpdateResult>, String> {
-    Ok(EngineManager::install_all_required_async(
+    let results = EngineManager::install_all_required_async(
         Some(&app),
         include_spotdl.unwrap_or(true),
         force.unwrap_or(false),
     )
-    .await)
+    .await;
+    invalidate_engine_status_cache(&state);
+    Ok(results)
 }
 
 #[tauri::command]
-pub async fn update_engine(app: AppHandle, name: String) -> Result<EngineUpdateResult, String> {
-    Ok(EngineManager::update_engine_async(Some(&app), &name).await)
+pub async fn update_engine(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<EngineUpdateResult, String> {
+    let result = EngineManager::update_engine_async(Some(&app), &name).await;
+    invalidate_engine_status_cache(&state);
+    Ok(result)
 }
 
 #[tauri::command]
-pub async fn update_all_engines(app: AppHandle) -> Result<Vec<EngineUpdateResult>, String> {
-    Ok(EngineManager::install_all_required_async(Some(&app), true, true).await)
+pub async fn update_all_engines(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<EngineUpdateResult>, String> {
+    let results = EngineManager::install_all_required_async(Some(&app), true, true).await;
+    invalidate_engine_status_cache(&state);
+    Ok(results)
 }
 
 #[tauri::command]

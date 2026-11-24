@@ -23,21 +23,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-const YTDLP_WIN_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-const YTDLP_UNIX_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
-const YTDLP_SHA256_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
+const YTDLP_RELEASE_REPO: &str = "yt-dlp/yt-dlp";
+const SPOTDL_RELEASE_REPO: &str = "spotDL/spotify-downloader";
+const FFMPEG_RELEASE_REPO: &str = "FFmpeg-Builds/FFmpeg-Builds";
 
-const FFMPEG_WIN_ZIP_NAME: &str = "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip";
-const FFMPEG_WIN_URL: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip";
-const FFMPEG_CHECKSUMS_URL: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256";
-
-const SPOTDL_PINNED_VERSION: &str = "v4.6.0";
-const SPOTDL_WIN_URL: &str =
-    "https://github.com/spotDL/spotify-downloader/releases/download/v4.6.0/spotdl-4.6.0-win32.exe";
-const SPOTDL_WIN_SHA256: &str =
-    "e674030c3337cd74120a3a086887ce1a5195765cfc17e1971a2807e0a398b505";
+// BtbN publishes this rolling master build asset on its "latest" release.
+// The asset name is stable while the archive contents and SHA-256 change per build.
+const FFMPEG_WIN_ZIP_NAME: &str = "ffmpeg-master-latest-win64-gpl-shared.zip";
 
 static ENGINE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -82,6 +74,14 @@ pub struct AdminOpResult {
     pub success: bool,
     pub version: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LatestReleaseAsset {
+    version: String,
+    url: String,
+    sha256: String,
+    updated_at: String,
 }
 
 pub struct EngineManager;
@@ -1154,6 +1154,8 @@ impl EngineManager {
             "pip",
             "install",
             "--upgrade",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
             "--no-warn-script-location",
             "spotdl",
         ]);
@@ -1451,6 +1453,260 @@ impl EngineManager {
         }
     }
 
+    async fn fetch_latest_github_release(
+        client: &reqwest::Client,
+        repository: &str,
+    ) -> Result<serde_json::Value, String> {
+        let url = format!("https://api.github.com/repos/{}/releases/latest", repository);
+        let response = client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|error| format!("Could not query the latest {} release: {}", repository, error))?
+            .error_for_status()
+            .map_err(|error| format!("GitHub returned an error for the latest {} release: {}", repository, error))?;
+
+        response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| format!("Could not parse the latest {} release metadata: {}", repository, error))
+    }
+
+    fn release_asset(
+        release: &serde_json::Value,
+        matches_name: impl Fn(&str) -> bool,
+    ) -> Result<LatestReleaseAsset, String> {
+        let version = release
+            .get("tag_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if version.is_empty() {
+            return Err("The upstream release did not contain a version tag.".to_string());
+        }
+
+        let assets = release
+            .get("assets")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("Release {} did not provide an asset list.", version))?;
+        let asset = assets
+            .iter()
+            .find(|asset| {
+                asset
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|name| matches_name(name))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| format!("Required binary asset was not found in upstream release {}.", version))?;
+
+        let asset_name = asset
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let url = asset
+            .get("browser_download_url")
+            .and_then(|value| value.as_str())
+            .filter(|value| value.starts_with("https://"))
+            .ok_or_else(|| format!("Upstream asset '{}' has no valid HTTPS download URL.", asset_name))?
+            .to_string();
+        let raw_digest = asset
+            .get("digest")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let sha256 = raw_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(raw_digest)
+            .to_ascii_lowercase();
+        if sha256.len() != 64 || !sha256.chars().all(|character| character.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Upstream asset '{}' did not publish a valid SHA-256 digest; refusing an unverifiable update.",
+                asset_name
+            ));
+        }
+        let updated_at = asset
+            .get("updated_at")
+            .and_then(|value| value.as_str())
+            .or_else(|| release.get("published_at").and_then(|value| value.as_str()))
+            .unwrap_or_default()
+            .to_string();
+
+        Ok(LatestReleaseAsset {
+            version,
+            url,
+            sha256,
+            updated_at,
+        })
+    }
+
+    fn normalize_release_version(value: &str) -> String {
+        // CLI output may be just "4.6.0" or include a product label such as
+        // "spotdl, version 4.6.0". Compare the actual trailing version token.
+        let token = value
+            .split_whitespace()
+            .last()
+            .unwrap_or(value)
+            .trim()
+            .trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '.' && character != '-' && character != '+'
+            });
+        token
+            .strip_prefix('v')
+            .or_else(|| token.strip_prefix('V'))
+            .unwrap_or(token)
+            .to_ascii_lowercase()
+    }
+
+    fn is_managed_binary(path: &str, managed_dir: &Path) -> bool {
+        !path.trim().is_empty() && Path::new(path).starts_with(managed_dir)
+    }
+
+    pub async fn check_engine_updates(
+    ) -> Result<HashMap<String, crate::models::EngineUpdateInfo>, String> {
+        use crate::models::EngineUpdateInfo;
+
+        let status = tokio::task::spawn_blocking(Self::get_engine_status)
+            .await
+            .map_err(|error| format!("Engine status scan failed: {}", error))?;
+        let manifest = Self::load_manifest();
+        let client = reqwest::Client::builder()
+            .user_agent("VANTA-Download-Manager")
+            .build()
+            .map_err(|error| format!("Could not create update-check client: {}", error))?;
+
+        let mut updates = HashMap::new();
+
+        // yt-dlp: compare the installed manifest digest with the latest official release asset.
+        match Self::fetch_latest_github_release(&client, YTDLP_RELEASE_REPO).await
+            .and_then(|release| {
+                Self::release_asset(&release, |name| {
+                    name == if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" }
+                })
+            }) {
+            Ok(latest) => {
+                let current_record = manifest.engines.get("yt-dlp");
+                let digest_changed = current_record
+                    .map(|record| record.sha256 != latest.sha256)
+                    .unwrap_or(true);
+                let current_is_managed = Self::is_managed_binary(&status.ytdlp.path, &Self::ytdlp_dir());
+                let version_changed = Self::normalize_release_version(&status.ytdlp.version)
+                    != Self::normalize_release_version(&latest.version);
+                let update_available = !status.ytdlp.available
+                    || !current_is_managed
+                    || digest_changed
+                    || version_changed;
+                updates.insert("ytdlp".to_string(), EngineUpdateInfo {
+                    current_version: if status.ytdlp.version.is_empty() { "Not installed".to_string() } else { status.ytdlp.version.clone() },
+                    latest_version: latest.version,
+                    update_available,
+                });
+            }
+            Err(error) => {
+                logging::warn("engines", &format!("Could not check yt-dlp updates: {}", error));
+                updates.insert("ytdlp".to_string(), EngineUpdateInfo {
+                    current_version: status.ytdlp.version.clone(),
+                    latest_version: "Unavailable".to_string(),
+                    update_available: false,
+                });
+            }
+        }
+
+        // spotDL: the Python installer tracks the upstream release version; the
+        // Windows standalone fallback uses the release asset digest.
+        match Self::fetch_latest_github_release(&client, SPOTDL_RELEASE_REPO).await {
+            Ok(release) => {
+                let latest_version = release
+                    .get("tag_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let latest_normalized = Self::normalize_release_version(&latest_version);
+                let current_normalized = Self::normalize_release_version(&status.spotdl.version);
+                let current_record = manifest.engines.get("spotdl");
+                let current_is_managed = Self::is_managed_binary(&status.spotdl.path, &Self::spotdl_dir());
+                let digest_matches = current_record
+                    .filter(|record| record.sha256 != "venv-managed")
+                    .map(|record| {
+                        Self::release_asset(&release, |name| {
+                            name.starts_with("spotdl-") && name.ends_with("-win32.exe")
+                        })
+                        .map(|asset| record.sha256 == asset.sha256)
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let installed_via_venv = current_record
+                    .map(|record| record.sha256 == "venv-managed")
+                    .unwrap_or(false);
+                let update_available = !status.spotdl.available
+                    || !current_is_managed
+                    || if installed_via_venv {
+                        current_normalized != latest_normalized
+                    } else if current_record.is_some() {
+                        !digest_matches
+                    } else {
+                        current_normalized != latest_normalized
+                    };
+                updates.insert("spotdl".to_string(), EngineUpdateInfo {
+                    current_version: if status.spotdl.version.is_empty() { "Not installed".to_string() } else { status.spotdl.version.clone() },
+                    latest_version: latest_normalized,
+                    update_available,
+                });
+            }
+            Err(error) => {
+                logging::warn("engines", &format!("Could not check spotDL updates: {}", error));
+                updates.insert("spotdl".to_string(), EngineUpdateInfo {
+                    current_version: status.spotdl.version.clone(),
+                    latest_version: "Unavailable".to_string(),
+                    update_available: false,
+                });
+            }
+        }
+
+        // FFmpeg: BtbN's rolling master asset is updated in-place. Compare its
+        // GitHub-published SHA-256 with the archive digest stored at installation.
+        match Self::fetch_latest_github_release(&client, FFMPEG_RELEASE_REPO).await
+            .and_then(|release| Self::release_asset(&release, |name| name == FFMPEG_WIN_ZIP_NAME)) {
+            Ok(latest) => {
+                let current_record = manifest.engines.get("ffmpeg");
+                let current_is_managed = Self::is_managed_binary(&status.ffmpeg.path, &Self::ffmpeg_dir());
+                let update_available = !status.ffmpeg.available
+                    || !status.ffprobe.available
+                    || !current_is_managed
+                    || current_record.map(|record| record.sha256 != latest.sha256).unwrap_or(true);
+                let build_date = latest.updated_at.split('T').next().unwrap_or("latest");
+                let latest_label = format!("Master build ({})", build_date);
+                updates.insert("ffmpeg".to_string(), EngineUpdateInfo {
+                    current_version: status.ffmpeg.version.clone(),
+                    latest_version: latest_label.clone(),
+                    update_available,
+                });
+                updates.insert("ffprobe".to_string(), EngineUpdateInfo {
+                    current_version: status.ffprobe.version.clone(),
+                    latest_version: latest_label,
+                    update_available,
+                });
+            }
+            Err(error) => {
+                logging::warn("engines", &format!("Could not check FFmpeg updates: {}", error));
+                for (name, current) in [
+                    ("ffmpeg", status.ffmpeg.version.clone()),
+                    ("ffprobe", status.ffprobe.version.clone()),
+                ] {
+                    updates.insert(name.to_string(), EngineUpdateInfo {
+                        current_version: current,
+                        latest_version: "Unavailable".to_string(),
+                        update_available: false,
+                    });
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
     pub async fn install_engine_async(
         app: Option<&AppHandle>,
         name: &str,
@@ -1544,23 +1800,13 @@ impl EngineManager {
         let result: Result<String, String> = match normalized {
             "yt-dlp" => async {
                 let asset_name = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
-                let url = if cfg!(windows) { YTDLP_WIN_URL } else { YTDLP_UNIX_URL };
-                let checksum_txt = client
-                    .get(YTDLP_SHA256_URL)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed fetching yt-dlp SHA-256 manifest: {}", e))?
-                    .error_for_status()
-                    .map_err(|e| format!("Failed fetching yt-dlp SHA-256 manifest: {}", e))?
-                    .text()
-                    .await
-                    .map_err(|e| format!("Failed reading yt-dlp SHA-256 manifest: {}", e))?;
-
-                let expected_sha = Self::parse_sha256_for_filename(&checksum_txt, asset_name)
-                    .ok_or_else(|| format!("SHA-256 checksum entry for '{}' missing in upstream release", asset_name))?;
+                let release = Self::fetch_latest_github_release(&client, YTDLP_RELEASE_REPO).await?;
+                let latest_asset = Self::release_asset(&release, |name| name == asset_name)?;
+                let url = latest_asset.url.clone();
+                let expected_sha = latest_asset.sha256.clone();
 
                 let part_path = staging_dir.join(format!("{}.part", asset_name));
-                Self::download_to_staging(&client, app, "yt-dlp", url, &part_path).await?;
+                Self::download_to_staging(&client, app, "yt-dlp", &url, &part_path).await?;
 
                 Self::emit_install_progress(
                     app,
@@ -1599,7 +1845,7 @@ impl EngineManager {
                     EngineManifestRecord {
                         version: version.clone(),
                         sha256: actual_sha,
-                        source_url: url.to_string(),
+                        source_url: url.clone(),
                         installed_at: chrono::Utc::now().to_rfc3339(),
                     },
                 )?;
@@ -1612,22 +1858,13 @@ impl EngineManager {
                     return Err("Managed automatic FFmpeg bundle is configured for Windows x64; install ffmpeg & ffprobe via system package manager on Unix.".to_string());
                 }
 
-                let checksum_txt = client
-                    .get(FFMPEG_CHECKSUMS_URL)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed fetching FFmpeg SHA-256 manifest: {}", e))?
-                    .error_for_status()
-                    .map_err(|e| format!("Failed fetching FFmpeg SHA-256 manifest: {}", e))?
-                    .text()
-                    .await
-                    .map_err(|e| format!("Failed reading FFmpeg SHA-256 manifest: {}", e))?;
-
-                let expected_sha = Self::parse_sha256_for_filename(&checksum_txt, FFMPEG_WIN_ZIP_NAME)
-                    .ok_or_else(|| format!("SHA-256 checksum entry for '{}' missing", FFMPEG_WIN_ZIP_NAME))?;
+                let release = Self::fetch_latest_github_release(&client, FFMPEG_RELEASE_REPO).await?;
+                let latest_asset = Self::release_asset(&release, |name| name == FFMPEG_WIN_ZIP_NAME)?;
+                let expected_sha = latest_asset.sha256.clone();
+                let source_url = latest_asset.url.clone();
 
                 let archive_part = staging_dir.join("ffmpeg.zip.part");
-                Self::download_to_staging(&client, app, "ffmpeg", FFMPEG_WIN_URL, &archive_part).await?;
+                Self::download_to_staging(&client, app, "ffmpeg", &source_url, &archive_part).await?;
 
                 Self::emit_install_progress(
                     app,
@@ -1710,7 +1947,7 @@ impl EngineManager {
                     EngineManifestRecord {
                         version: clean_ver.clone(),
                         sha256: actual_sha,
-                        source_url: FFMPEG_WIN_URL.to_string(),
+                        source_url: source_url.clone(),
                         installed_at: chrono::Utc::now().to_rfc3339(),
                     },
                 )?;
@@ -1795,9 +2032,13 @@ impl EngineManager {
                 }
 
                 // Fallback when no Python executable is configured or installed on Windows:
-                // install SHA-256 verified standalone spotdl.exe into Engine\spotdl\spotdl.exe
+                // resolve the current official standalone asset and verify its published SHA-256.
+                let release = Self::fetch_latest_github_release(&client, SPOTDL_RELEASE_REPO).await?;
+                let latest_asset = Self::release_asset(&release, |name| {
+                    name.starts_with("spotdl-") && name.ends_with("-win32.exe")
+                })?;
                 let part_path = staging_dir.join("spotdl.exe.part");
-                Self::download_to_staging(&client, app, "spotdl", SPOTDL_WIN_URL, &part_path).await?;
+                Self::download_to_staging(&client, app, "spotdl", &latest_asset.url, &part_path).await?;
 
                 Self::emit_install_progress(
                     app,
@@ -1807,15 +2048,15 @@ impl EngineManager {
                     90.0,
                     0,
                     0,
-                    format!("Verifying spotDL {} digest...", SPOTDL_PINNED_VERSION),
+                    format!("Verifying spotDL {} digest...", latest_asset.version),
                     None,
                 );
 
                 let actual_sha = Self::compute_sha256_file(&part_path)?;
-                if actual_sha != SPOTDL_WIN_SHA256 {
+                if actual_sha != latest_asset.sha256 {
                     return Err(format!(
                         "SHA-256 verification failed for spotDL (expected {}, got {})",
-                        SPOTDL_WIN_SHA256, actual_sha
+                        latest_asset.sha256, actual_sha
                     ));
                 }
 
@@ -1834,7 +2075,7 @@ impl EngineManager {
                     EngineManifestRecord {
                         version: version.clone(),
                         sha256: actual_sha,
-                        source_url: SPOTDL_WIN_URL.to_string(),
+                        source_url: latest_asset.url.clone(),
                         installed_at: chrono::Utc::now().to_rfc3339(),
                     },
                 )?;
@@ -2972,6 +3213,44 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
             EngineManager::parse_sha256_for_filename(sample, "nonexistent.exe"),
             None
         );
+    }
+
+    #[test]
+    fn test_normalize_release_versions() {
+        assert_eq!(EngineManager::normalize_release_version("v4.6.0"), "4.6.0");
+        assert_eq!(EngineManager::normalize_release_version("4.6.0"), "4.6.0");
+        assert_eq!(EngineManager::normalize_release_version("spotdl, version 4.6.0"), "4.6.0");
+        assert_eq!(EngineManager::normalize_release_version("2026.11.23"), "2026.11.23");
+    }
+
+    #[test]
+    fn test_release_asset_uses_upstream_digest_and_download_url() {
+        let release = serde_json::json!({
+            "tag_name": "2026.11.23",
+            "published_at": "2026-11-23T23:49:56Z",
+            "assets": [{
+                "name": "yt-dlp.exe",
+                "browser_download_url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.11.23/yt-dlp.exe",
+                "digest": "sha256:622ed48023cac1daa52a3bf3a6ac38f03514de214b5f0fa069389fd0f6d17e5c",
+                "updated_at": "2026-11-23T23:49:50Z"
+            }]
+        });
+        let asset = EngineManager::release_asset(&release, |name| name == "yt-dlp.exe").unwrap();
+        assert_eq!(asset.version, "2026.11.23");
+        assert_eq!(asset.sha256, "622ed48023cac1daa52a3bf3a6ac38f03514de214b5f0fa069389fd0f6d17e5c");
+        assert_eq!(asset.url, "https://github.com/yt-dlp/yt-dlp/releases/download/2026.11.23/yt-dlp.exe");
+    }
+
+    #[test]
+    fn test_release_asset_rejects_missing_digest() {
+        let release = serde_json::json!({
+            "tag_name": "v1.2.3",
+            "assets": [{
+                "name": "tool.exe",
+                "browser_download_url": "https://example.com/tool.exe"
+            }]
+        });
+        assert!(EngineManager::release_asset(&release, |name| name == "tool.exe").is_err());
     }
 
     #[test]
