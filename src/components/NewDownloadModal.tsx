@@ -44,6 +44,7 @@ import {
 } from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
 import { MediaThumbnail } from './MediaThumbnail';
+import { findTrackLyrics } from '../utils/lyrics';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
@@ -122,6 +123,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [selectedSubtitleLanguages, setSelectedSubtitleLanguages] = useState<string[]>([]);
   const [subtitleDropdownOpen, setSubtitleDropdownOpen] = useState(false);
   const [lrcFile, setLrcFile] = useState<{ name: string; content: string } | null>(null);
+  const [isFindingLyrics, setIsFindingLyrics] = useState(false);
+  const [lyricsSearchMessage, setLyricsSearchMessage] = useState<string | null>(null);
+  const [plainLyricsPreview, setPlainLyricsPreview] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const lastInspectedUrlRef = useRef(initialUrl);
@@ -327,6 +331,43 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
     } catch {
       // ignore
+    }
+  };
+
+  const handleFindLyrics = async () => {
+    const selectedTrack = orderedSpotifyTracks.filter(
+      (track, idx) => selectedPlaylistKeys[trackKey(track, idx)] !== false
+    )[0];
+    const title = selectedTrack?.title || metadata?.title || '';
+    const artist = selectedTrack?.artists?.join(', ') || metadata?.artists?.join(', ') || metadata?.uploader || '';
+    const album = selectedTrack?.album || metadata?.album || undefined;
+    const duration = selectedTrack?.duration || metadata?.duration || undefined;
+
+    if (!title.trim() || !artist.trim()) {
+      setLyricsSearchMessage('Analyze the media URL first so VANTA can identify the track and artist.');
+      return;
+    }
+
+    setIsFindingLyrics(true);
+    setLyricsSearchMessage(null);
+    setPlainLyricsPreview(null);
+    try {
+      const result = await findTrackLyrics({ title, artist, album, duration });
+      if (result.syncedLyrics?.trim()) {
+        setLrcFile({ name: \`\${result.trackName} - \${result.artistName}.lrc\`, content: result.syncedLyrics.trim() });
+        setPlainLyricsPreview(null);
+        setLyricsSearchMessage(\`Found synchronized lyrics: \${result.trackName} — \${result.artistName}\`);
+      } else if (result.plainLyrics?.trim()) {
+        setLrcFile(null);
+        setPlainLyricsPreview(result.plainLyrics.trim());
+        setLyricsSearchMessage('Only plain lyrics were found. They cannot be embedded as synchronized LRC without timestamps.');
+      } else {
+        setLyricsSearchMessage('This track has no available lyrics record.');
+      }
+    } catch (error) {
+      setLyricsSearchMessage(error instanceof Error ? error.message : 'Lyrics search failed.');
+    } finally {
+      setIsFindingLyrics(false);
     }
   };
 
@@ -1547,7 +1588,18 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 <label className="block text-xs font-semibold text-[var(--vanta-text)]">
                   Synchronized lyrics
                 </label>
-                <span className="text-[10px] text-[var(--vanta-muted)]">Optional · .LRC</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void handleFindLyrics(); }}
+                    disabled={isFindingLyrics}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--vanta-accent)]/40 px-2.5 py-1.5 text-[11px] font-medium text-[var(--vanta-accent)] hover:bg-[var(--vanta-accent)]/10 disabled:opacity-50"
+                  >
+                    {isFindingLyrics ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+                    {isFindingLyrics ? 'Searching…' : 'Find Lyrics'}
+                  </button>
+                  <span className="text-[10px] text-[var(--vanta-muted)]">Optional · .LRC</span>
+                </div>
               </div>
               <textarea
                 value={lrcFile?.content || ''}
@@ -1569,8 +1621,17 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 placeholder={'Paste your synchronized LRC text here…\n[00:12.40] First line\n[00:16.20] Next line'}
                 className="w-full resize-y min-h-[92px] rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-[11px] leading-5 font-mono text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:outline-none focus:border-[var(--vanta-accent)]"
               />
+              {lyricsSearchMessage && (
+                <p role="status" className="text-[10px] leading-4 text-[var(--vanta-text-secondary)]">{lyricsSearchMessage}</p>
+              )}
+              {plainLyricsPreview && (
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-medium text-[var(--vanta-muted)]">Plain lyrics preview (not timestamped)</span>
+                  <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 text-[10px] leading-4 text-[var(--vanta-text-secondary)]">{plainLyricsPreview}</pre>
+                </div>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] text-[var(--vanta-muted)]">Paste text directly or import an existing LRC file.</span>
+                <span className="text-[10px] text-[var(--vanta-muted)]">Search online, paste text directly, or import an existing LRC file.</span>
                 <label className="cursor-pointer rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-1.5 text-[11px] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
                   Import .LRC
                   <input type="file" accept=".lrc,text/plain" onChange={handleLrcFileChange} className="hidden" />
