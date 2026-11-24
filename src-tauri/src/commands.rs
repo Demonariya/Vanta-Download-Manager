@@ -9,6 +9,7 @@ use crate::models::{
 };
 use crate::process;
 use crate::state::AppState;
+use chrono::Datelike;
 use id3::{
     frame::{Lyrics as Id3Lyrics, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat},
     Error as Id3Error, ErrorKind as Id3ErrorKind, Tag as Id3Tag, TagLike, Version as Id3Version,
@@ -1448,12 +1449,92 @@ pub fn exit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
+fn scheduler_window_is_open(settings: &AppSettings) -> bool {
+    let scheduler = &settings.scheduler;
+    if !scheduler.enabled {
+        return true;
+    }
+
+    let parse_minutes = |value: &str| -> Option<u32> {
+        let mut parts = value.split(':');
+        let hour = parts.next()?.parse::<u32>().ok()?;
+        let minute = parts.next()?.parse::<u32>().ok()?;
+        if parts.next().is_some() || hour > 23 || minute > 59 {
+            return None;
+        }
+        Some(hour * 60 + minute)
+    };
+
+    let Some(start) = parse_minutes(&scheduler.start_time) else { return true; };
+    let Some(stop) = parse_minutes(&scheduler.stop_time) else { return true; };
+    let now = chrono::Local::now();
+    let current = now.hour() * 60 + now.minute();
+    let today = now.weekday().num_days_from_sunday();
+    let allowed = |day: u32| scheduler.days.is_empty() || scheduler.days.contains(&day);
+
+    if start == stop {
+        return allowed(today);
+    }
+    if start < stop {
+        return allowed(today) && current >= start && current < stop;
+    }
+    if current >= start {
+        return allowed(today);
+    }
+    if current < stop {
+        return allowed((today + 6) % 7);
+    }
+    false
+}
+
+/// Enforces the configured schedule and is called periodically by the desktop runtime.
+pub fn scheduler_tick(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.is_shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let settings = state.get_settings();
+    if scheduler_window_is_open(&settings) {
+        for mut task in state.get_tasks().into_iter().filter(|task| {
+            task.status == TaskStatus::Paused && task.current_phase == "Paused by scheduler"
+        }) {
+            task.status = TaskStatus::Queued;
+            task.current_phase = "Queued by scheduler";
+            state.upsert_task(&task);
+            let _ = app.emit("task_updated", &task);
+        }
+        schedule_next(app, &state);
+        return;
+    }
+
+    if settings.scheduler.pause_on_stop {
+        let active_ids: Vec<String> = state.get_tasks().into_iter()
+            .filter(|task| task.status.is_active())
+            .map(|task| task.id)
+            .collect();
+        for id in active_ids {
+            let _ = pause_task(app.clone(), state.clone(), id.clone());
+            if let Some(mut task) = state.get_task_by_id(&id) {
+                if task.status == TaskStatus::Paused {
+                    task.current_phase = "Paused by scheduler".to_string();
+                    state.upsert_task(&task);
+                    let _ = app.emit("task_updated", &task);
+                }
+            }
+        }
+    }
+}
+
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
     }
 
     let settings = state.get_settings();
+    if !scheduler_window_is_open(&settings) {
+        return;
+    }
     let tasks = state.get_tasks();
     let paused_queues: HashSet<String> = state.get_queues().into_iter()
         .filter(|queue| queue.is_paused)
