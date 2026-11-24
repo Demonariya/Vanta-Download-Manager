@@ -307,6 +307,7 @@ export interface AppSettings {
   clipboard_monitoring?: boolean;
   conflict_strategy?: ConflictStrategy;
   verify_media_on_complete?: boolean;
+  verify_fragments?: boolean;
   tray_minimize_on_close?: boolean;
   scheduler?: SchedulerSettings;
   cookies_browser?: BrowserCookieSource;
