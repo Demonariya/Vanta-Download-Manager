@@ -369,9 +369,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {isMobileOpen && <div className="fixed top-8 inset-x-0 bottom-0 z-40 bg-black/60 backdrop-blur-xs md:hidden" onClick={() => setIsMobileOpen(false)} aria-hidden="true" />}
+      {isMobileOpen && <div className="fixed top-16 inset-x-0 bottom-0 z-40 bg-black/60 backdrop-blur-xs md:hidden" onClick={() => setIsMobileOpen(false)} aria-hidden="true" />}
 
-      <aside className={`fixed top-8 bottom-0 left-0 z-50 w-64 bg-[var(--vanta-surface)] border-r border-[var(--vanta-border)] shadow-2xl transition-transform duration-200 md:hidden overflow-hidden ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`fixed top-16 bottom-0 left-0 z-50 w-64 bg-[var(--vanta-surface)] border-r border-[var(--vanta-border)] shadow-2xl transition-transform duration-200 md:hidden overflow-hidden ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         {renderNavContent(true)}
       </aside>
     </>

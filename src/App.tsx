@@ -421,10 +421,7 @@ export default function App() {
           tasks={tasks}
           queues={queues}
           selectedQueueId={selectedQueueId}
-          onSelectQueue={(id) => {
-            setSelectedQueueId(id);
-            setScopeFilter('all');
-          }}
+          onSelectQueue={(id) => setSelectedQueueId(id)}
           onQueuesChanged={(next) => {
             setQueues(next);
             setSelectedQueueId((current) => current === 'all' || next.some((queue) => queue.id === current) ? current : 'main');
