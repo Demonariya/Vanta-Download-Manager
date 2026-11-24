@@ -453,19 +453,21 @@ export default function App() {
             onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
           />
 
-          <ActionToolbar
-            selectedTask={selectedTask}
-            activeCount={activeCount}
-            pausedCount={pausedCount}
-            onPauseSelected={() => { if (selectedTask) void api.pauseTask(selectedTask.id); }}
-            onResumeSelected={() => { if (selectedTask) void api.resumeTask(selectedTask.id); }}
-            onRetrySelected={() => { if (selectedTask) void api.retryTask(selectedTask.id); }}
-            onDeleteSelected={() => { void handleDeleteSelectedTask(); }}
-            onPauseAll={() => { void api.pauseAll(); }}
-            onResumeAll={() => { void api.resumeAll(); }}
-            onOpenSettings={() => setActiveTab('settings')}
-            onOpenDiagnostics={() => setActiveTab('diagnostics')}
-          />
+          {activeTab === 'downloads' && (
+            <ActionToolbar
+              selectedTask={selectedTask}
+              activeCount={activeCount}
+              pausedCount={pausedCount}
+              onPauseSelected={() => { if (selectedTask) void api.pauseTask(selectedTask.id); }}
+              onResumeSelected={() => { if (selectedTask) void api.resumeTask(selectedTask.id); }}
+              onRetrySelected={() => { if (selectedTask) void api.retryTask(selectedTask.id); }}
+              onDeleteSelected={() => { void handleDeleteSelectedTask(); }}
+              onPauseAll={() => { void api.pauseAll(); }}
+              onResumeAll={() => { void api.resumeAll(); }}
+              onOpenSettings={() => setActiveTab('settings')}
+              onOpenDiagnostics={() => setActiveTab('diagnostics')}
+  
+          )}
 
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
             <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-4 select-text">
@@ -536,12 +538,14 @@ export default function App() {
               )}
             </main>
 
-            {/* Download Details Docked / Slide-Over Inspector */}
-            <DownloadDetailsDrawer
-              task={selectedTask}
-              onClose={() => setSelectedTaskId(null)}
-              onRetryTask={(id) => api.retryTask(id)}
-            />
+            {/* Keep the download inspector inside the download workspace only. */}
+            {activeTab === 'downloads' && selectedTask && (
+              <DownloadDetailsDrawer
+                task={selectedTask}
+                onClose={() => setSelectedTaskId(null)}
+                onRetryTask={(id) => api.retryTask(id)}
+              />
+            )}
           </div>
         </div>
       </div>

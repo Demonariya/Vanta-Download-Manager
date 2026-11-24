@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Check, Pause, Play, RotateCcw, Settings, Terminal, Trash2 } from 'lucide-react';
+import { Check, Pause, Play, RotateCcw, Trash2 } from 'lucide-react';
 import { DownloadTask } from '../types';
 
 interface ActionToolbarProps {
@@ -12,8 +12,6 @@ interface ActionToolbarProps {
   onDeleteSelected: () => void;
   onPauseAll: () => void;
   onResumeAll: () => void;
-  onOpenSettings: () => void;
-  onOpenDiagnostics: () => void;
 }
 
 interface ToolbarButtonProps {
@@ -50,7 +48,7 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({
 
 export const ActionToolbar: React.FC<ActionToolbarProps> = ({
   selectedTask, activeCount, pausedCount, onPauseSelected, onResumeSelected,
-  onRetrySelected, onDeleteSelected, onPauseAll, onResumeAll, onOpenSettings, onOpenDiagnostics,
+  onRetrySelected, onDeleteSelected, onPauseAll, onResumeAll,
 }) => {
   const canPause = Boolean(selectedTask && [
     'connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying', 'queued',
@@ -68,9 +66,6 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
       <ToolbarButton label="Resume All" icon={Check} onClick={onResumeAll} disabled={pausedCount === 0} />
       <div className="mx-1 h-5 shrink-0 border-l border-[var(--vanta-border-strong)]" />
       <ToolbarButton label="Delete Selected" icon={Trash2} onClick={onDeleteSelected} disabled={!selectedTask} danger />
-      <div className="mx-1 h-5 shrink-0 border-l border-[var(--vanta-border-strong)]" />
-      <ToolbarButton label="Options" icon={Settings} onClick={onOpenSettings} />
-      <ToolbarButton label="Engine Management" icon={Terminal} onClick={onOpenDiagnostics} />
       <span className="ml-auto hidden max-w-[34%] truncate text-[10px] text-[var(--vanta-muted)] xl:block" title={selectedTask?.title || 'No download selected'}>
         {selectedTask?.title || 'No download selected'}
       </span>
