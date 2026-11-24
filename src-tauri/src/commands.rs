@@ -2408,14 +2408,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "after_move:VANTA_OUTPUT_FILE:%(filepath)s".to_string(),
             "-o".to_string(),
             template.to_string_lossy().to_string(),
+            // Be conservative with segmented streams: transient CDN failures are common,
+            // but silently skipping a fragment can produce a playable yet incomplete file.
             "--retries".to_string(),
-            "10".to_string(),
+            "15".to_string(),
             "--fragment-retries".to_string(),
-            "10".to_string(),
+            "20".to_string(),
             "--file-access-retries".to_string(),
-            "5".to_string(),
+            "10".to_string(),
+            "--retry-sleep".to_string(),
+            "fragment:exp=1:60".to_string(),
             "--socket-timeout".to_string(),
-            "30".to_string(),
+            "60".to_string(),
+            "--extractor-retries".to_string(),
+            "5".to_string(),
+            "--abort-on-unavailable-fragments".to_string(),
         ];
 
         if task.playlist_mode.as_deref() == Some("playlist") {
@@ -2465,9 +2472,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
         }
 
-        if settings.fragment_concurrency > 1 {
+        // Keep segmented downloads reliable on CDNs that throttle parallel fragment requests.
+        // A low concurrency is slower on paper but avoids frequent 403/timeouts and missing chunks.
+        let safe_fragment_concurrency = settings.fragment_concurrency.clamp(1, 2);
+        if safe_fragment_concurrency > 1 {
             args.push("-N".to_string());
-            args.push(settings.fragment_concurrency.to_string());
+            args.push(safe_fragment_concurrency.to_string());
         }
 
         if task.retries > 0 {

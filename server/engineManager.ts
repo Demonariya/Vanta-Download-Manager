@@ -1204,12 +1204,15 @@ export class EngineManager {
       'after_move:VANTA_OUTPUT_FILE:%(filepath)s',
       '-o',
       outTemplate,
-      '--retries', '10',
-      '--fragment-retries', '10',
-      '--file-access-retries', '5',
-      '--retry-sleep', 'fragment:exp=1:30',
-      '--socket-timeout', '30',
-      '--extractor-retries', '3',
+      // Retry transient CDN/segment failures and never report a file as complete
+      // when yt-dlp had to skip an unavailable media fragment.
+      '--retries', '15',
+      '--fragment-retries', '20',
+      '--file-access-retries', '10',
+      '--retry-sleep', 'fragment:exp=1:60',
+      '--socket-timeout', '60',
+      '--extractor-retries', '5',
+      '--abort-on-unavailable-fragments',
     ];
 
     if (task.playlist_mode === 'playlist') {
@@ -1290,8 +1293,10 @@ export class EngineManager {
       args.push('--embed-metadata');
     }
 
-    if (settings.fragment_concurrency > 1) {
-      args.push('-N', String(settings.fragment_concurrency));
+    // Conservative concurrency reduces CDN throttling and missing HLS/DASH fragments.
+    const safeFragmentConcurrency = Math.max(1, Math.min(2, settings.fragment_concurrency || 1));
+    if (safeFragmentConcurrency > 1) {
+      args.push('-N', String(safeFragmentConcurrency));
     }
 
     let validatedTaskUrl = task.url;
