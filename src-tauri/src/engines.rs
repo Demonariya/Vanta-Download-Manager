@@ -31,6 +31,24 @@ const FFMPEG_RELEASE_REPO: &str = "FFmpeg-Builds/FFmpeg-Builds";
 // The asset name is stable while the archive contents and SHA-256 change per build.
 const FFMPEG_WIN_ZIP_NAME: &str = "ffmpeg-master-latest-win64-gpl-shared.zip";
 
+// Do not inherit a machine-wide pip mirror for the managed spotDL environment.
+// Some mirrors serve incomplete wheel downloads; use the canonical PyPI index.
+const SPOTDL_PIP_INSTALL_ARGS: &[&str] = &[
+    "--isolated",
+    "install",
+    "--upgrade",
+    "--index-url",
+    "https://pypi.org/simple",
+    "--retries",
+    "5",
+    "--timeout",
+    "90",
+    "--no-cache-dir",
+    "--disable-pip-version-check",
+    "--no-warn-script-location",
+    "spotdl",
+];
+
 static ENGINE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn install_lock() -> &'static tokio::sync::Mutex<()> {
@@ -1149,20 +1167,13 @@ impl EngineManager {
         }
 
         let mut pip_cmd = Command::new(&venv_python);
-        pip_cmd.args([
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "--no-cache-dir",
-            "--disable-pip-version-check",
-            "--no-warn-script-location",
-            "spotdl",
-        ]);
+        pip_cmd.args(["-m", "pip"]);
+        pip_cmd.args(SPOTDL_PIP_INSTALL_ARGS);
         let pip_out = process::run_command_with_options(
             &mut pip_cmd,
             ProcessOptions {
-                timeout: Duration::from_secs(240),
+                // spotDL pulls several sizeable wheels; allow slow but recoverable links.
+                timeout: Duration::from_secs(600),
                 ..ProcessOptions::default()
             },
         )
@@ -3213,6 +3224,16 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
             EngineManager::parse_sha256_for_filename(sample, "nonexistent.exe"),
             None
         );
+    }
+
+    #[test]
+    fn test_spotdl_pip_uses_official_pypi_and_ignores_machine_mirrors() {
+        assert!(SPOTDL_PIP_INSTALL_ARGS.contains(&"--isolated"));
+        assert!(SPOTDL_PIP_INSTALL_ARGS.contains(&"--index-url"));
+        assert!(SPOTDL_PIP_INSTALL_ARGS.contains(&"https://pypi.org/simple"));
+        assert!(SPOTDL_PIP_INSTALL_ARGS.contains(&"--retries"));
+        assert!(SPOTDL_PIP_INSTALL_ARGS.contains(&"--timeout"));
+        assert!(!SPOTDL_PIP_INSTALL_ARGS.contains(&"--extra-index-url"));
     }
 
     #[test]

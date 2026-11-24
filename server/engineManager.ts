@@ -2438,8 +2438,16 @@ export class EngineManager {
 
         const pipRes = await runProcessAsync(
           venvPy,
-          ['-m', 'pip', 'install', '--upgrade', 'spotdl'],
-          120_000
+          [
+            '-m', 'pip', '--isolated', 'install', '--upgrade',
+            '--index-url', 'https://pypi.org/simple',
+            '--retries', '5',
+            '--timeout', '90',
+            '--no-cache-dir',
+            '--disable-pip-version-check',
+            'spotdl',
+          ],
+          600_000
         );
         if (pipRes.code !== 0) {
           throw new Error(pipRes.stderr || pipRes.stdout || 'pip install spotdl failed');
