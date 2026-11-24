@@ -354,9 +354,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     try {
       const result = await findTrackLyrics({ title, artist, album, duration });
       if (result.syncedLyrics?.trim()) {
-        setLrcFile({ name: \`\${result.trackName} - \${result.artistName}.lrc\`, content: result.syncedLyrics.trim() });
+        setLrcFile({ name: `${result.trackName} - ${result.artistName}.lrc`, content: result.syncedLyrics.trim() });
         setPlainLyricsPreview(null);
-        setLyricsSearchMessage(\`Found synchronized lyrics: \${result.trackName} — \${result.artistName}\`);
+        setLyricsSearchMessage(`Found synchronized lyrics: ${result.trackName} — ${result.artistName}`);
       } else if (result.plainLyrics?.trim()) {
         setLrcFile(null);
         setPlainLyricsPreview(result.plainLyrics.trim());

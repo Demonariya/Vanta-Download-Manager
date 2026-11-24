@@ -19,7 +19,7 @@ async function requestJson<T>(url: URL): Promise<T> {
   });
   if (response.status === 404) throw new Error('NOT_FOUND');
   if (response.status === 429) throw new Error('Lyrics service rate limit reached. Try again shortly.');
-  if (!response.ok) throw new Error(\`Lyrics service returned HTTP \${response.status}.\`);
+  if (!response.ok) throw new Error(`Lyrics service returned HTTP ${response.status}.`);
   return response.json() as Promise<T>;
 }
 
@@ -56,7 +56,7 @@ export async function findTrackLyrics(input: {
   const artist = input.artist.trim();
   if (!title || !artist) throw new Error('Track title and artist are required to search lyrics.');
 
-  const exactUrl = new URL(\`\${API_BASE}/get\`);
+  const exactUrl = new URL(`${API_BASE}/get`);
   exactUrl.searchParams.set('track_name', title);
   exactUrl.searchParams.set('artist_name', artist);
   if (input.album?.trim()) exactUrl.searchParams.set('album_name', input.album.trim());
@@ -69,7 +69,7 @@ export async function findTrackLyrics(input: {
     if (!(error instanceof Error) || error.message !== 'NOT_FOUND') throw error;
   }
 
-  const searchUrl = new URL(\`\${API_BASE}/search\`);
+  const searchUrl = new URL(`${API_BASE}/search`);
   searchUrl.searchParams.set('track_name', title);
   searchUrl.searchParams.set('artist_name', artist);
   if (input.album?.trim()) searchUrl.searchParams.set('album_name', input.album.trim());
