@@ -58,8 +58,8 @@ interface DownloadCenterViewProps {
   onQueuesChanged?: (queues: DownloadQueue[]) => void;
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
-  /** Deprecated compatibility props retained for existing render fixtures. */
   setScopeFilter?: (scope: QueueScopeFilter) => void;
+  /** Deprecated compatibility prop retained for older view fixtures. */
   selectedTaskId?: string | null;
   searchQuery: string;
   onSelectTask: (task: DownloadTask) => void;
@@ -87,6 +87,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   onTasksChanged,
   engineStatus,
   scopeFilter,
+  setScopeFilter,
   searchQuery,
   onSelectTask,
   onOpenNewDownload,
@@ -152,11 +153,11 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const retryableSelectedIds = selectedTasks.filter((task) => ['failed','cancelled'].includes(task.status)).map((task) => task.id);
   const cancellableSelectedIds = pausableSelectedIds;
 
-  const activeCount = useMemo(() => getActiveDownloadCount(tasks), [tasks]);
-  const aggregateSpeed = useMemo(() => calculateAggregateSpeed(tasks), [tasks]);
-  const pausedCount = tasks.filter((t) => t.status === 'paused').length;
-  const completedCount = tasks.filter((t) => t.status === 'completed').length;
-  const failedCount = tasks.filter((t) => t.status === 'failed').length;
+  const activeCount = useMemo(() => getActiveDownloadCount(queueTasks), [queueTasks]);
+  const aggregateSpeed = useMemo(() => calculateAggregateSpeed(queueTasks), [queueTasks]);
+  const pausedCount = queueTasks.filter((t) => t.status === 'paused').length;
+  const completedCount = queueTasks.filter((t) => t.status === 'completed').length;
+  const failedCount = queueTasks.filter((t) => t.status === 'failed').length;
 
   const missingRequiredEngines = useMemo(() => {
     if (!engineStatus) return [];
@@ -240,10 +241,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const openTaskContextMenu = (event: React.MouseEvent<HTMLElement>, task: DownloadTask) => {
     event.preventDefault();
     event.stopPropagation();
+    // Right-click opens actions without changing the selected row or inspector.
     const nextIds = selectedIds.includes(task.id) ? [...selectedIds] : [task.id];
-    if (!selectedIds.includes(task.id)) setSelectedIds(nextIds);
-    lastSelectedIdRef.current = task.id;
-    onSelectTask(task);
     setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id, targetIds: nextIds });
   };
 
@@ -282,6 +281,13 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
 
   const tableGridClassName = 'grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3';
+  const quickFilters: Array<{ id: QueueScopeFilter; label: string; count: number }> = [
+    { id: 'all', label: 'All Downloads', count: queueTasks.length },
+    { id: 'active', label: 'Downloading', count: activeCount },
+    { id: 'paused', label: 'Paused', count: pausedCount },
+    { id: 'completed', label: 'Completed', count: completedCount },
+    { id: 'failed', label: 'Failed', count: failedCount },
+  ];
 
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
@@ -398,6 +404,31 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
         </div>
       </div>
 
+      {/* Unified IDM-style download status filters */}
+      <nav aria-label="Download status filters" className="flex items-center gap-1.5 overflow-x-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-1.5">
+        {quickFilters.map((filter) => {
+          const active = scopeFilter === filter.id;
+          return (
+            <button
+              key={filter.id}
+              type="button"
+              aria-pressed={active}
+              onClick={() => setScopeFilter?.(filter.id)}
+              className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                active
+                  ? 'bg-[var(--vanta-accent)] text-white shadow-sm'
+                  : 'text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]'
+              }`}
+            >
+              <span>{filter.label}</span>
+              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-mono tabular-nums ${
+                active ? 'bg-white/15 text-white' : 'bg-[var(--vanta-surface-2)] text-[var(--vanta-muted)]'
+              }`}>{filter.count}</span>
+            </button>
+          );
+        })}
+      </nav>
+
       {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
         <div className="px-4 py-2 rounded-xl border border-[var(--vanta-accent)]/40 bg-[var(--vanta-accent)]/10 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -467,7 +498,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
       {/* Main Transfer List */}
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="hidden xl:block overflow-x-auto">
           <div className="min-w-[1040px]">
             <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`}>
               <input type="checkbox" aria-label="Select all visible downloads"
@@ -558,9 +589,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
                           {isRunning ? <Pause className="w-3.5 h-3.5" /> : task.status === 'paused' ? <Play className="w-3.5 h-3.5" /> : task.status === 'failed' || task.status === 'cancelled' ? <RotateCw className="w-3.5 h-3.5" /> : <MoreHorizontal className="w-3.5 h-3.5" />}
                         </button>
-                        <button type="button" title="More actions" aria-label="More transfer actions" onClick={(event) => openTaskContextMenu(event, task)} className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
-                          <MoreHorizontal className="w-3.5 h-3.5" />
-                        </button>
                       </div>
                     </div>
                   );
@@ -568,6 +596,81 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               </div>
             )}
           </div>
+        </div>
+        <div className="xl:hidden divide-y divide-[var(--vanta-border)]">
+          {visibleTasks.length === 0 ? (
+            <div className="px-4 py-14 text-center space-y-3">
+              <Download className="mx-auto h-9 w-9 text-[var(--vanta-muted)]/60" />
+              <div>
+                <p className="text-sm font-medium text-[var(--vanta-text)]">{searchQuery || scopeFilter !== 'all' ? 'No matching transfers found' : 'Download queue is empty'}</p>
+                <p className="mt-1 text-xs text-[var(--vanta-muted)]">{searchQuery || scopeFilter !== 'all' ? 'Clear a filter or search term to see more transfers.' : 'Paste a video, playlist, or Spotify URL to get started.'}</p>
+              </div>
+              <button type="button" onClick={onOpenNewDownload} className="inline-flex items-center gap-2 rounded-lg bg-[var(--vanta-accent)] px-4 py-2 text-xs font-semibold text-white">
+                <Plus className="h-4 w-4" /> New Download
+              </button>
+            </div>
+          ) : visibleTasks.map((task, index) => {
+            const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
+            const isSelected = selectedIds.includes(task.id);
+            const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
+            const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
+            const downloaded = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0 ? task.total_bytes : task.downloaded_bytes;
+            const total = task.status === 'completed' ? (task.downloaded_bytes || task.total_bytes || downloaded) : task.total_bytes;
+            const sizeText = total > 0 ? `${formatBytes(downloaded)} / ${task.status === 'completed' ? formatBytes(total) : '≈' + formatBytes(total)}` : downloaded > 0 ? formatBytes(downloaded) : '—';
+            return (
+              <article
+                key={task.id}
+                data-download-row
+                onClick={(event) => handleRowClick(event, task, index)}
+                onDoubleClick={() => task.status === 'completed' && task.output_path
+                  ? api.openTaskFile(task).catch((error) => window.alert(error instanceof Error ? error.message : 'Could not open file.'))
+                  : onSelectTask(task)}
+                onContextMenu={(event) => openTaskContextMenu(event, task)}
+                className={`select-none px-3 py-3.5 transition-colors ${
+                  isSelected ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/50'
+                }`}
+              >
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${task.title}`}
+                    checked={isSelected}
+                    onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }}
+                    onClick={(event) => event.stopPropagation()}
+                    className="mt-1 h-3.5 w-3.5 shrink-0 rounded accent-[var(--vanta-accent)]"
+                  />
+                  <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={task.is_audio_only || task.engine === 'spotdl'} ext={task.ext} size="sm" aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'} />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="truncate text-sm font-semibold text-[var(--vanta-text)]">{task.title}</h3>
+                    <p className="mt-0.5 truncate text-[10px] text-[var(--vanta-muted)]">{[task.uploader, task.album, task.duration_string, task.ext?.toUpperCase()].filter(Boolean).join(' · ')}</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--vanta-text-secondary)]">
+                      <span className={`rounded-md px-2 py-0.5 font-medium ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>
+                      <span>{sizeText}</span>
+                      {task.status === 'downloading' && <span>{task.speed_str || '—'}</span>}
+                      {task.status === 'downloading' && <span>ETA {task.eta_str || '—'}</span>}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--vanta-surface-2)]">
+                        <div className={`h-full rounded-full ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
+                      </div>
+                      <span className="w-11 shrink-0 text-right text-[10px] font-mono tabular-nums text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(0)}%` : '—'}</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
+                    <button
+                      type="button"
+                      aria-label={isRunning ? 'Pause download' : task.status === 'paused' ? 'Resume download' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry download' : 'Open download actions'}
+                      title={isRunning ? 'Pause' : task.status === 'paused' ? 'Resume' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry' : 'More actions'}
+                      onClick={(event) => isRunning ? onPauseTask(task.id) : task.status === 'paused' ? onResumeTask(task.id) : task.status === 'failed' || task.status === 'cancelled' ? onRetryTask(task.id) : openTaskContextMenu(event, task)}
+                      className="rounded-lg p-2 text-[var(--vanta-muted)] hover:bg-[var(--vanta-surface-hover)] hover:text-[var(--vanta-text)]"
+                    >
+                      {isRunning ? <Pause className="h-4 w-4" /> : task.status === 'paused' ? <Play className="h-4 w-4" /> : task.status === 'failed' || task.status === 'cancelled' ? <RotateCw className="h-4 w-4" /> : <MoreHorizontal className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
         </div>
       </div>
 

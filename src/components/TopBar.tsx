@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  Pause, Play, Bell, Plus, Menu, Sun, Moon, Monitor, Link2,
+  Bell, Plus, Menu, Sun, Moon, Monitor, Link2,
 } from 'lucide-react';
 import { ThemeMode } from '../types';
 
@@ -9,9 +9,6 @@ interface TopBarProps {
   onAddUrl: (url: string) => void;
   onOpenNotifications: () => void;
   unreadNotificationsCount: number;
-  activeCount: number;
-  onPauseAll: () => void;
-  onResumeAll: () => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
   theme: ThemeMode;
@@ -21,7 +18,7 @@ interface TopBarProps {
 
 export const TopBar: React.FC<TopBarProps> = ({
   onOpenNewDownload, onAddUrl, onOpenNotifications, unreadNotificationsCount,
-  activeCount, onPauseAll, onResumeAll, searchQuery, setSearchQuery,
+  searchQuery, setSearchQuery,
   theme, onCycleTheme, onToggleMobileMenu,
 }) => {
   const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
@@ -59,19 +56,11 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
         <button type="submit" className="h-11 px-4 sm:px-5 bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors shrink-0">
           <Plus className="w-4 h-4" />
-          <span>Add</span>
+          <span className="hidden min-[520px]:inline">Add</span>
         </button>
       </form>
 
       <div className="flex items-center gap-1 shrink-0">
-        <button type="button" onClick={onResumeAll} title={`Resume downloads (${activeCount} active)`} aria-label="Resume all downloads"
-          className="p-2.5 text-[var(--vanta-muted)] hover:text-emerald-500 hover:bg-[var(--vanta-surface-hover)] rounded-lg transition-colors">
-          <Play className="w-4 h-4" />
-        </button>
-        <button type="button" onClick={onPauseAll} title="Pause all downloads" aria-label="Pause all downloads"
-          className="p-2.5 text-[var(--vanta-muted)] hover:text-amber-500 hover:bg-[var(--vanta-surface-hover)] rounded-lg transition-colors">
-          <Pause className="w-4 h-4" />
-        </button>
         <button type="button" onClick={onCycleTheme} title={`Theme: ${theme}`} aria-label="Switch theme"
           className="hidden sm:inline-flex p-2.5 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] rounded-lg transition-colors">
           <ThemeIcon className="w-4 h-4" />

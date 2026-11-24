@@ -51,12 +51,14 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
 
   return (
     <div
+      data-media-thumbnail
       className={`relative overflow-hidden rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] shrink-0 select-none ${sizeClass} ${className}`}
     >
       {showImage ? (
         <img
           src={validSrc!}
           alt={title}
+          draggable={false}
           loading="lazy"
           decoding="async"
           referrerPolicy="no-referrer"

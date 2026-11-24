@@ -83,13 +83,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const allEnginesReady = Boolean(engineStatus?.ytdlp.available && engineStatus?.ffmpeg.available);
 
-  const selectFilter = (filter: string) => {
-    setActiveTab('downloads');
-    setScopeFilter(filter);
-    if (filter === 'all') onSelectQueue('all');
-    setIsMobileOpen(false);
-  };
-
   const selectQueue = (id: string) => {
     setActiveTab('downloads');
     setScopeFilter('all');

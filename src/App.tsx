@@ -116,6 +116,33 @@ export default function App() {
     return () => mq.removeEventListener('change', handler);
   }, [theme]);
 
+  useEffect(() => {
+    const syncLayout = () => setIsSidebarCollapsed(window.innerWidth < 1024);
+    syncLayout();
+    window.addEventListener('resize', syncLayout, { passive: true });
+    return () => window.removeEventListener('resize', syncLayout);
+  }, []);
+
+  // Disable the browser/WebView context menu on the app surface while preserving
+  // native editing menus in text fields so copy/paste remains available.
+  useEffect(() => {
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, [contenteditable="true"], [data-native-context-menu="true"]')) return;
+      event.preventDefault();
+    };
+    const preventMediaDrag = (event: DragEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('img, video, audio, [data-media-thumbnail]')) event.preventDefault();
+    };
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    document.addEventListener('dragstart', preventMediaDrag, true);
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      document.removeEventListener('dragstart', preventMediaDrag, true);
+    };
+  }, []);
+
   // Global keyboard shortcuts (Ctrl/Cmd+N for New Download, Escape to close inspector)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -354,17 +381,13 @@ export default function App() {
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
+    <div className="flex flex-col h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
       <TitleBar activeDownloadsCount={activeCount} onRequestClose={handleInitiateClose} />
 
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
         <Sidebar
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          onOpenNewDownload={() => {
-            setInitialInspectUrl('');
-            setIsNewDownloadOpen(true);
-          }}
           engineStatus={engineStatus}
           tasks={tasks}
           queues={queues}
@@ -397,9 +420,6 @@ export default function App() {
             }}
             onOpenNotifications={() => setIsNotificationsOpen(true)}
             unreadNotificationsCount={notifications.length}
-            activeCount={activeCount}
-            onPauseAll={() => api.pauseAll()}
-            onResumeAll={() => api.resumeAll()}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
             theme={theme}
@@ -408,7 +428,7 @@ export default function App() {
           />
 
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
-            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-3 sm:p-4 pb-4 select-text">
+            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-4 select-text">
               <ClipboardMonitorBanner
                 detectedUrl={clipboardUrl}
                 onInspect={handleQuickInspect}

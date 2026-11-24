@@ -45,11 +45,39 @@
     --vanta-scroll-thumb: #27303d;
   }
 
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+  }
+
   body {
     font-family: var(--font-sans);
     background-color: var(--vanta-bg);
     color: var(--vanta-text);
-    overflow-x: hidden;
+    overflow: hidden;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    min-width: 0;
+  }
+
+  img,
+  video,
+  audio,
+  [data-media-thumbnail] {
+    -webkit-user-drag: none;
+    user-select: none;
+  }
+
+  img {
+    pointer-events: none;
   }
 
   .tabular-nums {
@@ -69,6 +97,23 @@
   }
   ::-webkit-scrollbar-thumb:hover {
     background: var(--vanta-muted);
+  }
+}
+
+@media (max-width: 639px) {
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+@media (max-height: 680px) {
+  .settings-content {
+    gap: 0.75rem;
+  }
+
+  .settings-form > header {
+    padding-block: 0.65rem;
   }
 }
 

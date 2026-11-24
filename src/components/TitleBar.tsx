@@ -14,22 +14,29 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   const [isTauri, setIsTauri] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
     const checkTauri = async () => {
       try {
         if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-          setIsTauri(true);
           const { getCurrentWindow } = await import('@tauri-apps/api/window');
           const win = getCurrentWindow();
+          if (!mounted) return;
+          setIsTauri(true);
           setIsMaximized(await win.isMaximized());
-          await win.onResized(async () => {
-            setIsMaximized(await win.isMaximized());
+          unlisten = await win.onResized(async () => {
+            if (mounted) setIsMaximized(await win.isMaximized());
           });
         }
       } catch {
-        setIsTauri(false);
+        if (mounted) setIsTauri(false);
       }
     };
-    checkTauri();
+    void checkTauri();
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
   }, []);
 
   const handleMinimize = async (e: React.MouseEvent) => {
