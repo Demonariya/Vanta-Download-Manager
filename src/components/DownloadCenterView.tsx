@@ -58,6 +58,9 @@ interface DownloadCenterViewProps {
   onQueuesChanged?: (queues: DownloadQueue[]) => void;
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
+  /** Deprecated compatibility props retained for existing render fixtures. */
+  setScopeFilter?: (scope: QueueScopeFilter) => void;
+  selectedTaskId?: string | null;
   searchQuery: string;
   onSelectTask: (task: DownloadTask) => void;
   onOpenNewDownload: () => void;
