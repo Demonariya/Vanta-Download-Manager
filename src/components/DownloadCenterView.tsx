@@ -198,9 +198,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   ];
 
   return (
-    <div className="space-y-4">
-      {/* IDM-style Queue Manager */}
-      <section className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-3 space-y-3">
+    <div className="flex min-h-0 flex-col gap-2.5">
+      {/* Compact, collapsible queue controls: keep the transfer list as the primary workspace. */}
+      <details className="group rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] shrink-0">
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-[var(--vanta-text-secondary)] select-none">
+          <span className="text-[var(--vanta-accent)]">▸</span>
+          <span>Queues</span>
+          <span className="text-[10px] text-[var(--vanta-muted)]">{queues.length} queues · {tasks.length} transfers</span>
+          <span className="ml-auto text-[10px] text-[var(--vanta-muted)]">Manage queues</span>
+        </summary>
+        <section className="border-t border-[var(--vanta-border)] p-3 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--vanta-muted)]">Queues</span>
@@ -315,7 +322,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             </div>
           </div>
         )}
-      </section>
+        </section>
+      </details>
 
       {/* Missing Engine Inline Alert (only shown when missing) */}
       {missingRequiredEngines.length > 0 && (
@@ -346,7 +354,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       )}
 
       {/* Filter, Sort & Queue Action Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         {/* Segmented Status Tabs */}
         <div className="flex flex-wrap items-center gap-1">
           {scopeTabs.map((tab) => {
