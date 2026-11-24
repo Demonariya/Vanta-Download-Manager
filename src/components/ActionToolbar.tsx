@@ -79,8 +79,11 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
   const [actionOrder, setActionOrder] = useState<ToolbarActionId[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(TOOLBAR_STORAGE_KEY) || '{}');
-      const order = Array.isArray(saved.order) ? saved.order : [];
-      return [...DEFAULT_ORDER.filter((id) => order.includes(id)), ...DEFAULT_ORDER.filter((id) => !order.includes(id))];
+      const storedOrder: unknown[] = Array.isArray(saved?.order) ? saved.order : [];
+      const validOrder = [...new Set(storedOrder.filter(
+        (id): id is ToolbarActionId => typeof id === 'string' && DEFAULT_ORDER.includes(id as ToolbarActionId),
+      ))];
+      return [...validOrder, ...DEFAULT_ORDER.filter((id) => !validOrder.includes(id))];
     } catch {
       return DEFAULT_ORDER;
     }
@@ -88,7 +91,12 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
   const [visibility, setVisibility] = useState<Record<ToolbarActionId, boolean>>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(TOOLBAR_STORAGE_KEY) || '{}');
-      return { ...DEFAULT_VISIBILITY, ...(saved.visibility || {}) };
+      const stored = saved?.visibility && typeof saved.visibility === 'object' && !Array.isArray(saved.visibility)
+        ? saved.visibility as Record<string, unknown>
+        : {};
+      return Object.fromEntries(
+        DEFAULT_ORDER.map((id) => [id, typeof stored[id] === 'boolean' ? stored[id] : DEFAULT_VISIBILITY[id]]),
+      ) as Record<ToolbarActionId, boolean>;
     } catch {
       return DEFAULT_VISIBILITY;
     }
