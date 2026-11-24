@@ -75,6 +75,7 @@ export default function App() {
     createInitialCheckingEngineStatus
   );
   const isRefreshingEnginesRef = useRef(false);
+  const pendingEngineScanRef = useRef(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
@@ -184,7 +185,12 @@ export default function App() {
   };
 
   const runEngineScan = async (forceRefresh: boolean, isStillMounted?: () => boolean) => {
-    if (isRefreshingEnginesRef.current) return;
+    if (isRefreshingEnginesRef.current) {
+      // Never drop a forced refresh requested after an install/update. Queue one
+      // fresh scan so the UI cannot retain the pre-update engine version.
+      if (forceRefresh) pendingEngineScanRef.current = true;
+      return;
+    }
     isRefreshingEnginesRef.current = true;
     try {
       const status = await api.getEngineStatus(forceRefresh);
@@ -195,6 +201,10 @@ export default function App() {
       console.error('Engine status scan failed:', err);
     } finally {
       isRefreshingEnginesRef.current = false;
+      if (pendingEngineScanRef.current) {
+        pendingEngineScanRef.current = false;
+        void runEngineScan(true, isStillMounted);
+      }
     }
   };
 
