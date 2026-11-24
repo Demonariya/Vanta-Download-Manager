@@ -547,7 +547,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* Section 2: Downloads & Storage */
+      {/* Section 2: Downloads & Storage */}
       {section === 'downloads' && (
         <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="space-y-1.5">
@@ -748,7 +748,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* Section 4: Queue & Scheduler */
+      {/* Section 4: Queue & Scheduler */}
       {section === 'scheduler' && (
         <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -967,7 +967,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* Section 6: Python Configuration (for spotDL) */
+      {/* Section 6: Python Configuration (for spotDL) */}
       {section === 'python' && (
         <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--vanta-border)]">
