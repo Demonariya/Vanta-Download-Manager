@@ -247,11 +247,12 @@ jobs:
       - name: Build Windows Release via build.ps1
         shell: pwsh
         run: |
-          $buildArgs = @('-Release', '-Target', '${{ steps.build_flags.outputs.resolved_target }}')
+          $target = '${{ steps.build_flags.outputs.resolved_target }}'
           if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.clean_build }}" -eq 'True') {
-            $buildArgs += '-Clean'
+            & .\build.ps1 -Release -Clean -Target $target
+          } else {
+            & .\build.ps1 -Release -Target $target
           }
-          & .\build.ps1 @buildArgs
 
       - name: Verify Produced Deliverables, Archive Readability & Checksums
         shell: pwsh
