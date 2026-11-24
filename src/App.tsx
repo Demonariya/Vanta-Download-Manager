@@ -68,7 +68,7 @@ export default function App() {
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }]);
-  const [selectedQueueId, setSelectedQueueId] = useState('main');
+  const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
@@ -220,7 +220,7 @@ export default function App() {
     api.getQueues().then((next) => {
       if (!mounted) return;
       setQueues(next);
-      setSelectedQueueId((current) => next.some((queue) => queue.id === current) ? current : 'main');
+      setSelectedQueueId((current) => current === 'all' || next.some((queue) => queue.id === current) ? current : 'main');
     }).catch(console.error);
     api.getNotifications().then((n) => mounted && setNotifications(n)).catch(console.error);
 
@@ -356,7 +356,17 @@ export default function App() {
             setIsNewDownloadOpen(true);
           }}
           engineStatus={engineStatus}
-          activeCount={activeCount}
+          tasks={tasks}
+          queues={queues}
+          selectedQueueId={selectedQueueId}
+          onSelectQueue={(id) => {
+            setSelectedQueueId(id);
+            setScopeFilter('all');
+          }}
+          onQueuesChanged={(next) => {
+            setQueues(next);
+            setSelectedQueueId((current) => current === 'all' || next.some((queue) => queue.id === current) ? current : 'main');
+          }}
           scopeFilter={scopeFilter}
           setScopeFilter={setScopeFilter}
           isCollapsed={isSidebarCollapsed}
@@ -400,16 +410,14 @@ export default function App() {
                   tasks={tasks}
                   queues={queues}
                   selectedQueueId={selectedQueueId}
-                  onSelectQueue={setSelectedQueueId}
-                  onQueuesChanged={(next) => {
-                    setQueues(next);
-                    setSelectedQueueId((current) => next.some((queue) => queue.id === current) ? current : 'main');
+                  onSelectQueue={(id) => {
+                    setSelectedQueueId(id);
+                    setScopeFilter('all');
                   }}
+                  onTasksChanged={setTasks}
                   engineStatus={engineStatus}
                   scopeFilter={scopeFilter}
-                  setScopeFilter={setScopeFilter}
                   searchQuery={searchQuery}
-                  selectedTaskId={selectedTaskId}
                   onSelectTask={(t) => setSelectedTaskId(t.id)}
                   onOpenNewDownload={() => {
                     setInitialInspectUrl('');

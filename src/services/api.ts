@@ -457,8 +457,11 @@ export class ApiService {
   public async openTaskFolder(task: DownloadTask): Promise<void> {
     if (this.isTauri()) {
       const target = task.output_path || '';
-      const dir = target.replace(/[\\/][^\\/]+$/, '') || target;
-      if (!dir) throw new Error('No folder path recorded');
+      if (!target.trim()) throw new Error('No folder path recorded');
+      // Completed tasks store the final file path; unfinished tasks store the destination directory.
+      const dir = task.status === 'completed'
+        ? (target.replace(/[\\/][^\\/]+$/, '') || target)
+        : target;
       return invoke('open_file_or_folder', { path: dir });
     }
     const res = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/open-folder`, {

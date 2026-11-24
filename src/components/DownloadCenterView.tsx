@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Play,
   Pause,
@@ -10,6 +10,10 @@ import {
   Plus,
   MoreHorizontal,
   Info,
+  Copy,
+  ArrowUpDown,
+  ChevronUp,
+  ChevronDown,
   AlertTriangle,
   Download,
 } from 'lucide-react';
@@ -49,12 +53,10 @@ interface DownloadCenterViewProps {
   queues: DownloadQueue[];
   selectedQueueId: string;
   onSelectQueue: (id: string) => void;
-  onQueuesChanged: (queues: DownloadQueue[]) => void;
+  onTasksChanged: (tasks: DownloadTask[]) => void;
   engineStatus: EngineStatusMap | null;
   scopeFilter: QueueScopeFilter;
-  setScopeFilter: (scope: QueueScopeFilter) => void;
   searchQuery: string;
-  selectedTaskId: string | null;
   onSelectTask: (task: DownloadTask) => void;
   onOpenNewDownload: () => void;
   onPauseTask: (id: string) => void;
@@ -77,12 +79,10 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   queues,
   selectedQueueId,
   onSelectQueue,
-  onQueuesChanged,
+  onTasksChanged,
   engineStatus,
   scopeFilter,
-  setScopeFilter,
   searchQuery,
-  selectedTaskId,
   onSelectTask,
   onOpenNewDownload,
   onPauseTask,
@@ -101,12 +101,15 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const [sortField, setSortField] = useState<SortField>('queue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [showNewQueue, setShowNewQueue] = useState(false);
-  const [newQueueName, setNewQueueName] = useState('');
-  const [renameQueueId, setRenameQueueId] = useState<string | null>(null);
-  const [renameQueueName, setRenameQueueName] = useState('');
   const [moveTargetQueueId, setMoveTargetQueueId] = useState('');
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    taskId: string;
+    targetIds: string[];
+  } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const lastSelectedIdRef = useRef<string | null>(null);
   const [confirmState, setConfirmState] = useState<{
     title: string;
     message: string;
@@ -119,7 +122,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     () => selectedQueueId === 'all' ? tasks : tasks.filter((task) => (task.queue_id || 'main') === selectedQueueId),
     [tasks, selectedQueueId]
   );
-  const activeQueue = queues.find((queue) => queue.id === selectedQueueId) || null;
 
   const visibleTasks = useMemo(
     () => {
@@ -134,14 +136,22 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     [queueTasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
+  const selectedTasks = useMemo(
+    () => tasks.filter((task) => selectedIds.includes(task.id)),
+    [tasks, selectedIds],
+  );
+  const pausableSelectedIds = selectedTasks
+    .filter((task) => ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status))
+    .map((task) => task.id);
+  const resumableSelectedIds = selectedTasks.filter((task) => task.status === 'paused').map((task) => task.id);
+  const retryableSelectedIds = selectedTasks.filter((task) => ['failed','cancelled'].includes(task.status)).map((task) => task.id);
+  const cancellableSelectedIds = pausableSelectedIds;
+
   const activeCount = useMemo(() => getActiveDownloadCount(tasks), [tasks]);
   const aggregateSpeed = useMemo(() => calculateAggregateSpeed(tasks), [tasks]);
-  const queuedCount = tasks.filter((t) => t.status === 'queued').length;
   const pausedCount = tasks.filter((t) => t.status === 'paused').length;
   const completedCount = tasks.filter((t) => t.status === 'completed').length;
   const failedCount = tasks.filter((t) => t.status === 'failed').length;
-  const audioCount = tasks.filter((t) => t.is_audio_only || t.engine === 'spotdl').length;
-  const videoCount = tasks.filter((t) => !t.is_audio_only && t.engine !== 'spotdl').length;
 
   const missingRequiredEngines = useMemo(() => {
     if (!engineStatus) return [];
@@ -156,181 +166,120 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   }, [engineStatus]);
 
   const toggleSelectAll = () => {
-    if (selectedIds.length === visibleTasks.length && visibleTasks.length > 0) {
-      setSelectedIds([]);
-    } else {
-      setSelectedIds(visibleTasks.map((t) => t.id));
-    }
+    const visibleIds = visibleTasks.map((task) => task.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+    setSelectedIds((previous) => allVisibleSelected
+      ? previous.filter((id) => !visibleIds.includes(id))
+      : [...new Set([...previous, ...visibleIds])]);
+    if (!allVisibleSelected && visibleIds.length > 0) lastSelectedIdRef.current = visibleIds[visibleIds.length - 1];
   };
 
   const toggleRowSelected = (id: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-    );
+    lastSelectedIdRef.current = id;
+    setSelectedIds((prev) => prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]);
   };
 
-  const handleBulkAction = async (action: 'pause' | 'resume' | 'retry' | 'cancel' | 'delete') => {
-    if (selectedIds.length === 0) return;
+  const handleBulkAction = async (
+    action: 'pause' | 'resume' | 'retry' | 'cancel' | 'delete',
+    idsOverride?: string[],
+  ) => {
+    const targetIds = idsOverride?.length ? [...idsOverride] : [...selectedIds];
+    if (targetIds.length === 0) return;
     if (action === 'delete') {
-      const targetIds = [...selectedIds];
       setConfirmState({
-        title: `Delete ${targetIds.length} Selected Download${targetIds.length > 1 ? 's' : ''}`,
+        title: `Remove ${targetIds.length} Selected Download${targetIds.length > 1 ? 's' : ''}`,
         message: 'Remove the selected items from the download list.',
-        confirmLabel: 'Delete Selected',
+        confirmLabel: 'Remove Selected',
         checkboxLabel: 'Also delete downloaded files from disk',
         onConfirm: async (deleteFiles) => {
           setConfirmState(null);
-          await api.bulkTaskAction(targetIds, 'delete', deleteFiles);
-          setSelectedIds([]);
+          if (targetIds.length === 1) onDeleteTask(targetIds[0], deleteFiles);
+          else await api.bulkTaskAction(targetIds, 'delete', deleteFiles);
+          setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
         },
       });
       return;
     }
-    await api.bulkTaskAction(selectedIds, action, false);
-    if (action === 'cancel') setSelectedIds([]);
+    if (action === 'cancel' && targetIds.length === 1) {
+      onCancelTask(targetIds[0]);
+    } else {
+      await api.bulkTaskAction(targetIds, action, false);
+    }
+    if (action === 'cancel') setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
   };
 
-  const scopeTabs: Array<{ id: QueueScopeFilter; label: string; count: number }> = [
-    { id: 'all', label: 'All', count: tasks.length },
-    { id: 'active', label: 'Active', count: activeCount },
-    { id: 'queued', label: 'Queued', count: queuedCount },
-    { id: 'paused', label: 'Paused', count: pausedCount },
-    { id: 'completed', label: 'Completed', count: completedCount },
-    { id: 'failed', label: 'Failed', count: failedCount },
-    { id: 'audio', label: 'Audio', count: audioCount },
-    { id: 'video', label: 'Video', count: videoCount },
-    { id: 'finished', label: 'Finished', count: completedCount },
-    { id: 'unfinished', label: 'Unfinished', count: tasks.length - completedCount },
-  ];
+  const handleRowClick = (event: React.MouseEvent<HTMLDivElement>, task: DownloadTask, index: number) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('button, input, select, a, [role="menu"]')) return;
+    onSelectTask(task);
+
+    if (event.ctrlKey || event.metaKey) {
+      toggleRowSelected(task.id);
+      return;
+    }
+    if (event.shiftKey && lastSelectedIdRef.current) {
+      const anchorIndex = visibleTasks.findIndex((item) => item.id === lastSelectedIdRef.current);
+      if (anchorIndex >= 0) {
+        const startIndex = Math.min(anchorIndex, index);
+        const endIndex = Math.max(anchorIndex, index);
+        const rangeIds = visibleTasks.slice(startIndex, endIndex + 1).map((item) => item.id);
+        setSelectedIds((previous) => [...new Set([...previous, ...rangeIds])]);
+        lastSelectedIdRef.current = task.id;
+        return;
+      }
+    }
+    setSelectedIds([task.id]);
+    lastSelectedIdRef.current = task.id;
+  };
+
+  const openTaskContextMenu = (event: React.MouseEvent<HTMLElement>, task: DownloadTask) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextIds = selectedIds.includes(task.id) ? [...selectedIds] : [task.id];
+    if (!selectedIds.includes(task.id)) setSelectedIds(nextIds);
+    lastSelectedIdRef.current = task.id;
+    onSelectTask(task);
+    setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id, targetIds: nextIds });
+  };
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) setSortDirection((current) => current === 'asc' ? 'desc' : 'asc');
+    else {
+      setSortField(field);
+      setSortDirection(field === 'title' ? 'asc' : 'desc');
+    }
+  };
+
+  useEffect(() => {
+    setSelectedIds([]);
+    lastSelectedIdRef.current = null;
+    setContextMenu(null);
+  }, [selectedQueueId, scopeFilter, searchQuery]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        setSelectedIds(visibleTasks.map((task) => task.id));
+        lastSelectedIdRef.current = visibleTasks[visibleTasks.length - 1]?.id || null;
+      } else if (event.key === 'Escape') {
+        setContextMenu(null);
+        setSelectedIds([]);
+        lastSelectedIdRef.current = null;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [visibleTasks]);
+
+
+
+  const tableGridClassName = 'grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3';
 
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
-      {/* Compact, collapsible queue controls: keep the transfer list as the primary workspace. */}
-      <details className="group rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] shrink-0">
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-[var(--vanta-text-secondary)] select-none">
-          <span className="text-[var(--vanta-accent)]">▸</span>
-          <span>Queues</span>
-          <span className="text-[10px] text-[var(--vanta-muted)]">{queues.length} queues · {tasks.length} transfers</span>
-          <span className="ml-auto text-[10px] text-[var(--vanta-muted)]">Manage queues</span>
-        </summary>
-        <section className="border-t border-[var(--vanta-border)] p-3 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--vanta-muted)]">Queues</span>
-            <span className="text-[10px] text-[var(--vanta-muted)]">{queues.length} queue{queues.length === 1 ? '' : 's'}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowNewQueue((value) => !value)}
-            className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)] text-[11px] font-medium text-[var(--vanta-text)] inline-flex items-center gap-1.5"
-          >
-            <Plus className="w-3.5 h-3.5" /> New Queue
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => { onSelectQueue('all'); setSelectedIds([]); }}
-            className={`px-3 py-2 rounded-lg border text-left min-w-[110px] transition-colors ${selectedQueueId === 'all' ? 'border-[var(--vanta-accent)] bg-[var(--vanta-accent)]/10' : 'border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)]'}`}
-          >
-            <span className="block text-xs font-semibold text-[var(--vanta-text)]">All Queues</span>
-            <span className="block text-[10px] text-[var(--vanta-muted)]">{tasks.length} transfers</span>
-          </button>
-          {queues.map((queue) => {
-            const count = tasks.filter((task) => (task.queue_id || 'main') === queue.id).length;
-            const running = tasks.filter((task) => (task.queue_id || 'main') === queue.id && ['connecting','downloading','processing','muxing','verifying','resuming'].includes(task.status)).length;
-            const active = selectedQueueId === queue.id;
-            return (
-              <button
-                key={queue.id}
-                type="button"
-                onClick={() => { onSelectQueue(queue.id); setSelectedIds([]); }}
-                className={`px-3 py-2 rounded-lg border text-left min-w-[110px] transition-colors ${active ? 'border-[var(--vanta-accent)] bg-[var(--vanta-accent)]/10' : 'border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)]'}`}
-              >
-                <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--vanta-text)]">
-                  <span className={`w-1.5 h-1.5 rounded-full ${queue.is_paused ? 'bg-amber-500' : 'bg-emerald-500'}`} />
-                  <span className="truncate">{queue.name}</span>
-                </span>
-                <span className="block mt-0.5 text-[10px] text-[var(--vanta-muted)]">{count} items · {running} active</span>
-              </button>
-            );
-          })}
-        </div>
-
-        {showNewQueue && (
-          <form
-            className="flex flex-wrap items-center gap-2 border-t border-[var(--vanta-border)] pt-3"
-            onSubmit={async (event) => {
-              event.preventDefault();
-              const name = newQueueName.trim();
-              if (!name) return;
-              try {
-                const next = await api.createQueue(name);
-                onQueuesChanged(next);
-                const created = next.find((queue) => queue.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-                if (created) onSelectQueue(created.id);
-                setNewQueueName('');
-                setShowNewQueue(false);
-              } catch (error) {
-                window.alert(error instanceof Error ? error.message : 'Could not create queue.');
-              }
-            }}
-          >
-            <input
-              autoFocus
-              value={newQueueName}
-              onChange={(event) => setNewQueueName(event.target.value)}
-              maxLength={40}
-              placeholder="Queue name (e.g. Film)"
-              className="min-w-[180px] flex-1 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-xs text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
-            />
-            <button type="submit" disabled={!newQueueName.trim()} className="px-3 py-2 rounded-lg bg-[var(--vanta-accent)] text-white text-xs font-medium disabled:opacity-40">Create Queue</button>
-            <button type="button" onClick={() => { setShowNewQueue(false); setNewQueueName(''); }} className="px-3 py-2 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-muted)]">Cancel</button>
-          </form>
-        )}
-
-        {activeQueue && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--vanta-border)] pt-3">
-            {renameQueueId === activeQueue.id ? (
-              <form
-                className="flex flex-wrap items-center gap-2 flex-1"
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  try {
-                    const next = await api.renameQueue(activeQueue.id, renameQueueName);
-                    onQueuesChanged(next);
-                    setRenameQueueId(null);
-                  } catch (error) {
-                    window.alert(error instanceof Error ? error.message : 'Could not rename queue.');
-                  }
-                }}
-              >
-                <input value={renameQueueName} onChange={(event) => setRenameQueueName(event.target.value)} maxLength={40} className="min-w-[150px] flex-1 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 py-1.5 text-xs text-[var(--vanta-text)]" />
-                <button type="submit" className="px-2.5 py-1.5 rounded-lg bg-[var(--vanta-accent)] text-white text-xs">Save name</button>
-                <button type="button" onClick={() => setRenameQueueId(null)} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs">Cancel</button>
-              </form>
-            ) : (
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-[var(--vanta-text)]">{activeQueue.name}</div>
-                <div className="text-[10px] text-[var(--vanta-muted)]">{activeQueue.is_paused ? 'Queue stopped · new downloads will wait' : 'Queue is running'}</div>
-              </div>
-            )}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button type="button" onClick={async () => { try { onQueuesChanged(activeQueue.is_paused ? await api.startQueue(activeQueue.id) : await api.stopQueue(activeQueue.id)); } catch (error) { window.alert(error instanceof Error ? error.message : 'Queue action failed.'); } }} className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${activeQueue.is_paused ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400'}`}>
-                {activeQueue.is_paused ? 'Start Queue' : 'Stop Queue'}
-              </button>
-              {!activeQueue.is_default && renameQueueId !== activeQueue.id && (
-                <>
-                  <button type="button" onClick={() => { setRenameQueueId(activeQueue.id); setRenameQueueName(activeQueue.name); }} className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">Rename</button>
-                  <button type="button" onClick={() => setConfirmState({ title: 'Delete Queue', message: `Delete "${activeQueue.name}"? Its downloads will be moved to Main Queue.`, confirmLabel: 'Delete Queue', onConfirm: async () => { try { const next = await api.deleteQueue(activeQueue.id); onQueuesChanged(next); onSelectQueue('main'); setSelectedIds([]); } catch (error) { window.alert(error instanceof Error ? error.message : 'Could not delete queue.'); } finally { setConfirmState(null); } } })} className="px-2.5 py-1.5 rounded-lg border border-red-500/30 text-xs text-red-600 dark:text-red-400 hover:bg-red-500/5">Delete</button>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-        </section>
-      </details>
-
       {/* Missing Engine Inline Alert (only shown when missing) */}
       {missingRequiredEngines.length > 0 && (
         <div className="px-4 py-3 rounded-xl border border-amber-500/35 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -361,32 +310,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
       {/* Filter, Sort & Queue Action Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-        {/* Segmented Status Tabs */}
-        <div className="flex flex-wrap items-center gap-1">
-          {scopeTabs.map((tab) => {
-            const active = scopeFilter === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setScopeFilter(tab.id)}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors flex items-center gap-1.5 ${
-                  active
-                    ? 'bg-[var(--vanta-accent)] text-white'
-                    : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'
-                }`}
-              >
-                <span>{tab.label}</span>
-                <span
-                  className={`font-mono tabular-nums text-[10px] ${
-                    active ? 'text-white/85' : 'text-[var(--vanta-muted)]'
-                  }`}
-                >
-                  {tab.count}
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Downloads</h2>
+            <p className="text-[10px] text-[var(--vanta-muted)]">{visibleTasks.length} items in this view · {aggregateSpeed.formattedSpeed} total</p>
+          </div>
+          {selectedIds.length > 0 && (
+            <span className="hidden sm:inline-flex px-2 py-1 rounded-md bg-[var(--vanta-accent)]/10 text-[var(--vanta-accent)] text-[10px] font-semibold tabular-nums">
+              {selectedIds.length} selected
+            </span>
+          )}
         </div>
 
         {/* Sort + Queue Controls */}
@@ -467,26 +400,28 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             {selectedIds.length} selected
           </span>
           <div className="flex flex-wrap items-center gap-1.5">
+            {pausableSelectedIds.length > 0 && (
+              <button type="button" onClick={() => handleBulkAction('pause', pausableSelectedIds)}
+                className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0">Pause</button>
+            )}
+            {resumableSelectedIds.length > 0 && (
+              <button type="button" onClick={() => handleBulkAction('resume', resumableSelectedIds)}
+                className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0">Resume</button>
+            )}
+            {retryableSelectedIds.length > 0 && (
+              <button type="button" onClick={() => handleBulkAction('retry', retryableSelectedIds)}
+                className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0">Retry</button>
+            )}
+            {cancellableSelectedIds.length > 0 && (
+              <button type="button" onClick={() => handleBulkAction('cancel', cancellableSelectedIds)}
+                className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0">Cancel</button>
+            )}
             <button
               type="button"
-              onClick={() => handleBulkAction('pause')}
-              className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0"
+              onClick={() => navigator.clipboard.writeText(tasks.filter((task) => selectedIds.includes(task.id)).map((task) => task.url).join('\n')).catch(() => window.alert('Could not copy selected links.'))}
+              className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
             >
-              Pause
-            </button>
-            <button
-              type="button"
-              onClick={() => handleBulkAction('resume')}
-              className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0"
-            >
-              Resume
-            </button>
-            <button
-              type="button"
-              onClick={() => handleBulkAction('retry')}
-              className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0"
-            >
-              Retry
+              <Copy className="w-3.5 h-3.5" /> Copy Links
             </button>
             <button
               type="button"
@@ -503,7 +438,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 </select>
                 <button type="button" disabled={!moveTargetQueueId} onClick={async () => {
                   try {
-                    await api.moveTasksToQueue(selectedIds, moveTargetQueueId);
+                    const nextTasks = await api.moveTasksToQueue(selectedIds, moveTargetQueueId);
+                    onTasksChanged(nextTasks);
                     onSelectQueue(moveTargetQueueId);
                     setSelectedIds([]);
                     setMoveTargetQueueId('');
@@ -528,11 +464,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
         <div className="overflow-x-auto">
           <div className="min-w-[1040px]">
-            <div className="grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]">
+            <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`}>
               <input type="checkbox" aria-label="Select all visible downloads"
-                checked={visibleTasks.length > 0 && selectedIds.length === visibleTasks.length}
+                checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIds.includes(task.id))}
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
-              <span>#</span><span>Name</span><span>Engine</span><span>Progress</span><span>Size</span><span>Speed</span><span>ETA</span><span>Status</span><span>Actions</span>
+              <span>#</span>
+              <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Name {sortField === 'title' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
+              <span>Engine</span><span>Progress</span>
+              <button type="button" onClick={() => toggleSort('size')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Size {sortField === 'size' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
+              <button type="button" onClick={() => toggleSort('speed')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Speed {sortField === 'speed' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
+              <span>ETA</span><span>Status</span><span>Actions</span>
             </div>
 
             {visibleTasks.length === 0 ? (
@@ -547,9 +488,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 </button>
               </div>
             ) : (
-              <div className="divide-y divide-[var(--vanta-border)]">
+              <div
+                className="divide-y divide-[var(--vanta-border)]"
+                onClick={(event) => {
+                  if (!(event.target as HTMLElement).closest('[data-download-row]')) {
+                    setSelectedIds([]);
+                    lastSelectedIdRef.current = null;
+                  }
+                }}
+              >
                 {visibleTasks.map((task, index) => {
-                  const isSelectedRow = selectedTaskId === task.id;
+                  const isSelectedRow = selectedIds.includes(task.id);
                   const isChecked = selectedIds.includes(task.id);
                   const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
                   const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
@@ -563,11 +512,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                       : downloaded > 0 ? formatBytes(downloaded) : '—';
 
                   return (
-                    <div key={task.id} onClick={() => onSelectTask(task)}
-                      onContextMenu={(event) => { event.preventDefault(); setOpenMenuId(openMenuId === task.id ? null : task.id); }}
-                      className={`relative grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
+                    <div key={task.id} data-download-row
+                      onClick={(event) => handleRowClick(event, task, index)}
+                      onDoubleClick={() => {
+                        if (task.status === 'completed' && task.output_path) {
+                          api.openTaskFile(task).catch((error) => window.alert(error instanceof Error ? error.message : 'Could not open file.'));
+                        } else onSelectTask(task);
+                      }}
+                      onContextMenu={(event) => openTaskContextMenu(event, task)}
+                      className={`relative ${tableGridClassName} py-2.5 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
                       <div onClick={(event) => event.stopPropagation()}>
-                        <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => toggleRowSelected(task.id)} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
+                        <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
                       <span className="text-xs text-[var(--vanta-muted)] tabular-nums">{index + 1}</span>
                       <div className="flex items-center gap-2.5 min-w-0">
@@ -594,23 +549,14 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
                       <div className="flex items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
                         <button type="button" title={isRunning ? 'Pause' : task.status === 'paused' ? 'Resume' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry' : 'More actions'}
-                          onClick={() => isRunning ? onPauseTask(task.id) : task.status === 'paused' ? onResumeTask(task.id) : task.status === 'failed' || task.status === 'cancelled' ? onRetryTask(task.id) : setOpenMenuId(openMenuId === task.id ? null : task.id)}
+                          onClick={(event) => isRunning ? onPauseTask(task.id) : task.status === 'paused' ? onResumeTask(task.id) : task.status === 'failed' || task.status === 'cancelled' ? onRetryTask(task.id) : openTaskContextMenu(event, task)}
                           className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
                           {isRunning ? <Pause className="w-3.5 h-3.5" /> : task.status === 'paused' ? <Play className="w-3.5 h-3.5" /> : task.status === 'failed' || task.status === 'cancelled' ? <RotateCw className="w-3.5 h-3.5" /> : <MoreHorizontal className="w-3.5 h-3.5" />}
                         </button>
-                        <button type="button" title="More actions" aria-label="More transfer actions" onClick={() => setOpenMenuId(openMenuId === task.id ? null : task.id)} className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+                        <button type="button" title="More actions" aria-label="More transfer actions" onClick={(event) => openTaskContextMenu(event, task)} className="p-1.5 rounded-md text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
                           <MoreHorizontal className="w-3.5 h-3.5" />
                         </button>
                       </div>
-
-                      {openMenuId === task.id && (
-                        <div onClick={(event) => event.stopPropagation()} className="absolute right-3 top-10 z-30 w-48 rounded-lg border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-xl py-1 text-xs">
-                          <button type="button" onClick={() => { setOpenMenuId(null); onSelectTask(task); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><Info className="w-3.5 h-3.5" />Inspect Details</button>
-                          {task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFolder(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FolderOpen className="w-3.5 h-3.5" />Open Folder</button>}
-                          {task.status === 'completed' && task.output_path && <button type="button" onClick={() => { setOpenMenuId(null); api.openTaskFile(task).catch(() => {}); }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2 text-[var(--vanta-text)]"><FileCheck2 className="w-3.5 h-3.5" />Open File</button>}
-                          {isRunning || task.status === 'queued' ? <button type="button" onClick={() => { setOpenMenuId(null); onCancelTask(task.id); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><X className="w-3.5 h-3.5" />Cancel</button> : <button type="button" onClick={() => { setOpenMenuId(null); setConfirmState({ title: 'Remove Transfer', message: `Remove "${task.title}" from the download queue?`, confirmLabel: 'Remove', checkboxLabel: task.output_path ? 'Also delete file from disk' : undefined, onConfirm: (deleteFile) => { setConfirmState(null); onDeleteTask(task.id, deleteFile); } }); }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2 text-red-500"><Trash2 className="w-3.5 h-3.5" />Remove</button>}
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -619,6 +565,146 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
           </div>
         </div>
       </div>
+
+      {contextMenu && (
+        <div className="fixed inset-0 z-[80]" onClick={() => setContextMenu(null)}>
+          <div
+            ref={contextMenuRef}
+            role="menu"
+            aria-label="Download actions"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 272)),
+              top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 460)),
+            }}
+            className="fixed z-[81] w-[264px] max-h-[min(440px,calc(100vh-16px))] overflow-y-auto rounded-xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-2xl py-1.5 text-xs"
+          >
+            <div className="px-3 py-2 border-b border-[var(--vanta-border)]">
+              <p className="font-semibold text-[var(--vanta-text)] truncate">
+                {contextMenu.targetIds.length > 1
+                  ? `${contextMenu.targetIds.length} downloads selected`
+                  : tasks.find((task) => task.id === contextMenu.taskId)?.title || 'Download'}
+              </p>
+              <p className="text-[10px] text-[var(--vanta-muted)] mt-0.5">Actions apply to the current selection</p>
+            </div>
+            {contextMenu.targetIds.length === 1 && (
+              <>
+                <button type="button" role="menuitem" onClick={() => {
+                  const task = tasks.find((item) => item.id === contextMenu.taskId);
+                  if (task) onSelectTask(task);
+                  setContextMenu(null);
+                }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                  <Info className="w-4 h-4 text-[var(--vanta-muted)]" /> Details
+                </button>
+                {(() => {
+                  const task = tasks.find((item) => item.id === contextMenu.taskId);
+                  if (!task?.output_path) return null;
+                  return (
+                    <>
+                      {task.status === 'completed' && (
+                        <button type="button" role="menuitem" onClick={() => {
+                          api.openTaskFile(task).catch((error) => window.alert(error instanceof Error ? error.message : 'Could not open file.'));
+                          setContextMenu(null);
+                        }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                          <FileCheck2 className="w-4 h-4 text-[var(--vanta-muted)]" /> Open File
+                        </button>
+                      )}
+                      <button type="button" role="menuitem" onClick={() => {
+                        api.openTaskFolder(task).catch((error) => window.alert(error instanceof Error ? error.message : 'Could not open folder.'));
+                        setContextMenu(null);
+                      }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                        <FolderOpen className="w-4 h-4 text-[var(--vanta-muted)]" /> Open Folder
+                      </button>
+                    </>
+                  );
+                })()}
+              </>
+            )}
+            <div className="my-1 border-t border-[var(--vanta-border)]" />
+            {contextMenu.targetIds.some((id) => {
+              const task = tasks.find((item) => item.id === id);
+              return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+            }) && (
+              <button type="button" role="menuitem" onClick={() => {
+                const ids = contextMenu.targetIds.filter((id) => {
+                  const task = tasks.find((item) => item.id === id);
+                  return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+                });
+                handleBulkAction('pause', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Pause failed.'));
+                setContextMenu(null);
+              }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                <Pause className="w-4 h-4 text-[var(--vanta-muted)]" /> Pause
+              </button>
+            )}
+            {contextMenu.targetIds.some((id) => tasks.find((item) => item.id === id)?.status === 'paused') && (
+              <button type="button" role="menuitem" onClick={() => {
+                const ids = contextMenu.targetIds.filter((id) => tasks.find((item) => item.id === id)?.status === 'paused');
+                handleBulkAction('resume', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Resume failed.'));
+                setContextMenu(null);
+              }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                <Play className="w-4 h-4 text-[var(--vanta-muted)]" /> Resume
+              </button>
+            )}
+            {contextMenu.targetIds.some((id) => ['failed','cancelled'].includes(tasks.find((item) => item.id === id)?.status || '')) && (
+              <button type="button" role="menuitem" onClick={() => {
+                const ids = contextMenu.targetIds.filter((id) => ['failed','cancelled'].includes(tasks.find((item) => item.id === id)?.status || ''));
+                handleBulkAction('retry', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Retry failed.'));
+                setContextMenu(null);
+              }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+                <RotateCw className="w-4 h-4 text-[var(--vanta-muted)]" /> Retry
+              </button>
+            )}
+            {contextMenu.targetIds.some((id) => {
+              const task = tasks.find((item) => item.id === id);
+              return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+            }) && (
+              <button type="button" role="menuitem" onClick={() => {
+                const ids = contextMenu.targetIds.filter((id) => {
+                  const task = tasks.find((item) => item.id === id);
+                  return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+                });
+                handleBulkAction('cancel', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Cancel failed.'));
+                setContextMenu(null);
+              }} className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2.5 text-[var(--vanta-text)]">
+                <X className="w-4 h-4 text-[var(--vanta-muted)]" /> Cancel
+              </button>
+            )}
+            <div className="my-1 border-t border-[var(--vanta-border)]" />
+            {queues.filter((queue) => queue.id !== selectedQueueId).length > 0 && (
+              <div className="px-3 py-1.5">
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--vanta-muted)]">Move to Queue</p>
+                {queues.filter((queue) => queue.id !== selectedQueueId).map((queue) => (
+                  <button key={queue.id} type="button" role="menuitem" onClick={async () => {
+                    try {
+                      const nextTasks = await api.moveTasksToQueue(contextMenu.targetIds, queue.id);
+                      onTasksChanged(nextTasks);
+                      onSelectQueue(queue.id);
+                      setSelectedIds([]);
+                    } catch (error) {
+                      window.alert(error instanceof Error ? error.message : 'Could not move selected downloads.');
+                    } finally {
+                      setContextMenu(null);
+                    }
+                  }} className="w-full px-2 py-1.5 rounded-md text-left hover:bg-[var(--vanta-surface-hover)] text-[var(--vanta-text)]">
+                    {queue.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button type="button" role="menuitem" onClick={() => {
+              const urls = contextMenu.targetIds.map((id) => tasks.find((task) => task.id === id)?.url).filter(Boolean).join('\n');
+              navigator.clipboard.writeText(urls).catch(() => window.alert('Could not copy selected links.'));
+              setContextMenu(null);
+            }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] flex items-center gap-2.5 text-[var(--vanta-text)]">
+              <Copy className="w-4 h-4 text-[var(--vanta-muted)]" /> Copy Link{contextMenu.targetIds.length > 1 ? 's' : ''}
+            </button>
+            <button type="button" role="menuitem" onClick={() => { handleBulkAction('delete', contextMenu.targetIds); setContextMenu(null); }}
+              className="w-full px-3 py-2 text-left hover:bg-red-500/10 flex items-center gap-2.5 text-red-500">
+              <Trash2 className="w-4 h-4" /> Remove
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Modal */}
       <ConfirmDialog

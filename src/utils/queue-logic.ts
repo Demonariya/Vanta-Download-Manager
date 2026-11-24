@@ -145,8 +145,8 @@ export function filterAndSortTasks(
       return a.title.localeCompare(b.title) * mult;
     }
     if (field === 'size') {
-      const sizeA = a.total_bytes || a.downloaded_bytes || 0;
-      const sizeB = b.total_bytes || b.downloaded_bytes || 0;
+      const sizeA = a.status === 'completed' ? (a.downloaded_bytes || a.total_bytes || 0) : (a.total_bytes || a.downloaded_bytes || 0);
+      const sizeB = b.status === 'completed' ? (b.downloaded_bytes || b.total_bytes || 0) : (b.total_bytes || b.downloaded_bytes || 0);
       return (sizeA - sizeB) * mult;
     }
     if (field === 'progress') {
