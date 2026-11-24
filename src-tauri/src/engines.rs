@@ -27,7 +27,7 @@ const YTDLP_RELEASE_REPO: &str = "yt-dlp/yt-dlp";
 const SPOTDL_RELEASE_REPO: &str = "spotDL/spotify-downloader";
 const FFMPEG_RELEASE_REPO: &str = "FFmpeg-Builds/FFmpeg-Builds";
 
-// BtbN publishes this rolling master build asset on its "latest" release.
+// FFmpeg-Builds publishes this rolling master build asset on its "latest" release.
 // The asset name is stable while the archive contents and SHA-256 change per build.
 const FFMPEG_WIN_ZIP_NAME: &str = "ffmpeg-master-latest-win64-gpl-shared.zip";
 

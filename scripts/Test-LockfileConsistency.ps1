@@ -25,9 +25,9 @@ if ([string]::IsNullOrWhiteSpace($scriptPath)) {
     throw 'Unable to resolve Test-LockfileConsistency.ps1 location.'
 }
 
-$scriptPath = (Resolve-Path -LiteralPath $scriptPath).Path
-$scriptDirectory = Split-Path -LiteralPath $scriptPath -Parent
-$repoRoot = Split-Path -LiteralPath $scriptDirectory -Parent
+$scriptPath = [System.IO.Path]::GetFullPath($scriptPath)
+$scriptDirectory = [System.IO.Path]::GetDirectoryName($scriptPath)
+$repoRoot = [System.IO.Path]::GetDirectoryName($scriptDirectory)
 
 $lockHelper = Join-Path $scriptDirectory 'LockfileValidation.ps1'
 $versionScript = Join-Path $scriptDirectory 'Test-VersionConsistency.ps1'

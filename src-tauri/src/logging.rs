@@ -58,7 +58,7 @@ pub fn redact_secrets(text: &str) -> String {
     });
 
     let s1 = re_bearer.replace_all(text, "${1}[REDACTED_TOKEN]");
-    let s2 = re_auth.replace_all(&s1, "${1}[REDACTED_HEADER]");
+    let s2 = re_auth.replace_all(&s1, "${1}[REDACTED_TOKEN]");
     let s3 = re_cookie.replace_all(&s2, "${1}[REDACTED_COOKIE]");
     let s4 = re_query.replace_all(&s3, "${1}[REDACTED]");
     let s5 = re_netscape.replace_all(&s4, "${1}[REDACTED_VALUE]");
