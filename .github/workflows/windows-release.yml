@@ -160,10 +160,10 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Check Rust crate compilation (--locked)
-        run: cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --features desktop
 
       - name: Run Rust unit tests (--locked)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features desktop
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features desktop
 
       - name: Publish Rust Validation Job Summary
         if: always()
