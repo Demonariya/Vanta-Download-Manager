@@ -169,7 +169,7 @@ export function computeHistoryStats(tasks: DownloadTask[]): HistoryStats {
   for (const t of tasks) {
     if (t.status === 'completed') {
       totalCompleted += 1;
-      totalBytesDownloaded += t.total_bytes || t.downloaded_bytes || 0;
+      totalBytesDownloaded += t.downloaded_bytes || t.total_bytes || 0;
       totalElapsedSeconds += t.elapsed_seconds || 0;
     } else if (t.status === 'failed') {
       totalFailed += 1;

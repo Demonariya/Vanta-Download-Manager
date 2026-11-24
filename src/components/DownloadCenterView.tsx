@@ -555,6 +555,12 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                   const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
                   const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
                   const downloaded = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0 ? task.total_bytes : task.downloaded_bytes;
+                  const completedSize = task.status === 'completed' ? (task.downloaded_bytes || task.total_bytes || downloaded) : 0;
+                  const sizeText = task.status === 'completed'
+                    ? (completedSize > 0 ? formatBytes(completedSize) : '—')
+                    : task.total_bytes > 0
+                      ? `${downloaded > 0 ? formatBytes(downloaded) : '0 B'} / ≈${formatBytes(task.total_bytes)}`
+                      : downloaded > 0 ? formatBytes(downloaded) : '—';
 
                   return (
                     <div key={task.id} onClick={() => onSelectTask(task)}
@@ -581,7 +587,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           <div className={`h-full rounded-full transition-[width] duration-200 ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
                         </div>
                       </div>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.total_bytes > 0 ? `${formatBytes(downloaded)} / ${formatBytes(task.total_bytes)}` : downloaded > 0 ? formatBytes(downloaded) : '—'}</span>
+                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap" title={task.status === 'completed' ? 'Verified final output file size' : 'Estimated total size may change after merging or media processing'}>{sizeText}</span>
                       <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>
                       <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>
                       <span className={`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>

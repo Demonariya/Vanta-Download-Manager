@@ -39,8 +39,12 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
 
   const audioTask = task.is_audio_only || task.engine === 'spotdl';
   const lyrics = task.lyrics_lrc_content?.trim() || '';
-  const effectiveBytes = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0
-    ? task.total_bytes : task.downloaded_bytes;
+  const effectiveBytes = task.status === 'completed'
+    ? (task.downloaded_bytes || task.total_bytes)
+    : task.downloaded_bytes;
+  const displayedTotalSize = task.status === 'completed'
+    ? effectiveBytes
+    : task.total_bytes;
 
   const handleRename = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -127,8 +131,8 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               </div>
               <ProgressDisplay task={task} />
               <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><span className="block text-[var(--vanta-muted)]">Downloaded</span><strong className="text-[var(--vanta-text)]">{formatBytes(effectiveBytes)}</strong></div>
-                <div><span className="block text-[var(--vanta-muted)]">Total size</span><strong className="text-[var(--vanta-text)]">{task.total_bytes ? formatBytes(task.total_bytes) : '—'}</strong></div>
+                <div><span className="block text-[var(--vanta-muted)]">{task.status === 'completed' ? 'Final file size' : 'Downloaded'}</span><strong className="text-[var(--vanta-text)]">{effectiveBytes > 0 ? formatBytes(effectiveBytes) : '—'}</strong></div>
+                {task.status !== 'completed' && <div><span className="block text-[var(--vanta-muted)]">Estimated total</span><strong className="text-[var(--vanta-text)]">{displayedTotalSize ? `≈${formatBytes(displayedTotalSize)}` : '—'}</strong></div>}
                 <div><span className="block text-[var(--vanta-muted)]">Speed</span><strong className="text-[var(--vanta-text)]">{task.speed_str || '—'}</strong></div>
                 <div><span className="block text-[var(--vanta-muted)]">ETA</span><strong className="text-[var(--vanta-text)]">{task.eta_str || '—'}</strong></div>
               </div>

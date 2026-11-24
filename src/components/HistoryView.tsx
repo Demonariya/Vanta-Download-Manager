@@ -82,7 +82,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           esc(t.engine),
           esc(t.status),
           esc(t.ext),
-          t.total_bytes || t.downloaded_bytes || 0,
+          t.status === 'completed' ? (t.downloaded_bytes || t.total_bytes || 0) : (t.total_bytes || t.downloaded_bytes || 0),
           esc(t.completed_at || t.created_at),
         ].join(',')
       ),
@@ -288,11 +288,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                         : item.ext.toUpperCase()}
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-[var(--vanta-text-secondary)] whitespace-nowrap">
-                      {item.total_bytes > 0
-                        ? formatBytes(item.total_bytes)
-                        : item.downloaded_bytes > 0
-                        ? formatBytes(item.downloaded_bytes)
-                        : '--'}
+                      {item.status === 'completed'
+                        ? item.downloaded_bytes > 0 ? formatBytes(item.downloaded_bytes) : item.total_bytes > 0 ? formatBytes(item.total_bytes) : '--'
+                        : item.total_bytes > 0 ? `≈${formatBytes(item.total_bytes)}` : item.downloaded_bytes > 0 ? formatBytes(item.downloaded_bytes) : '--'}
                     </td>
                     <td className="py-3 px-4 text-[var(--vanta-muted)] font-mono tabular-nums text-[11px] whitespace-nowrap">
                       {new Date(item.completed_at || item.created_at).toLocaleDateString()}

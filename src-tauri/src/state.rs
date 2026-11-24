@@ -19,6 +19,19 @@ pub struct TrackedInspection {
     pub cancelled: Arc<AtomicBool>,
 }
 
+fn completed_output_file_size(status: &TaskStatus, output_path: &str) -> Option<u64> {
+    if !matches!(status, TaskStatus::Completed) || output_path.trim().is_empty() {
+        return None;
+    }
+
+    let metadata = fs::metadata(output_path).ok()?;
+    if metadata.is_file() && metadata.len() > 0 {
+        Some(metadata.len())
+    } else {
+        None
+    }
+}
+
 pub struct AppState {
     pub data_dir: PathBuf,
     pub db: Mutex<Connection>,
@@ -405,7 +418,7 @@ impl AppState {
             .unwrap_or(false);
         let lyrics_lrc_content: Option<String> = row.get("lyrics_lrc_content").ok().flatten();
 
-        Ok(DownloadTask {
+        let mut task = DownloadTask {
             id: row.get("id")?,
             url: row.get("url")?,
             title: row.get("title")?,
@@ -465,7 +478,17 @@ impl AppState {
             completed_at: row.get("completed_at")?,
             retries: row.get("retries")?,
             max_retries: row.get("max_retries")?,
-        })
+        };
+
+        // A stored progress estimate can differ from the final muxed/processed file size.
+        // For completed single-file downloads, trust the actual file on disk when available.
+        if let Some(actual_size) = completed_output_file_size(&task.status, &task.output_path) {
+            task.downloaded_bytes = actual_size;
+            task.total_bytes = actual_size;
+            task.remaining_bytes = 0;
+        }
+
+        Ok(task)
     }
 
     pub fn get_tasks(&self) -> Vec<DownloadTask> {
@@ -1242,6 +1265,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vanta_state_{}_{}", label, uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn completed_file_size_uses_verified_file_bytes_not_old_estimates() {
+        let dir = make_temp_state_dir("actual_size");
+        let file_path = dir.join("final-video.mp4");
+        fs::write(&file_path, vec![7u8; 257 * 1024]).unwrap();
+
+        let actual = completed_output_file_size(
+            &TaskStatus::Completed,
+            file_path.to_str().unwrap(),
+        );
+        assert_eq!(actual, Some(257 * 1024));
+        assert_eq!(
+            completed_output_file_size(&TaskStatus::Paused, file_path.to_str().unwrap()),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
