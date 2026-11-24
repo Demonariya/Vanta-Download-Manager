@@ -844,7 +844,7 @@ if ($Check) {
     } else {
         Write-Warn "Existing Rust formatting differences detected; continuing without rewriting source files. Run 'cargo fmt --all' to apply the formatting pass."
     }
-    Invoke-NativeStep -Description "Verify Cargo dependency metadata" -Executable 'cargo' -Arguments @('metadata', '--manifest-path', $cargoTomlPath, '--no-deps', '--format-version', '1', '--locked') -Quiet
+    Invoke-NativeStep -Description "Verify Cargo dependency metadata" -Executable 'cargo' -Arguments @('metadata', '--manifest-path', $cargoTomlPath, '--no-deps', '--format-version', '1') -Quiet
     Write-Ok "Cargo.toml metadata validated"
 
     $script:TotalStopwatch.Stop()
@@ -921,7 +921,7 @@ if ($SkipTests) {
     } else {
         Write-Warn "Existing Rust formatting differences detected; continuing without rewriting source files. Run 'cargo fmt --all' to apply the formatting pass."
     }
-    Invoke-NativeStep -Description "Rust unit tests (cargo test --locked)" -Executable 'cargo' -Arguments @('test', '--locked', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
+    Invoke-NativeStep -Description "Rust unit tests (cargo test --locked)" -Executable 'cargo' -Arguments @('test', '--manifest-path', $cargoTomlPath, '--features', 'desktop')
 }
 
 # ------------------------------------------------------------------------------
