@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   X, FolderOpen, FileCheck2, Edit3, Copy, AlertCircle, RefreshCw,
-  Info, ListVideo, Captions, Music2, Settings2, Download,
+  Info, ListVideo, Captions, Music2, Settings2, Download, ClipboardList, FileDown,
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
@@ -15,7 +15,7 @@ interface DownloadDetailsDrawerProps {
   onRetryTask: (id: string) => void;
 }
 
-type InspectorTab = 'details' | 'playlist' | 'subtitles' | 'lyrics' | 'options';
+type InspectorTab = 'details' | 'playlist' | 'subtitles' | 'lyrics' | 'options' | 'logs';
 
 export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ task, onClose, onRetryTask }) => {
   const [tab, setTab] = useState<InspectorTab>('details');
@@ -25,6 +25,8 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [logFilter, setLogFilter] = useState<'all' | 'info' | 'warn' | 'error'>('all');
+  const [logsNotice, setLogsNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!task) return;
@@ -33,6 +35,8 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
     setFilenameDraft((task.output_path || '').split(/[\\/]/).pop() || task.custom_filename || task.title);
     setActionError(null);
     setActionNotice(null);
+    setLogFilter('all');
+    setLogsNotice(null);
   }, [task?.id]);
 
   if (!task) return null;
@@ -85,12 +89,36 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
     URL.revokeObjectURL(objectUrl);
   };
 
+  const taskLogs = task.logs || [];
+  const filteredLogs = taskLogs.filter((entry) => logFilter === 'all' || entry.level === logFilter);
+  const formatLogText = (entries: typeof taskLogs) => entries.map((entry) => '[' + entry.timestamp + '] [' + entry.level.toUpperCase() + '] ' + entry.message).join('\n');
+  const copyLogs = async () => {
+    try {
+      await navigator.clipboard.writeText(formatLogText(filteredLogs));
+      setLogsNotice('Copied ' + filteredLogs.length + ' log entries.');
+    } catch {
+      setLogsNotice('Could not copy logs to the clipboard.');
+    }
+  };
+  const exportLogs = () => {
+    const blob = new Blob([formatLogText(taskLogs)], { type: 'text/plain;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = (task.title || 'download').replace(/[\\/:*?"<>|]/g, '_') + '-logs.txt';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  };
+
   const tabs: Array<{ id: InspectorTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { id: 'details', label: 'Details', icon: Info },
     { id: 'playlist', label: 'Playlist', icon: ListVideo },
     { id: 'subtitles', label: 'Subtitles', icon: Captions },
     { id: 'lyrics', label: 'Lyrics', icon: Music2 },
     { id: 'options', label: 'Options', icon: Settings2 },
+    { id: 'logs', label: 'Logs' + (taskLogs.length ? ' (' + taskLogs.length + ')' : ''), icon: ClipboardList },
   ];
 
   return (
@@ -178,6 +206,50 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
           <div className="max-w-4xl h-full min-h-0 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3 shrink-0"><div><h3 className="text-sm font-semibold text-[var(--vanta-text)]">Synchronized lyrics</h3><p className="text-[11px] text-[var(--vanta-muted)]">Lyrics supplied for this download · LRC format</p></div><button type="button" disabled={!lyrics} onClick={exportLyrics} className="px-3 py-1.5 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text)] inline-flex items-center gap-1.5 disabled:opacity-40"><Download className="w-3.5 h-3.5" />Export .LRC</button></div>
             {lyrics ? <pre className="flex-1 min-h-0 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 text-[11px] leading-5 font-mono whitespace-pre-wrap text-[var(--vanta-text-secondary)]">{lyrics}</pre> : <div className="flex-1 min-h-0 rounded-xl border border-dashed border-[var(--vanta-border)] flex flex-col items-center justify-center text-center p-5"><Music2 className="w-7 h-7 text-[var(--vanta-muted)] mb-2" /><p className="text-sm text-[var(--vanta-text)] font-medium">No LRC lyrics attached</p><p className="text-[11px] text-[var(--vanta-muted)] mt-1 max-w-lg">Add an LRC file or paste timestamped lyrics in the Audio section when creating a download. VANTA can then embed the supplied lyrics in MP3 files and keep an LRC sidecar.</p></div>}
+          </div>
+        )}
+
+        {tab === 'logs' && (
+          <div className="flex h-full min-h-[180px] flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--vanta-text)]">Download activity log</h3>
+                <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">{taskLogs.length} recorded event(s) for this task</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" disabled={!filteredLogs.length} onClick={copyLogs} className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] px-2.5 py-1.5 text-[11px] text-[var(--vanta-text-secondary)] disabled:opacity-40"><ClipboardList className="h-3.5 w-3.5" />Copy visible</button>
+                <button type="button" disabled={!taskLogs.length} onClick={exportLogs} className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] px-2.5 py-1.5 text-[11px] text-[var(--vanta-text-secondary)] disabled:opacity-40"><FileDown className="h-3.5 w-3.5" />Export all</button>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(['all', 'info', 'warn', 'error'] as const).map((filter) => (
+                <button key={filter} type="button" onClick={() => setLogFilter(filter)} className={"rounded-md px-2.5 py-1 text-[10px] font-semibold capitalize transition-colors " + (logFilter === filter ? 'bg-[var(--vanta-accent)] text-white' : 'border border-[var(--vanta-border)] text-[var(--vanta-muted)] hover:bg-[var(--vanta-surface-hover)]')}>
+                  {filter === 'all' ? 'All (' + taskLogs.length + ')' : filter + ' (' + taskLogs.filter((entry) => entry.level === filter).length + ')'}
+                </button>
+              ))}
+              {logsNotice && <span role="status" className="ml-auto text-[10px] text-[var(--vanta-muted)]">{logsNotice}</span>}
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+              {filteredLogs.length ? (
+                <div className="divide-y divide-[var(--vanta-border)]">
+                  {[...filteredLogs].reverse().map((entry, index) => (
+                    <div key={entry.timestamp + '-' + index} className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 px-3 py-2.5 text-[11px]">
+                      <div className="flex flex-col items-start gap-1">
+                        <span className="font-mono text-[10px] text-[var(--vanta-muted)] whitespace-nowrap">{entry.timestamp}</span>
+                        <span className={"rounded px-1.5 py-0.5 text-[9px] font-bold uppercase " + (entry.level === 'error' ? 'bg-red-500/10 text-red-500' : entry.level === 'warn' ? 'bg-amber-500/10 text-amber-500' : 'bg-[var(--vanta-surface)] text-[var(--vanta-muted)]')}>{entry.level}</span>
+                      </div>
+                      <p className="min-w-0 break-words text-[var(--vanta-text-secondary)]">{entry.message}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex h-full min-h-[140px] flex-col items-center justify-center px-4 text-center">
+                  <ClipboardList className="mb-2 h-7 w-7 text-[var(--vanta-muted)]" />
+                  <p className="text-xs font-medium text-[var(--vanta-text)]">{taskLogs.length ? 'No entries match this filter' : 'No activity logs recorded'}</p>
+                  <p className="mt-1 text-[10px] text-[var(--vanta-muted)]">{taskLogs.length ? 'Choose another severity filter to see more events.' : 'Events recorded by the download engine will appear here.'}</p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
