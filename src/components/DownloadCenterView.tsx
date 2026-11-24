@@ -112,7 +112,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     const defaults = { engine: true, size: true, speed: true, eta: true, status: true };
     try {
       const saved = localStorage.getItem('vanta.download-columns.v1');
-      return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+      if (!saved) return defaults;
+      const parsed: unknown = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return defaults;
+      const stored = parsed as Record<string, unknown>;
+      return {
+        engine: typeof stored.engine === 'boolean' ? stored.engine : defaults.engine,
+        size: typeof stored.size === 'boolean' ? stored.size : defaults.size,
+        speed: typeof stored.speed === 'boolean' ? stored.speed : defaults.speed,
+        eta: typeof stored.eta === 'boolean' ? stored.eta : defaults.eta,
+        status: typeof stored.status === 'boolean' ? stored.status : defaults.status,
+      };
     } catch {
       return defaults;
     }
