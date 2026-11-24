@@ -707,6 +707,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
+          <label className="flex items-start gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.verify_fragments !== false}
+              onChange={(e) => setForm({ ...form, verify_fragments: e.target.checked })}
+              className="mt-0.5 w-4 h-4 rounded accent-[var(--vanta-accent)]"
+            />
+            <span className="min-w-0">
+              <span className="block font-medium text-[var(--vanta-text)]">Verify Fragments</span>
+              <span className="mt-1 block text-[11px] leading-relaxed text-[var(--vanta-muted)]">Do not mark a media download as successful when required fragments are unavailable. Failed fragments must exhaust retries or the download remains failed.</span>
+            </span>
+          </label>
+
         </div>
       )}
 
