@@ -29,6 +29,8 @@ interface SidebarProps {
   onOpenNewDownload: () => void;
   engineStatus: EngineStatusMap | null;
   activeCount: number;
+  scopeFilter: string;
+  setScopeFilter: (scope: any) => void;
   isCollapsed: boolean;
   setIsCollapsed: (collapsed: boolean) => void;
   isMobileOpen: boolean;
@@ -41,13 +43,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenNewDownload,
   engineStatus,
   activeCount,
+  scopeFilter,
+  setScopeFilter,
   isCollapsed,
   setIsCollapsed,
   isMobileOpen,
   setIsMobileOpen,
 }) => {
   const navItems: Array<{
-    id: ActiveTab | 'new-download';
+    id: ActiveTab | 'new-download' | 'music' | 'video' | 'finished' | 'unfinished';
     label: string;
     icon: React.ComponentType<{ className?: string }>;
     count?: number;
@@ -60,10 +64,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       count: activeCount > 0 ? activeCount : undefined,
     },
 
-    { id: 'downloads', label: 'Music', icon: Music2 },
-    { id: 'downloads', label: 'Video', icon: Video },
-    { id: 'history', label: 'Finished', icon: CheckCircle2 },
-    { id: 'history', label: 'Unfinished', icon: Clock3 },
+    { id: 'music', label: 'Music', icon: Music2 },
+    { id: 'video', label: 'Video', icon: Video },
+    { id: 'finished', label: 'Finished', icon: CheckCircle2 },
+    { id: 'unfinished', label: 'Unfinished', icon: Clock3 },
     {
       id: 'new-download',
       label: 'New Download',
@@ -80,13 +84,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
     engineStatus.ytdlp.available &&
     engineStatus.ffmpeg.available;
 
-  const handleNavClick = (id: ActiveTab | 'new-download') => {
+  const handleNavClick = (id: ActiveTab | 'new-download' | 'music' | 'video' | 'finished' | 'unfinished') => {
     if (id === 'new-download') {
       setIsMobileOpen(false);
       onOpenNewDownload();
       return;
     }
-    setActiveTab(id);
+    if (id === 'music' || id === 'video' || id === 'finished' || id === 'unfinished') {
+      setActiveTab('downloads');
+      setScopeFilter(({ music: 'audio', video: 'video', finished: 'finished', unfinished: 'unfinished' } as const)[id]);
+    } else {
+      setActiveTab(id);
+    }
     setIsMobileOpen(false);
   };
 
@@ -152,7 +161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <nav className="px-2.5 py-3 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = !item.isAction && activeTab === item.id;
+            const isActive = !item.isAction && (activeTab === item.id || (item.id === 'music' && scopeFilter === 'audio') || (item.id === 'video' && scopeFilter === 'video') || (item.id === 'finished' && scopeFilter === 'finished') || (item.id === 'unfinished' && scopeFilter === 'unfinished'));
             return (
               <button
                 key={item.id}

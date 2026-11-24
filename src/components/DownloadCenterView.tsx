@@ -40,7 +40,9 @@ export type QueueScopeFilter =
   | 'completed'
   | 'failed'
   | 'audio'
-  | 'video';
+  | 'video'
+  | 'finished'
+  | 'unfinished';
 
 interface DownloadCenterViewProps {
   tasks: DownloadTask[];
@@ -120,13 +122,15 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const activeQueue = queues.find((queue) => queue.id === selectedQueueId) || null;
 
   const visibleTasks = useMemo(
-    () =>
-      filterAndSortTasks(queueTasks, {
-        statusFilter: scopeFilter,
-        searchQuery,
-        sortField,
-        sortDirection,
-      }),
+    () => {
+      const scoped = scopeFilter === 'finished'
+        ? queueTasks.filter((task) => task.status === 'completed')
+        : scopeFilter === 'unfinished'
+          ? queueTasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled')
+          : queueTasks;
+      const statusFilter = scopeFilter === 'finished' || scopeFilter === 'unfinished' ? 'all' : scopeFilter;
+      return filterAndSortTasks(scoped, { statusFilter, searchQuery, sortField, sortDirection });
+    },
     [queueTasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
@@ -195,6 +199,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     { id: 'failed', label: 'Failed', count: failedCount },
     { id: 'audio', label: 'Audio', count: audioCount },
     { id: 'video', label: 'Video', count: videoCount },
+    { id: 'finished', label: 'Finished', count: completedCount },
+    { id: 'unfinished', label: 'Unfinished', count: tasks.length - completedCount },
   ];
 
   return (

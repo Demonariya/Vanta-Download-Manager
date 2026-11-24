@@ -357,6 +357,8 @@ export default function App() {
           }}
           engineStatus={engineStatus}
           activeCount={activeCount}
+          scopeFilter={scopeFilter}
+          setScopeFilter={setScopeFilter}
           isCollapsed={isSidebarCollapsed}
           setIsCollapsed={setIsSidebarCollapsed}
           isMobileOpen={isMobileMenuOpen}
