@@ -1,4 +1,7 @@
 # Node & Frontend Build
+# npm is the canonical package manager for this repository.
+bun.lock
+bun.lockb
 node_modules/
 dist/
 build/
