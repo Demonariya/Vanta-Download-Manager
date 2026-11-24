@@ -3030,7 +3030,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         None => return,
     };
 
-    if matches!(t.status, TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Queued | TaskStatus::Connecting)
+    if matches!(t.status, TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Queued)
+        || (t.status == TaskStatus::Connecting && t.current_phase == "Starting engine...")
         || state.is_shutting_down.load(Ordering::SeqCst)
     {
         return;
