@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Download, Music2, Video, Layers, PlusCircle, History, Terminal, Settings,
-  ShieldCheck, AlertTriangle, ChevronLeft, X,
+  Download, Layers, PlusCircle, History, Terminal, Settings,
+  ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
 import { api } from '../services/api';
@@ -25,25 +25,19 @@ interface SidebarProps {
   setIsMobileOpen: (open: boolean) => void;
 }
 
-type FilterItem = {
-  id: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  count: number;
-};
-
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab, setActiveTab, engineStatus, tasks, queues,
   selectedQueueId, onSelectQueue, onQueuesChanged, scopeFilter, setScopeFilter, isCollapsed,
   setIsCollapsed, isMobileOpen, setIsMobileOpen,
 }) => {
-  const musicCount = tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length;
-  const videoCount = tasks.length - musicCount;
-
-  const mediaItems: FilterItem[] = [
-    { id: 'audio', label: 'Music', icon: Music2, count: musicCount },
-    { id: 'video', label: 'Video', icon: Video, count: videoCount },
-  ];
+  const downloadingCount = tasks.filter((task) => [
+    'connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying',
+  ].includes(task.status)).length;
+  const queuedCount = tasks.filter((task) => task.status === 'queued').length;
+  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
+  const completedCount = tasks.filter((task) => task.status === 'completed').length;
+  const unfinishedCount = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length;
+  const failedCount = tasks.filter((task) => task.status === 'failed').length;
 
   const [queueMenu, setQueueMenu] = useState<{ x: number; y: number; queueId: string } | null>(null);
   const [queueEditor, setQueueEditor] = useState<{ mode: 'create' | 'rename'; queueId?: string } | null>(null);
@@ -141,18 +135,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <nav className="px-2.5 py-3 space-y-1" aria-label="Main downloads">
-            {navButton('downloads', 'Downloads', Download, tasks.length, activeTab === 'downloads', () => {
+            {navButton('downloads', 'All Downloads', Download, tasks.length, activeTab === 'downloads' && scopeFilter === 'all', () => {
               setActiveTab('downloads');
               setScopeFilter('all');
               onSelectQueue('all');
               setIsMobileOpen(false);
             })}
-            {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Categories</p>}
-            {mediaItems.map((item) => navButton(
-              item.id, item.label, item.icon, item.count,
-              activeTab === 'downloads' && scopeFilter === item.id,
-              () => { setActiveTab('downloads'); setScopeFilter(item.id); setIsMobileOpen(false); },
-            ))}
+            {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Transfers</p>}
+            {navButton('active', 'Downloading', Activity, downloadingCount, activeTab === 'downloads' && scopeFilter === 'active', () => {
+              setActiveTab('downloads');
+              setScopeFilter('active');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('queued', 'Queued', Clock, queuedCount, activeTab === 'downloads' && scopeFilter === 'queued', () => {
+              setActiveTab('downloads');
+              setScopeFilter('queued');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('paused', 'Paused', Pause, pausedCount, activeTab === 'downloads' && scopeFilter === 'paused', () => {
+              setActiveTab('downloads');
+              setScopeFilter('paused');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('completed', 'Completed', CheckCircle2, completedCount, activeTab === 'downloads' && scopeFilter === 'completed', () => {
+              setActiveTab('downloads');
+              setScopeFilter('completed');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('unfinished', 'Unfinished', AlertTriangle, unfinishedCount, activeTab === 'downloads' && scopeFilter === 'unfinished', () => {
+              setActiveTab('downloads');
+              setScopeFilter('unfinished');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('failed', 'Failed', AlertTriangle, failedCount, activeTab === 'downloads' && scopeFilter === 'failed', () => {
+              setActiveTab('downloads');
+              setScopeFilter('failed');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
 
             {(!compact || drawer) && (
               <div className="flex items-center justify-between px-3 pt-4 pb-1">

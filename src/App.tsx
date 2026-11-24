@@ -28,6 +28,9 @@ import { NewDownloadModal } from './components/NewDownloadModal';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
 import { TitleBar } from './components/TitleBar';
 import { SafeCloseDialog } from './components/SafeCloseDialog';
+import { AppMenuBar } from './components/AppMenuBar';
+import { ActionToolbar } from './components/ActionToolbar';
+import { StatusBar } from './components/StatusBar';
 
 function makeCheckingEngine(): EngineInfo {
   return {
@@ -379,10 +382,36 @@ export default function App() {
   };
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
+  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
+
+  const handleDeleteSelectedTask = async () => {
+    if (!selectedTask) return;
+    try {
+      await api.deleteTask(selectedTask.id, false);
+      setSelectedTaskId(null);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not remove the selected download.');
+    }
+  };
 
   return (
     <div className="flex flex-col h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
       <TitleBar activeDownloadsCount={activeCount} onRequestClose={handleInitiateClose} />
+      <AppMenuBar
+        theme={theme}
+        onNewDownload={() => {
+          setInitialInspectUrl('');
+          setIsNewDownloadOpen(true);
+        }}
+        onPauseAll={() => { void api.pauseAll(); }}
+        onResumeAll={() => { void api.resumeAll(); }}
+        onOpenHistory={() => setActiveTab('history')}
+        onOpenDiagnostics={() => setActiveTab('diagnostics')}
+        onOpenSettings={() => setActiveTab('settings')}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        onCycleTheme={handleCycleTheme}
+        onExit={handleInitiateClose}
+      />
 
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
         <Sidebar
@@ -425,6 +454,20 @@ export default function App() {
             theme={theme}
             onCycleTheme={handleCycleTheme}
             onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
+          />
+
+          <ActionToolbar
+            selectedTask={selectedTask}
+            activeCount={activeCount}
+            pausedCount={pausedCount}
+            onPauseSelected={() => { if (selectedTask) void api.pauseTask(selectedTask.id); }}
+            onResumeSelected={() => { if (selectedTask) void api.resumeTask(selectedTask.id); }}
+            onRetrySelected={() => { if (selectedTask) void api.retryTask(selectedTask.id); }}
+            onDeleteSelected={() => { void handleDeleteSelectedTask(); }}
+            onPauseAll={() => { void api.pauseAll(); }}
+            onResumeAll={() => { void api.resumeAll(); }}
+            onOpenSettings={() => setActiveTab('settings')}
+            onOpenDiagnostics={() => setActiveTab('diagnostics')}
           />
 
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
@@ -505,6 +548,8 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      <StatusBar tasks={tasks} />
 
       {/* New Download Modal */}
       <NewDownloadModal
