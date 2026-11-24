@@ -2422,8 +2422,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "60".to_string(),
             "--extractor-retries".to_string(),
             "5".to_string(),
-            "--abort-on-unavailable-fragments".to_string(),
         ];
+
+        // When enabled, yt-dlp must fail rather than silently produce media with missing fragments.
+        if settings.verify_fragments {
+            args.push("--abort-on-unavailable-fragments".to_string());
+        }
 
         if task.playlist_mode.as_deref() == Some("playlist") {
             args.push("--yes-playlist".to_string());
