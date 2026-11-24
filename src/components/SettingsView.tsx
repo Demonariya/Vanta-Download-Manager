@@ -20,6 +20,7 @@ import {
   Gauge,
   CalendarClock,
   Music2,
+  Network,
   Info,
 } from 'lucide-react';
 import {
@@ -47,6 +48,7 @@ type SettingsSection =
   | 'general'
   | 'downloads'
   | 'connection'
+  | 'proxy'
   | 'scheduler'
   | 'media'
   | 'python'
@@ -316,6 +318,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     { id: 'general', label: 'General', description: 'Appearance and startup', icon: SlidersHorizontal },
     { id: 'downloads', label: 'Downloads', description: 'Folder and file naming', icon: Download },
     { id: 'connection', label: 'Connection', description: 'Speed and retry rules', icon: Gauge },
+    { id: 'proxy', label: 'Proxy / SOCKS', description: 'Route media requests', icon: Network },
     { id: 'scheduler', label: 'Scheduler', description: 'Queue and time windows', icon: CalendarClock },
     { id: 'media', label: 'Media', description: 'Video and audio defaults', icon: Music2 },
     { id: 'python', label: 'Python', description: 'spotDL runtime', icon: Terminal },
@@ -704,17 +707,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
-          <div className="space-y-1.5 pt-2">
-            <label className="font-medium text-[var(--vanta-text-secondary)] block">
-              HTTP / SOCKS5 Proxy URL (Optional)
-            </label>
+        </div>
+      )}
+
+      {section === 'proxy' && (
+        <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-4 sm:p-5 space-y-4 text-xs">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Proxy / SOCKS</h2>
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">Route supported media extraction and download requests through an HTTP or SOCKS5 proxy.</p>
+          </div>
+          <div className="space-y-1.5 max-w-2xl">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">Proxy URL</label>
             <input
               type="text"
+              autoComplete="off"
+              spellCheck={false}
               placeholder="http://127.0.0.1:8080 or socks5://127.0.0.1:1080"
               value={form.proxy_url}
               onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
-              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2.5 font-mono text-[var(--vanta-text)]"
             />
+            <p className="text-[10px] text-[var(--vanta-muted)]">Leave empty to use the normal network route. Credentials, if required, must be included in the proxy URL.</p>
           </div>
         </div>
       )}
