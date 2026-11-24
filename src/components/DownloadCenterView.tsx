@@ -280,7 +280,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
 
 
-  const tableGridClassName = 'grid grid-cols-[30px_34px_minmax(230px,1.8fr)_78px_minmax(130px,1fr)_92px_86px_78px_96px_76px] items-center gap-2 px-3';
+  const tableGridClassName = 'grid grid-cols-[28px_32px_minmax(210px,2fr)_72px_minmax(145px,1.2fr)_104px_92px_76px_92px_64px] items-center gap-2.5 px-4';
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
       {/* Missing Engine Inline Alert (only shown when missing) */}
@@ -346,24 +346,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             <option value="title:asc">Title (A–Z)</option>
           </select>
 
-          {activeCount > 0 && (
-            <button
-              type="button"
-              onClick={onPauseAll}
-              className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] text-xs font-medium text-[var(--vanta-text-secondary)] whitespace-nowrap shrink-0 transition-colors"
-            >
-              Pause All
-            </button>
-          )}
-          {pausedCount > 0 && (
-            <button
-              type="button"
-              onClick={onResumeAll}
-              className="px-2.5 py-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] text-xs font-medium text-emerald-700 dark:text-[#3fb950] whitespace-nowrap shrink-0 transition-colors"
-            >
-              Resume All
-            </button>
-          )}
           {completedCount > 0 && (
             <button
               type="button"
@@ -466,7 +448,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       {/* Main Transfer List */}
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
         <div className="hidden xl:block overflow-x-auto">
-          <div className="min-w-[1040px]">
+          <div className="min-w-[1060px]">
             <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`}>
               <input type="checkbox" aria-label="Select all visible downloads"
                 checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIds.includes(task.id))}
@@ -523,7 +505,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         } else onSelectTask(task);
                       }}
                       onContextMenu={(event) => openTaskContextMenu(event, task)}
-                      className={`relative ${tableGridClassName} py-2.5 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
+                      className={`relative ${tableGridClassName} py-3 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
                       <div onClick={(event) => event.stopPropagation()}>
                         <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
@@ -541,7 +523,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(1)}%` : '—'}</span>
                           {task.status === 'downloading' && <span className="text-[10px] text-[var(--vanta-muted)] truncate">{task.current_phase || ''}</span>}
                         </div>
-                        <div className="h-2 w-full rounded-full bg-[var(--vanta-surface-2)] overflow-hidden border border-[var(--vanta-border)]">
+                        <div className="h-2.5 w-full rounded-full bg-[var(--vanta-surface-2)] overflow-hidden border border-[var(--vanta-border)]">
                           <div className={`h-full rounded-full transition-[width] duration-200 ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
                         </div>
                       </div>

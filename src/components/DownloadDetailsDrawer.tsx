@@ -94,7 +94,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   ];
 
   return (
-    <aside className="w-full h-[310px] sm:h-[330px] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
+    <aside className="w-full h-[clamp(260px,34vh,380px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
       <div className="h-12 px-3 sm:px-4 border-b border-[var(--vanta-border)] flex items-center justify-between gap-3 shrink-0">
         <nav className="flex items-center gap-1 min-w-0 overflow-x-auto" aria-label="Download detail sections">
           {tabs.map(({ id, label, icon: Icon }) => (

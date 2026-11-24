@@ -324,7 +324,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   ];
 
   return (
-    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-6xl min-w-0 space-y-4">
+    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-4">
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
@@ -376,8 +376,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       {/* Responsive settings navigation: compact grid on small windows, vertical rail on desktop. */}
-      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:items-start lg:gap-4">
-        <nav aria-label="Settings sections" role="tablist" className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2 sm:grid-cols-4 lg:sticky lg:top-3 lg:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start lg:gap-4">
+        <nav aria-label="Settings sections" role="tablist" className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2 sm:grid-cols-4 lg:sticky lg:top-3 lg:grid-cols-1 lg:max-h-[calc(100dvh-190px)] lg:overflow-y-auto">
           {sectionTabs.map((tab) => {
             const active = section === tab.id;
             const Icon = tab.icon;

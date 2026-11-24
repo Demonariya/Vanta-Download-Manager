@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Download, Layers, PlusCircle, History, Terminal, Settings,
-  ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2,
+  ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2, Music2, Video,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
 import { api } from '../services/api';
@@ -179,6 +179,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
               setIsMobileOpen(false);
             })}
 
+            {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Media</p>}
+            {navButton('music', 'Music', Music2, tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'audio', () => {
+              setActiveTab('downloads');
+              setScopeFilter('audio');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+            {navButton('video', 'Video', Video, tasks.filter((task) => !task.is_audio_only && task.engine !== 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'video', () => {
+              setActiveTab('downloads');
+              setScopeFilter('video');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
+
             {(!compact || drawer) && (
               <div className="flex items-center justify-between px-3 pt-4 pb-1">
                 <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Queues</p>
@@ -303,7 +317,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-16' : 'w-60'}`}>
+      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-[68px]' : 'w-[248px]'}`}>
         {renderNavContent(false)}
       </aside>
 
