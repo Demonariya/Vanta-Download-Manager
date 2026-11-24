@@ -1449,12 +1449,11 @@ pub fn exit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
-fn scheduler_window_is_open(settings: &AppSettings) -> bool {
-    let scheduler = &settings.scheduler;
-    if !scheduler.enabled {
-        return true;
-    }
-
+fn scheduler_window_is_open_at(
+    scheduler: &crate::models::SchedulerSettings,
+    today: u32,
+    current: u32,
+) -> bool {
     let parse_minutes = |value: &str| -> Option<u32> {
         let mut parts = value.split(':');
         let hour = parts.next()?.parse::<u32>().ok()?;
@@ -1467,9 +1466,6 @@ fn scheduler_window_is_open(settings: &AppSettings) -> bool {
 
     let Some(start) = parse_minutes(&scheduler.start_time) else { return true; };
     let Some(stop) = parse_minutes(&scheduler.stop_time) else { return true; };
-    let now = chrono::Local::now();
-    let current = now.hour() * 60 + now.minute();
-    let today = now.weekday().num_days_from_sunday();
     let allowed = |day: u32| scheduler.days.is_empty() || scheduler.days.contains(&day);
 
     if start == stop {
@@ -1485,6 +1481,18 @@ fn scheduler_window_is_open(settings: &AppSettings) -> bool {
         return allowed((today + 6) % 7);
     }
     false
+}
+
+fn scheduler_window_is_open(settings: &AppSettings) -> bool {
+    if !settings.scheduler.enabled {
+        return true;
+    }
+    let now = chrono::Local::now();
+    scheduler_window_is_open_at(
+        &settings.scheduler,
+        now.weekday().num_days_from_sunday(),
+        now.hour() * 60 + now.minute(),
+    )
 }
 
 /// Enforces the configured schedule and is called periodically by the desktop runtime.
@@ -3340,5 +3348,48 @@ mod subtitle_and_lyrics_tests {
         assert!(args.windows(2).any(|pair| pair[0] == "--ppa"
             && pair[1] == "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default"));
         assert_eq!(build_subtitle_args(&[], false), Vec::<String>::new());
+    }
+}
+
+
+#[cfg(test)]
+mod scheduler_window_tests {
+    use super::*;
+    use crate::models::SchedulerSettings;
+
+    fn enabled_window(start: &str, stop: &str, days: Vec<u32>) -> SchedulerSettings {
+        SchedulerSettings {
+            enabled: true,
+            start_time: start.to_string(),
+            stop_time: stop.to_string(),
+            pause_on_stop: true,
+            days,
+        }
+    }
+
+    #[test]
+    fn scheduler_enforces_same_day_window_and_selected_days() {
+        let settings = enabled_window("09:00", "17:00", vec![1]);
+        assert!(scheduler_window_is_open_at(&settings, 1, 9 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 1, 16 * 60 + 59));
+        assert!(!scheduler_window_is_open_at(&settings, 1, 17 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 10 * 60));
+    }
+
+    #[test]
+    fn scheduler_handles_overnight_window_using_previous_day_after_midnight() {
+        let settings = enabled_window("22:00", "06:00", vec![1]);
+        assert!(scheduler_window_is_open_at(&settings, 1, 23 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 2, 2 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 7 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 23 * 60));
+    }
+
+    #[test]
+    fn equal_start_and_stop_means_all_day_on_selected_days() {
+        let settings = enabled_window("00:00", "00:00", vec![0, 6]);
+        assert!(scheduler_window_is_open_at(&settings, 0, 12 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 6, 23 * 60 + 59));
+        assert!(!scheduler_window_is_open_at(&settings, 1, 12 * 60));
     }
 }
