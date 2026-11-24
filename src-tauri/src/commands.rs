@@ -9,7 +9,7 @@ use crate::models::{
 };
 use crate::process;
 use crate::state::AppState;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use id3::{
     frame::{Lyrics as Id3Lyrics, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat},
     Error as Id3Error, ErrorKind as Id3ErrorKind, Tag as Id3Tag, TagLike, Version as Id3Version,
@@ -1500,7 +1500,7 @@ pub fn scheduler_tick(app: &AppHandle) {
             task.status == TaskStatus::Paused && task.current_phase == "Paused by scheduler"
         }) {
             task.status = TaskStatus::Queued;
-            task.current_phase = "Queued by scheduler";
+            task.current_phase = "Queued by scheduler".to_string();
             state.upsert_task(&task);
             let _ = app.emit("task_updated", &task);
         }
