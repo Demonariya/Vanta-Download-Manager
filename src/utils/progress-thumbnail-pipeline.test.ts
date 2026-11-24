@@ -506,6 +506,7 @@ test('Pipeline: EngineManager, DB thumbnail preservation, yt-dlp/spotDL progress
         selectedQueueId: 'main',
         onSelectQueue: () => {},
         onQueuesChanged: () => {},
+        onTasksChanged: () => {},
         engineStatus: null,
         scopeFilter: 'all',
         setScopeFilter: () => {},
