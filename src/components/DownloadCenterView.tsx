@@ -16,6 +16,7 @@ import {
   ChevronDown,
   AlertTriangle,
   Download,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
   DownloadQueue,
@@ -106,6 +107,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 }) => {
   const [sortField, setSortField] = useState<SortField>('queue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  const [isColumnMenuOpen, setIsColumnMenuOpen] = useState(false);
+  const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() => {
+    const defaults = { engine: true, size: true, speed: true, eta: true, status: true };
+    try {
+      const saved = localStorage.getItem('vanta.download-columns.v1');
+      return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+    } catch {
+      return defaults;
+    }
+  });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [moveTargetQueueId, setMoveTargetQueueId] = useState('');
   const [contextMenu, setContextMenu] = useState<{
@@ -280,7 +291,32 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
 
 
-  const tableGridClassName = 'grid grid-cols-[28px_32px_minmax(210px,2fr)_72px_minmax(145px,1.2fr)_104px_92px_76px_92px_64px] items-center gap-2.5 px-4';
+  useEffect(() => {
+    try {
+      localStorage.setItem('vanta.download-columns.v1', JSON.stringify(visibleColumns));
+    } catch {
+      // Storage may be unavailable in restricted WebView contexts.
+    }
+  }, [visibleColumns]);
+
+  const columnOptions = [
+    { id: 'engine', label: 'Engine' },
+    { id: 'size', label: 'Size' },
+    { id: 'speed', label: 'Speed' },
+    { id: 'eta', label: 'ETA' },
+    { id: 'status', label: 'Status' },
+  ] as const;
+  const tableGridTemplate = [
+    '28px', '32px', 'minmax(210px,2fr)',
+    ...(visibleColumns.engine ? ['72px'] : []),
+    'minmax(145px,1.2fr)',
+    ...(visibleColumns.size ? ['104px'] : []),
+    ...(visibleColumns.speed ? ['92px'] : []),
+    ...(visibleColumns.eta ? ['76px'] : []),
+    ...(visibleColumns.status ? ['92px'] : []),
+    '64px',
+  ].join(' ');
+  const tableGridClassName = 'grid items-center gap-2.5 px-4';
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
       {/* Missing Engine Inline Alert (only shown when missing) */}
@@ -326,7 +362,39 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
         </div>
 
         {/* Sort + Queue Controls */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={isColumnMenuOpen}
+            aria-label="Customize download columns"
+            onClick={() => setIsColumnMenuOpen((open) => !open)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 py-1.5 text-xs font-medium text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            Columns
+          </button>
+          {isColumnMenuOpen && (
+            <div className="absolute right-0 top-full z-30 mt-2 w-52 rounded-xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] p-2.5 shadow-xl">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-semibold text-[var(--vanta-text)]">Visible columns</p>
+                <button type="button" onClick={() => setVisibleColumns({ engine: true, size: true, speed: true, eta: true, status: true })} className="text-[10px] text-[var(--vanta-accent)] hover:underline">Reset</button>
+              </div>
+              <div className="space-y-1">
+                {columnOptions.map((column) => (
+                  <label key={column.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">
+                    <input
+                      type="checkbox"
+                      checked={visibleColumns[column.id]}
+                      onChange={(event) => setVisibleColumns((current) => ({ ...current, [column.id]: event.target.checked }))}
+                      className="h-3.5 w-3.5 rounded accent-[var(--vanta-accent)]"
+                    />
+                    {column.label}
+                  </label>
+                ))}
+              </div>
+              <p className="mt-2 border-t border-[var(--vanta-border)] pt-2 text-[10px] text-[var(--vanta-muted)]">Name, Progress and Actions stay visible.</p>
+            </div>
+          )}
           <select
             aria-label="Sort downloads"
             value={`${sortField}:${sortDirection}`}
@@ -449,16 +517,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
         <div className="hidden xl:block overflow-x-auto">
           <div className="min-w-[1060px]">
-            <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`}>
+            <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
               <input type="checkbox" aria-label="Select all visible downloads"
                 checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIds.includes(task.id))}
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
               <span>#</span>
               <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Name {sortField === 'title' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
-              <span>Engine</span><span>Progress</span>
-              <button type="button" onClick={() => toggleSort('size')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Size {sortField === 'size' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
-              <button type="button" onClick={() => toggleSort('speed')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Speed {sortField === 'speed' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
-              <span>ETA</span><span>Status</span><span>Actions</span>
+              {visibleColumns.engine && <span>Engine</span>}<span>Progress</span>
+              {visibleColumns.size && <button type="button" onClick={() => toggleSort('size')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Size {sortField === 'size' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
+              {visibleColumns.speed && <button type="button" onClick={() => toggleSort('speed')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Speed {sortField === 'speed' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
+              {visibleColumns.eta && <span>ETA</span>}{visibleColumns.status && <span>Status</span>}<span>Actions</span>
             </div>
 
             {visibleTasks.length === 0 ? (
@@ -505,7 +573,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         } else onSelectTask(task);
                       }}
                       onContextMenu={(event) => openTaskContextMenu(event, task)}
-                      className={`relative ${tableGridClassName} py-3 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`}>
+                      className={`relative ${tableGridClassName} py-3 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`} style={{ gridTemplateColumns: tableGridTemplate }}>
                       <div onClick={(event) => event.stopPropagation()}>
                         <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
@@ -517,7 +585,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           <p className="mt-0.5 text-[10px] text-[var(--vanta-muted)] truncate">{[task.uploader, task.album, task.duration_string, task.ext?.toUpperCase()].filter(Boolean).join(' · ')}</p>
                         </div>
                       </div>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>
+                      {visibleColumns.engine && <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>}
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 mb-1">
                           <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(1)}%` : '—'}</span>
@@ -527,10 +595,10 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                           <div className={`h-full rounded-full transition-[width] duration-200 ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
                         </div>
                       </div>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap" title={task.status === 'completed' ? 'Verified final output file size' : 'Estimated total size may change after merging or media processing'}>{sizeText}</span>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>
-                      <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>
-                      <span className={`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>
+                      {visibleColumns.size && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap" title={task.status === 'completed' ? 'Verified final output file size' : 'Estimated total size may change after merging or media processing'}>{sizeText}</span>}
+                      {visibleColumns.speed && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>}
+                      {visibleColumns.eta && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>}
+                      {visibleColumns.status && <span className={`inline-flex w-fit max-w-full rounded-md px-2 py-1 text-[10px] font-medium truncate ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>}
 
                       <div className="flex items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
                         <button type="button" title={isRunning ? 'Pause' : task.status === 'paused' ? 'Resume' : task.status === 'failed' || task.status === 'cancelled' ? 'Retry' : 'More actions'}
