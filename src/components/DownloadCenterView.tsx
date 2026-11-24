@@ -214,7 +214,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     if (action === 'cancel') setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
   };
 
-  const handleRowClick = (event: React.MouseEvent<HTMLDivElement>, task: DownloadTask, index: number) => {
+  const handleRowClick = (event: React.MouseEvent<HTMLElement>, task: DownloadTask, index: number) => {
     const target = event.target as HTMLElement;
     if (target.closest('button, input, select, a, [role="menu"]')) return;
     onSelectTask(task);

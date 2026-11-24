@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ListVideo, Download, PauseCircle, CheckCircle2, AlertCircle,
-  Music2, Video, Layers, PlusCircle, History, Terminal, Settings,
+  Download, Music2, Video, Layers, PlusCircle, History, Terminal, Settings,
   ShieldCheck, AlertTriangle, ChevronLeft, X,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
@@ -12,7 +11,6 @@ export type ActiveTab = 'downloads' | 'history' | 'diagnostics' | 'settings';
 interface SidebarProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
-  onOpenNewDownload: () => void;
   engineStatus: EngineStatusMap | null;
   tasks: DownloadTask[];
   queues: DownloadQueue[];
@@ -35,16 +33,10 @@ type FilterItem = {
 };
 
 export const Sidebar: React.FC<SidebarProps> = ({
-  activeTab, setActiveTab, onOpenNewDownload, engineStatus, tasks, queues,
+  activeTab, setActiveTab, engineStatus, tasks, queues,
   selectedQueueId, onSelectQueue, onQueuesChanged, scopeFilter, setScopeFilter, isCollapsed,
   setIsCollapsed, isMobileOpen, setIsMobileOpen,
 }) => {
-  const downloadingCount = tasks.filter((task) =>
-    ['connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying'].includes(task.status)
-  ).length;
-  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
-  const completedCount = tasks.filter((task) => task.status === 'completed').length;
-  const failedCount = tasks.filter((task) => task.status === 'failed').length;
   const musicCount = tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length;
   const videoCount = tasks.length - musicCount;
 
@@ -155,13 +147,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             ) : null}
           </div>
 
-          <nav className="px-2.5 py-3 space-y-1" aria-label="Download filters">
-            {statusItems.map((item) => navButton(
-              item.id, item.label, item.icon, item.count,
-              activeTab === 'downloads' && scopeFilter === item.id && (item.id !== 'all' || selectedQueueId === 'all'),
-              () => selectFilter(item.id),
-            ))}
-
+          <nav className="px-2.5 py-3 space-y-1" aria-label="Main downloads">
+            {navButton('downloads', 'Downloads', Download, tasks.length, activeTab === 'downloads', () => {
+              setActiveTab('downloads');
+              setScopeFilter('all');
+              onSelectQueue('all');
+              setIsMobileOpen(false);
+            })}
             {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Categories</p>}
             {mediaItems.map((item) => navButton(
               item.id, item.label, item.icon, item.count,
@@ -206,14 +198,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               );
             })}
 
-            <div className="pt-2">
-              {navButton('new-download', 'New Download', PlusCircle, undefined, false, () => { onOpenNewDownload(); setIsMobileOpen(false); }, true)}
-            </div>
           </nav>
 
           <div className="mx-3 my-2 border-t border-[var(--vanta-border)]" />
           <nav className="px-2.5 pb-3 space-y-1" aria-label="Application pages">
-            {navButton('history', 'Queue & History', History, undefined, activeTab === 'history', () => { setActiveTab('history'); setIsMobileOpen(false); })}
+            {navButton('history', 'History', History, undefined, activeTab === 'history', () => { setActiveTab('history'); setIsMobileOpen(false); })}
             {navButton('diagnostics', 'Engine Management', Terminal, undefined, activeTab === 'diagnostics', () => { setActiveTab('diagnostics'); setIsMobileOpen(false); })}
             {navButton('settings', 'Settings', Settings, undefined, activeTab === 'settings', () => { setActiveTab('settings'); setIsMobileOpen(false); })}
           </nav>
