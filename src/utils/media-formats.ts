@@ -209,6 +209,17 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
 ];
 
 /**
+ * Selects the highest concrete inspected resolution by default.
+ * When the extractor has no concrete video formats, retain the adaptive preset.
+ */
+export function getDefaultVideoFormatSelector(formats: FormatOption[] = []): string {
+  const options = buildCuratedVideoOptions(formats);
+  return options.find((option) => option.height < 9999)?.formatSelector
+    || options[0]?.formatSelector
+    || 'bestvideo+bestaudio/best';
+}
+
+/**
  * Ensures any selected video-only stream automatically pairs with bestaudio so
  * video downloads never accidentally output silent files unless explicitly requested.
  */
