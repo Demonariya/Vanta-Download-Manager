@@ -49,6 +49,41 @@ const SPOTDL_PIP_INSTALL_ARGS: &[&str] = &[
     "spotdl",
 ];
 
+fn parse_video_dimensions(
+    resolution: Option<&str>,
+    format_note: Option<&str>,
+) -> (Option<u32>, Option<u32>) {
+    let dimensions = resolution.and_then(|value| {
+        let (width, height) = value.split_once('x')?;
+        let width = width.trim().parse::<u32>().ok()?;
+        let height = height.trim().parse::<u32>().ok()?;
+        (width > 0 && height > 0 && width <= 32768 && height <= 16384)
+            .then_some((width, height))
+    });
+
+    if let Some((width, height)) = dimensions {
+        return (Some(width), Some(height));
+    }
+
+    // Some extractors put a height-only label in the resolution field.
+    let height_from_label = resolution
+        .into_iter()
+        .chain(format_note)
+        .find_map(|label| {
+            let label = label.trim();
+            let (digits, suffix) = label.split_once('p')?;
+            if digits.is_empty()
+                || !suffix.chars().all(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+            {
+                return None;
+            }
+            let height = digits.parse::<u32>().ok()?;
+            (height > 0 && height <= 16384).then_some(height)
+        });
+
+    (None, height_from_label)
+}
+
 static ENGINE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn install_lock() -> &'static tokio::sync::Mutex<()> {
@@ -2739,33 +2774,22 @@ impl EngineManager {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                // Some extractors omit numeric width/height while still reporting
-                // dimensions in "resolution" (for example, "1920x1080") or a
-                // conventional format note (for example, "1080p60").
-                let parsed_dimensions = resolution.as_deref().and_then(|value| {
-                    let (width, height) = value.split_once('x')?;
-                    let width = width.parse::<u32>().ok()?;
-                    let height = height.parse::<u32>().ok()?;
-                    (width > 0 && height > 0 && width <= 32768 && height <= 16384)
-                        .then_some((width, height))
-                });
+                // Normalize dimensions from numeric fields, resolution strings,
+                // or quality labels while rejecting impossible values.
+                let (parsed_width, parsed_height) =
+                    parse_video_dimensions(resolution.as_deref(), format_note.as_deref());
                 let width = f
                     .get("width")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32)
-                    .or_else(|| parsed_dimensions.map(|(width, _)| width));
+                    .filter(|v| *v > 0 && *v <= 32768)
+                    .or(parsed_width);
                 let height = f
                     .get("height")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32)
-                    .or_else(|| parsed_dimensions.map(|(_, height)| height))
-                    .or_else(|| {
-                        format_note.as_deref().and_then(|note| {
-                            let (digits, _) = note.split_once('p')?;
-                            let height = digits.parse::<u32>().ok()?;
-                            (height > 0 && height <= 16384).then_some(height)
-                        })
-                    });
+                    .filter(|v| *v > 0 && *v <= 16384)
+                    .or(parsed_height);
                 let fps = f.get("fps").and_then(|v| v.as_f64());
                 let vcodec = f
                     .get("vcodec")
@@ -3318,6 +3342,34 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert_eq!(fs::read(&target).unwrap(), b"vanta-engine-payload");
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_parse_video_dimensions_supports_extractor_variants() {
+        assert_eq!(
+            parse_video_dimensions(Some("1920x1080"), None),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("1080p"), None),
+            (None, Some(1080))
+        );
+        assert_eq!(
+            parse_video_dimensions(None, Some("1440p60")),
+            (None, Some(1440))
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("audio only"), Some("audio only")),
+            (None, None)
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("999999x1080"), None),
+            (None, None)
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("0x1080"), None),
+            (None, None)
+        );
     }
 
     #[test]
