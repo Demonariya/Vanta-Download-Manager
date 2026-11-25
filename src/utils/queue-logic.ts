@@ -190,7 +190,7 @@ export function moveTaskOrder(
 export function filterAndSortTasks(
   tasks: DownloadTask[],
   opts: {
-    statusFilter?: 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed' | 'audio' | 'video';
+    statusFilter?: 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed' | 'audio' | 'video' | 'finished' | 'unfinished';
     searchQuery?: string;
     sortField?: SortField;
     sortDirection?: SortDirection;
@@ -199,7 +199,11 @@ export function filterAndSortTasks(
   const query = (opts.searchQuery || '').trim().toLowerCase();
   const filtered = tasks.filter((t) => {
     if (opts.statusFilter && opts.statusFilter !== 'all') {
-      if (opts.statusFilter === 'active') {
+      if (opts.statusFilter === 'finished') {
+        if (t.status !== 'completed') return false;
+      } else if (opts.statusFilter === 'unfinished') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+      } else if (opts.statusFilter === 'active') {
         if (!isActiveTaskStatus(t.status)) return false;
       } else if (opts.statusFilter === 'audio') {
         if (!t.is_audio_only && t.engine !== 'spotdl') return false;
@@ -211,17 +215,16 @@ export function filterAndSortTasks(
     }
 
     if (query) {
-      const haystack = [
-        t.title,
-        t.url,
-        t.uploader || '',
-        t.album || '',
-        t.ext,
-        t.engine,
-      ]
-        .join(' ')
-        .toLowerCase();
-      if (!haystack.includes(query)) return false;
+      const matches = (value: string | null | undefined) =>
+        Boolean(value && value.toLowerCase().includes(query));
+      if (
+        !matches(t.title) &&
+        !matches(t.url) &&
+        !matches(t.uploader) &&
+        !matches(t.album) &&
+        !matches(t.ext) &&
+        !matches(t.engine)
+      ) return false;
     }
 
     return true;
