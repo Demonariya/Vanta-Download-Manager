@@ -110,7 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return (
       <div className="flex flex-col h-full min-h-0 select-none">
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-          <div className={`h-[72px] flex items-center ${compact ? 'justify-center px-2' : 'justify-between px-3.5'} border-b border-[var(--vanta-border)] shrink-0`}>
+          <div className={`h-16 flex items-center ${compact ? 'justify-center px-2' : 'justify-between px-3.5'} border-b border-[var(--vanta-border)] shrink-0`}>
             <div className="flex items-center gap-2.5 overflow-hidden">
               <button
                 type="button"
@@ -367,7 +367,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-[68px]' : 'w-[248px]'}`}>
+      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-[64px]' : 'w-[236px]'}`}>
         {renderNavContent(false)}
       </aside>
 
