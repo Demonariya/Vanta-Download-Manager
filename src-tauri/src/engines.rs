@@ -73,11 +73,12 @@ fn parse_video_dimensions(
             let label = label.trim();
             let (digits, suffix) = label.split_once('p')?;
             if digits.is_empty()
-                || !suffix
-                    .chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
-                    .unwrap_or(false)
+                || (!suffix.is_empty()
+                    && !suffix
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+                        .unwrap_or(false))
             {
                 return None;
             }
