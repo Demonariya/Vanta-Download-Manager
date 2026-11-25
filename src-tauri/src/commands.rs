@@ -3174,6 +3174,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             } else {
                 format!("{}+bestaudio/best", task.format_id)
             };
+            // Prefer the highest available resolution before bitrate when yt-dlp
+            // has to resolve a generic selector (including safe fallbacks).
+            args.push("-S".to_string());
+            args.push("res,fps,br".to_string());
+            args.push("--format-sort-force".to_string());
             args.push("-f".to_string());
             args.push(selector);
             args.push("--merge-output-format".to_string());
