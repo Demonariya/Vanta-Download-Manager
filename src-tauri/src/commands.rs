@@ -197,6 +197,88 @@ pub fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String
 }
 
 #[tauri::command]
+pub fn import_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    imported_tasks: Vec<DownloadTask>,
+) -> Result<Vec<DownloadTask>, String> {
+    if imported_tasks.is_empty() {
+        return Err("The selected history file contains no records.".to_string());
+    }
+    if imported_tasks.len() > 5_000 {
+        return Err("A maximum of 5,000 history records can be imported at once.".to_string());
+    }
+
+    let mut imported_count = 0usize;
+    for mut task in imported_tasks {
+        if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            return Err("History import only accepts completed, failed, or cancelled records.".to_string());
+        }
+        if task.title.trim().is_empty() || task.url.trim().is_empty() {
+            return Err("Every imported history record must include a title and source URL.".to_string());
+        }
+        if task.title.len() > 2_000 || task.url.len() > 8_192 {
+            return Err("An imported history record contains an oversized title or URL.".to_string());
+        }
+
+        // Imported records are metadata only. Never trust an output path from an
+        // external JSON file, or a later "delete downloaded file" action could
+        // target an arbitrary local path.
+        task.id = format!("history_import_{}", uuid::Uuid::new_v4());
+        task.output_path.clear();
+        task.queue_id = "main".to_string();
+        task.queue_order = 0;
+        task.priority = TaskPriority::Normal;
+        task.current_phase = "Imported history".to_string();
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.active_connections = 0;
+        task.remaining_bytes = 0;
+        task.eta_seconds = if task.status == TaskStatus::Completed { Some(0) } else { None };
+        task.eta_str = if task.status == TaskStatus::Completed {
+            "Finished".to_string()
+        } else {
+            "--".to_string()
+        };
+        if task.status == TaskStatus::Completed {
+            task.progress_percentage = 100.0;
+            task.percentage_known = true;
+            if task.downloaded_bytes == 0 {
+                task.downloaded_bytes = task.total_bytes;
+            }
+            if task.total_bytes == 0 {
+                task.total_bytes = task.downloaded_bytes;
+            }
+        } else {
+            task.progress_percentage = task.progress_percentage.clamp(0.0, 100.0);
+        }
+        if task.created_at.trim().is_empty() {
+            task.created_at = chrono::Utc::now().to_rfc3339();
+        }
+        if task.thumbnail.as_deref().is_some_and(|url| !crate::is_valid_thumbnail_url(url)) {
+            task.thumbnail = None;
+        }
+        if task.logs.len() > 100 {
+            task.logs.drain(..task.logs.len() - 100);
+        }
+        for entry in &mut task.logs {
+            entry.message = logging::redact_secrets(&entry.message);
+        }
+
+        state.upsert_task(&task);
+        imported_count += 1;
+    }
+
+    logging::info("history", &format!("Imported {} history record(s).", imported_count));
+    let tasks = state.get_tasks();
+    let _ = app.emit("tasks_cleared", &tasks);
+    Ok(tasks)
+}
+
+#[tauri::command]
 pub async fn create_task(
     app: AppHandle,
     state: State<'_, AppState>,
