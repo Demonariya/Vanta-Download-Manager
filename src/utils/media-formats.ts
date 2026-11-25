@@ -255,14 +255,14 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
     // codec/container-only score could select a low-bitrate muxed rendition
     // over a substantially better video-only stream at the same height.
     const fmtScore = [
-      fmt.tbr || fmt.vbr || 0,
+      fmt.tbr || 0,
       fmt.fps || 0,
       fmt.acodec && fmt.acodec !== 'none' ? 1 : 0,
       fmt.ext === 'mp4' ? 1 : 0,
     ];
     const existingScore = existing
       ? [
-          existing.tbr || existing.vbr || 0,
+          existing.tbr || 0,
           existing.fps || 0,
           existing.acodec && existing.acodec !== 'none' ? 1 : 0,
           existing.ext === 'mp4' ? 1 : 0,
