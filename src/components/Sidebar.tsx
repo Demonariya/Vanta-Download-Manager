@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Download, Layers, PlusCircle, History, Terminal, Settings,
   ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2, Music2, Video,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
 import { api } from '../services/api';
+import { calculateSidebarTaskStats } from '../utils/queue-logic';
 
 export type ActiveTab = 'downloads' | 'history' | 'diagnostics' | 'settings';
 
@@ -30,14 +31,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   selectedQueueId, onSelectQueue, onQueuesChanged, scopeFilter, setScopeFilter, isCollapsed,
   setIsCollapsed, isMobileOpen, setIsMobileOpen,
 }) => {
-  const downloadingCount = tasks.filter((task) => [
-    'connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying',
-  ].includes(task.status)).length;
-  const queuedCount = tasks.filter((task) => task.status === 'queued').length;
-  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
-  const completedCount = tasks.filter((task) => task.status === 'completed').length;
-  const unfinishedCount = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length;
-  const failedCount = tasks.filter((task) => task.status === 'failed').length;
+  const taskStats = useMemo(() => calculateSidebarTaskStats(tasks), [tasks]);
+  const {
+    downloading: downloadingCount,
+    queued: queuedCount,
+    paused: pausedCount,
+    completed: completedCount,
+    unfinished: unfinishedCount,
+    failed: failedCount,
+  } = taskStats;
 
   const [queueMenu, setQueueMenu] = useState<{ x: number; y: number; queueId: string } | null>(null);
   const [queueEditor, setQueueEditor] = useState<{ mode: 'create' | 'rename'; queueId?: string } | null>(null);
@@ -183,13 +185,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             })}
 
             {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Media</p>}
-            {navButton('music', 'Music', Music2, tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'audio', () => {
+            {navButton('music', 'Music', Music2, taskStats.music, activeTab === 'downloads' && scopeFilter === 'audio', () => {
               setActiveTab('downloads');
               setScopeFilter('audio');
               onSelectQueue('all');
               setIsMobileOpen(false);
             })}
-            {navButton('video', 'Video', Video, tasks.filter((task) => !task.is_audio_only && task.engine !== 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'video', () => {
+            {navButton('video', 'Video', Video, taskStats.video, activeTab === 'downloads' && scopeFilter === 'video', () => {
               setActiveTab('downloads');
               setScopeFilter('video');
               onSelectQueue('all');
@@ -211,7 +213,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
             {queues.map((queue) => {
-              const count = tasks.filter((task) => (task.queue_id || 'main') === queue.id).length;
+              const count = taskStats.queueCounts.get(queue.id) || 0;
               return (
                 <button
                   key={queue.id}
