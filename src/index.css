@@ -133,3 +133,100 @@
   transform-origin: left center;
   animation: vanta-indeterminate 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
+
+
+/* VANTA UI refinement — consistent surfaces, spacing and interaction states */
+@layer base {
+  :root {
+    --vanta-bg: #f5f6f8;
+    --vanta-surface: #ffffff;
+    --vanta-surface-2: #f8f9fb;
+    --vanta-surface-hover: #eef1f5;
+    --vanta-border: #e3e7ed;
+    --vanta-border-strong: #cfd6e0;
+    --vanta-text: #171b24;
+    --vanta-text-secondary: #485264;
+    --vanta-muted: #778194;
+    --vanta-accent: #7045d6;
+    --vanta-accent-hover: #5f35c4;
+  }
+
+  .dark {
+    --vanta-bg: #0d0f14;
+    --vanta-surface: #13161d;
+    --vanta-surface-2: #191d26;
+    --vanta-surface-hover: #222834;
+    --vanta-border: #272d39;
+    --vanta-border-strong: #384151;
+    --vanta-text: #edf0f5;
+    --vanta-text-secondary: #b7c0ce;
+    --vanta-muted: #8994a5;
+    --vanta-accent: #8b68ed;
+    --vanta-accent-hover: #7955dc;
+  }
+
+  * {
+    scrollbar-color: var(--vanta-scroll-thumb) transparent;
+  }
+
+  body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  button, input, select, textarea {
+    font: inherit;
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--vanta-accent) 72%, transparent);
+    outline-offset: 2px;
+  }
+
+  input::placeholder, textarea::placeholder {
+    color: var(--vanta-muted);
+    opacity: .78;
+  }
+
+  ::selection {
+    color: white;
+    background: color-mix(in srgb, var(--vanta-accent) 72%, #242038);
+  }
+}
+
+@layer components {
+  /* Card-like surfaces share one restrained visual language. */
+  div[class~="rounded-xl"][class*="border"][class*="bg-[var(--vanta-surface)]"],
+  div[class~="rounded-xl"][class*="border"][class*="bg-[var(--vanta-surface-2)]"] {
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.035);
+  }
+
+  .dark div[class~="rounded-xl"][class*="border"][class*="bg-[var(--vanta-surface)]"],
+  .dark div[class~="rounded-xl"][class*="border"][class*="bg-[var(--vanta-surface-2)]"] {
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+  }
+
+  button:not(:disabled) {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: 140ms;
+    transition-timing-function: ease-out;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
