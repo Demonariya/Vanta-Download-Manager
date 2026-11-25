@@ -103,6 +103,21 @@ test('writeSettingsToStorage & readSettingsFromStorage persist atomically across
   }
 });
 
+test('legacy fragment concurrency is normalized to the supported engine maximum', () => {
+  const dir = makeTempDir('vanta-settings-legacy-fragments-');
+  const db = new DatabaseSync(path.join(dir, 'vanta.db'));
+  try {
+    initializeDatabaseSchema(db);
+    const legacy = { ...buildDefaultSettings(), fragment_concurrency: 4 };
+    atomicWriteFileSync(getSettingsFilePath(dir), JSON.stringify(legacy));
+    const loaded = readSettingsFromStorage(db, dir);
+    assert.equal(loaded.fragment_concurrency, 3);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('readSettingsFromStorage backs up corrupt JSON file and recovers defaults cleanly', () => {
   const dir = makeTempDir('vanta-settings-corrupt-');
   const db = new DatabaseSync(path.join(dir, 'vanta.db'));
