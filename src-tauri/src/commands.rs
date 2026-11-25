@@ -1870,6 +1870,15 @@ fn effective_fragment_concurrency(requested: u32, retries: u32) -> u32 {
     }
 }
 
+fn reported_active_connections(is_spotdl: bool, requested: u32, retries: u32) -> u32 {
+    if is_spotdl {
+        // spotDL does not use yt-dlp's fragment connection setting.
+        1
+    } else {
+        effective_fragment_concurrency(requested, retries)
+    }
+}
+
 fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return "application shutdown is in progress".to_string();
@@ -3591,7 +3600,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         .unwrap_or_else(|| "--".to_string())
                 };
                 current.elapsed_seconds = elapsed;
-                current.active_connections = settings.fragment_concurrency.max(1);
+                current.active_connections = reported_active_connections(is_spotdl, settings.fragment_concurrency, task.retries);
                 current.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
                 current.current_phase = next_phase;
 
@@ -4029,6 +4038,15 @@ mod scheduler_window_tests {
         assert_eq!(effective_fragment_concurrency(2, 0), 2);
         assert_eq!(effective_fragment_concurrency(3, 1), 1);
         assert_eq!(effective_fragment_concurrency(1, 5), 1);
+    }
+
+    #[test]
+    fn reported_active_connections_match_the_engine_and_retry_mode() {
+        assert_eq!(reported_active_connections(false, 16, 0), 3);
+        assert_eq!(reported_active_connections(false, 2, 0), 2);
+        assert_eq!(reported_active_connections(false, 3, 1), 1);
+        assert_eq!(reported_active_connections(true, 3, 0), 1);
+        assert_eq!(reported_active_connections(true, 3, 4), 1);
     }
 
     #[test]
