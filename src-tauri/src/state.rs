@@ -40,8 +40,8 @@ pub struct AppState {
     pub active_inspections: Arc<Mutex<HashMap<String, TrackedInspection>>>,
     pub cached_engine_status: Mutex<Option<(Instant, EngineStatusMap)>>,
     pub is_shutting_down: AtomicBool,
-    pub is_running_diagnostics: AtomicBool,
-    pub is_scanning_engines: AtomicBool,
+    pub is_running_diagnostics: Arc<AtomicBool>,
+    pub is_scanning_engines: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -361,8 +361,8 @@ impl AppState {
             active_inspections: Arc::new(Mutex::new(HashMap::new())),
             cached_engine_status: Mutex::new(None),
             is_shutting_down: AtomicBool::new(false),
-            is_running_diagnostics: AtomicBool::new(false),
-            is_scanning_engines: AtomicBool::new(false),
+            is_running_diagnostics: Arc::new(AtomicBool::new(false)),
+            is_scanning_engines: Arc::new(AtomicBool::new(false)),
         };
 
         // Ensure durable settings.v1.json exists and recovers cleanly if corrupt
