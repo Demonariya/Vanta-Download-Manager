@@ -121,6 +121,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   isInstallingEngines = false,
   engineInstallError = null,
 }) => {
+  const [isDesktopLayout, setIsDesktopLayout] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1280px)').matches,
+  );
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(min-width: 1280px)');
+    const updateLayout = (event: MediaQueryListEvent) => setIsDesktopLayout(event.matches);
+    setIsDesktopLayout(mediaQuery.matches);
+    mediaQuery.addEventListener('change', updateLayout);
+    return () => mediaQuery.removeEventListener('change', updateLayout);
+  }, []);
+
   const [sortField, setSortField] = useState<SortField>('queue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [isColumnMenuOpen, setIsColumnMenuOpen] = useState(false);
@@ -579,7 +590,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
       {/* Main Transfer List */}
       <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
-        <div className="hidden xl:block overflow-x-auto">
+        {isDesktopLayout && <div className="overflow-x-auto">
           <div className="min-w-[1060px]">
             <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
               <input type="checkbox" aria-label="Select all visible downloads"
@@ -677,8 +688,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               </div>
             )}
           </div>
-        </div>
-        <div className="xl:hidden divide-y divide-[var(--vanta-border)]">
+        </div>}
+        {!isDesktopLayout && <div className="divide-y divide-[var(--vanta-border)]">
           {visibleTasks.length === 0 ? (
             <div className="px-4 py-14 text-center space-y-3">
               <Download className="mx-auto h-9 w-9 text-[var(--vanta-muted)]/60" />
@@ -752,7 +763,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               </article>
             );
           })}
-        </div>
+        </div>}
       </div>
 
       {contextMenu && (
@@ -817,7 +828,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               <button type="button" role="menuitem" onClick={() => {
                 const ids = contextMenu.targetIds.filter((id) => {
                   const task = tasks.find((item) => item.id === id);
-                  return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+                  return task && PAUSABLE_TASK_STATUSES.has(task.status);
                 });
                 handleBulkAction('pause', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Pause failed.'));
                 setContextMenu(null);
@@ -845,12 +856,12 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             )}
             {contextMenu.targetIds.some((id) => {
               const task = tasks.find((item) => item.id === id);
-              return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+              return task && PAUSABLE_TASK_STATUSES.has(task.status);
             }) && (
               <button type="button" role="menuitem" onClick={() => {
                 const ids = contextMenu.targetIds.filter((id) => {
                   const task = tasks.find((item) => item.id === id);
-                  return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+                  return task && PAUSABLE_TASK_STATUSES.has(task.status);
                 });
                 handleBulkAction('cancel', ids).catch((error) => window.alert(error instanceof Error ? error.message : 'Cancel failed.'));
                 setContextMenu(null);
