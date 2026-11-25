@@ -104,17 +104,27 @@ export function sortQueue(tasks: DownloadTask[]): DownloadTask[] {
 }
 
 export function getActiveDownloadCount(tasks: DownloadTask[]): number {
-  return tasks.filter((t) => isActiveTaskStatus(t.status)).length;
+  let count = 0;
+  for (const task of tasks) {
+    if (isActiveTaskStatus(task.status)) count += 1;
+  }
+  return count;
 }
 
 export function calculateAggregateSpeed(tasks: DownloadTask[]): {
   speedBytesPerSec: number;
   formattedSpeed: string;
 } {
-  const active = tasks.filter(
-    (t) => t.status === 'downloading' || t.status === 'connecting' || t.status === 'resuming'
-  );
-  const total = active.reduce((acc, t) => acc + (t.speed_bytes_per_sec || 0), 0);
+  let total = 0;
+  for (const task of tasks) {
+    if (
+      task.status === 'downloading' ||
+      task.status === 'connecting' ||
+      task.status === 'resuming'
+    ) {
+      total += task.speed_bytes_per_sec || 0;
+    }
+  }
   return {
     speedBytesPerSec: total,
     formattedSpeed: `${formatBytes(total)}/s`,
