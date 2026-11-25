@@ -201,3 +201,38 @@ test('calculateQueueStatusCounts aggregates paused, completed, and failed tasks 
     failed: 1,
   });
 });
+
+test('filterAndSortTasks handles finished and unfinished scopes without pre-filtering', () => {
+  const tasks = [
+    makeTask('queued', { status: 'queued' }),
+    makeTask('completed', { status: 'completed' }),
+    makeTask('cancelled', { status: 'cancelled' }),
+    makeTask('failed', { status: 'failed' }),
+  ];
+
+  assert.deepEqual(
+    filterAndSortTasks(tasks, { statusFilter: 'finished' }).map((task) => task.id),
+    ['completed'],
+  );
+  assert.deepEqual(
+    filterAndSortTasks(tasks, { statusFilter: 'unfinished' }).map((task) => task.id).sort(),
+    ['failed', 'queued'],
+  );
+});
+
+test('filterAndSortTasks searches fields without joining an allocated haystack', () => {
+  const tasks = [
+    makeTask('one', { title: 'Ambient Session' }),
+    makeTask('two', { uploader: 'Vanta Records' }),
+    makeTask('three', { album: 'Night Drive' }),
+  ];
+
+  assert.deepEqual(
+    filterAndSortTasks(tasks, { searchQuery: 'vanta' }).map((task) => task.id),
+    ['two'],
+  );
+  assert.deepEqual(
+    filterAndSortTasks(tasks, { searchQuery: 'night drive' }).map((task) => task.id),
+    ['three'],
+  );
+});
