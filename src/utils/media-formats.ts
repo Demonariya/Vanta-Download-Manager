@@ -251,16 +251,31 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const fmt of videoStreams) {
     const h = fmt.height || 0;
     const existing = byHeight.get(h);
-    const fmtScore =
-      (fmt.acodec && fmt.acodec !== 'none' ? 10 : 0) +
-      (fmt.ext === 'mp4' ? 5 : 0) +
-      ((fmt.fps || 0) >= 50 ? 2 : 0);
+    // Prefer the highest-bitrate stream at each resolution. The previous
+    // codec/container-only score could select a low-bitrate muxed rendition
+    // over a substantially better video-only stream at the same height.
+    const fmtScore = [
+      fmt.tbr || fmt.vbr || 0,
+      fmt.fps || 0,
+      fmt.acodec && fmt.acodec !== 'none' ? 1 : 0,
+      fmt.ext === 'mp4' ? 1 : 0,
+    ];
     const existingScore = existing
-      ? (existing.acodec && existing.acodec !== 'none' ? 10 : 0) +
-        (existing.ext === 'mp4' ? 5 : 0) +
-        ((existing.fps || 0) >= 50 ? 2 : 0)
-      : -1;
-    if (!existing || fmtScore > existingScore) {
+      ? [
+          existing.tbr || existing.vbr || 0,
+          existing.fps || 0,
+          existing.acodec && existing.acodec !== 'none' ? 1 : 0,
+          existing.ext === 'mp4' ? 1 : 0,
+        ]
+      : [];
+    const isBetter = !existing || fmtScore.some(
+      (value, index) => value !== existingScore[index] &&
+        value > existingScore[index] &&
+        fmtScore.slice(0, index).every((previous, previousIndex) =>
+          previous === existingScore[previousIndex]
+        )
+    );
+    if (isBetter) {
       byHeight.set(h, fmt);
     }
   }
@@ -271,7 +286,13 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const h of sortedHeights) {
     const fmt = byHeight.get(h)!;
     const isVideoOnly = fmt.is_video_only || !fmt.acodec || fmt.acodec === 'none';
-    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+    const hasMuxedAudio = Boolean(fmt.acodec && fmt.acodec !== 'none' && !fmt.is_video_only);
+    // Pin the choice to the exact stream discovered during inspection instead
+    // of asking yt-dlp to re-rank every format at download time. Video-only
+    // streams are paired with the best available audio stream.
+    const selector = hasMuxedAudio
+      ? `${fmt.format_id}/best[height<=${h}]`
+      : `${fmt.format_id}+bestaudio/best[height<=${h}]`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
@@ -282,7 +303,7 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
       id: selector,
       label: `Up to ${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
       formatSelector: selector,
-      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · best matching stream (detected #${fmt.format_id})`,
+      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · pinned detected stream #${fmt.format_id}`,
       height: h,
       hasAudio: true,
       needsMux: Boolean(isVideoOnly),
