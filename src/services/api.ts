@@ -210,6 +210,14 @@ export class ApiService {
     return res.json();
   }
 
+  public async readClipboardText(): Promise<string> {
+    if (this.isTauri()) return invoke<string>('read_clipboard_text');
+    if (!navigator.clipboard?.readText) {
+      throw new Error('Clipboard access is unavailable in this browser context.');
+    }
+    return navigator.clipboard.readText();
+  }
+
   public async getQueues(): Promise<DownloadQueue[]> {
     if (!this.isTauri()) {
       return [{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0, max_concurrent_downloads: 0, bandwidth_limit_kbps: 0 }];
