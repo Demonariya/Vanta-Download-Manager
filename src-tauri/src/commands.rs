@@ -21,12 +21,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
-struct EngineScanGuard<'a>(&'a AtomicBool);
+struct AtomicFlagGuard(Arc<AtomicBool>);
 
-impl Drop for EngineScanGuard<'_> {
+impl Drop for AtomicFlagGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -38,9 +39,9 @@ mod engine_scan_guard_tests {
 
     #[test]
     fn engine_scan_guard_releases_lock_on_drop() {
-        let scanning = AtomicBool::new(true);
+        let scanning = Arc::new(AtomicBool::new(true));
         {
-            let _guard = EngineScanGuard(&scanning);
+            let _guard = AtomicFlagGuard(Arc::clone(&scanning));
         }
         assert!(!scanning.load(Ordering::SeqCst));
     }
@@ -1320,11 +1321,15 @@ pub async fn get_engine_status(
         return Err("Engine status scan is still running. Try again shortly.".to_string());
     }
 
-    // RAII resets the flag even if the blocking worker panics or the command exits early.
-    let _scan_guard = EngineScanGuard(&state.is_scanning_engines);
-    let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
-        .await
-        .map_err(|e| format!("Engine scan task failed: {}", e))??;
+    // The guard lives inside the blocking worker, so cancelling this async command
+    // cannot release the single-flight lock while the scan is still running.
+    let scan_guard = AtomicFlagGuard(Arc::clone(&state.is_scanning_engines));
+    let status = tokio::task::spawn_blocking(move || {
+        let _guard = scan_guard;
+        EngineManager::get_engine_status()
+    })
+    .await
+    .map_err(|e| format!("Engine scan task failed: {}", e))?;
 
     {
         let mut cached = state
@@ -1349,12 +1354,13 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
         return Err("Diagnostics check is already running.".to_string());
     }
 
-    let res = tokio::task::spawn_blocking(EngineManager::run_diagnostics)
-        .await
-        .map_err(|e| format!("Diagnostics task failed: {}", e));
-
-    state.is_running_diagnostics.store(false, Ordering::SeqCst);
-    res
+    let diagnostics_guard = AtomicFlagGuard(Arc::clone(&state.is_running_diagnostics));
+    tokio::task::spawn_blocking(move || {
+        let _guard = diagnostics_guard;
+        EngineManager::run_diagnostics()
+    })
+    .await
+    .map_err(|e| format!("Diagnostics task failed: {}", e))?
 }
 
 fn invalidate_engine_status_cache(state: &AppState) {
