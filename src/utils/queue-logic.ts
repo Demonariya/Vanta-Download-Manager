@@ -77,6 +77,33 @@ export function calculateSidebarTaskStats(tasks: DownloadTask[]): SidebarTaskSta
   return stats;
 }
 
+export interface QueueStatusCounts {
+  paused: number;
+  completed: number;
+  failed: number;
+}
+
+/** Aggregates the compact status counters used by the Download Center in one pass. */
+export function calculateQueueStatusCounts(tasks: DownloadTask[]): QueueStatusCounts {
+  const counts: QueueStatusCounts = { paused: 0, completed: 0, failed: 0 };
+  for (const task of tasks) {
+    switch (task.status) {
+      case 'paused':
+        counts.paused += 1;
+        break;
+      case 'completed':
+        counts.completed += 1;
+        break;
+      case 'failed':
+        counts.failed += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
+}
+
 export interface HistoryStats {
   totalCompleted: number;
   totalFailed: number;
