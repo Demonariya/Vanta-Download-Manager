@@ -3,13 +3,18 @@ use crate::engines::EngineManager;
 use crate::logging;
 use crate::models::{
     AppSettings, CookieStatus, CookieTestResult, CookieValidationResult, CreateTaskPayload,
-    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadTask, EngineStatusMap,
+    DetectedBrowserInfo, DiagnosticLogInfo, DiagnosticResult, DownloadQueue, DownloadTask, EngineStatusMap,
     EngineUpdateInfo, EngineUpdateResult, ManagedEngineInfo, MediaMetadata, NotificationItem,
     PythonValidationResult, TaskLogEntry, TaskPriority, TaskStatus,
 };
 use crate::process;
 use crate::state::AppState;
-use std::collections::HashMap;
+use chrono::{Datelike, Timelike};
+use id3::{
+    frame::{Lyrics as Id3Lyrics, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat},
+    Error as Id3Error, ErrorKind as Id3ErrorKind, Tag as Id3Tag, TagLike, Version as Id3Version,
+};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,6 +31,139 @@ impl<'a> Drop for InspectionDropGuard<'a> {
     fn drop(&mut self) {
         self.state.remove_inspection(&self.request_id);
     }
+}
+
+fn parse_lrc_timestamp(value: &str) -> Option<u32> {
+    let (minutes_text, seconds_text) = value.split_once(':')?;
+    let minutes = minutes_text.parse::<u64>().ok()?;
+    let separator = seconds_text.find('.').or_else(|| seconds_text.find(','));
+    let (whole_seconds_text, fraction_text) = match separator {
+        Some(index) => (&seconds_text[..index], &seconds_text[index + 1..]),
+        None => (seconds_text, ""),
+    };
+    let seconds = whole_seconds_text.parse::<u64>().ok()?;
+    if seconds >= 60 { return None; }
+    let fraction_digits = fraction_text.chars().take(3).collect::<String>();
+    if !fraction_digits.chars().all(|ch| ch.is_ascii_digit()) { return None; }
+    let fraction_value = if fraction_digits.is_empty() {
+        0
+    } else {
+        let parsed = fraction_digits.parse::<u32>().ok()?;
+        match fraction_digits.len() { 1 => parsed * 100, 2 => parsed * 10, _ => parsed }
+    };
+    let total = minutes.checked_mul(60_000)?
+        .checked_add(seconds.checked_mul(1_000)?)?
+        .checked_add(fraction_value as u64)?;
+    u32::try_from(total).ok()
+}
+
+fn parse_lrc_entries(content: &str) -> Vec<(u32, String)> {
+    let offset_ms = content.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("[offset:")?.strip_suffix(']')?;
+        value.trim().parse::<i64>().ok()
+    }).unwrap_or(0);
+    let mut entries = Vec::new();
+
+    for line in content.lines() {
+        let mut remaining = line.trim();
+        let mut timestamps = Vec::new();
+        while let Some(after_open) = remaining.strip_prefix('[') {
+            let Some(end) = after_open.find(']') else { break; };
+            let Some(timestamp) = parse_lrc_timestamp(&after_open[..end]) else { break; };
+            timestamps.push(timestamp);
+            remaining = &after_open[end + 1..];
+        }
+        let lyric_text = remaining.trim();
+        if lyric_text.is_empty() { continue; }
+        for timestamp in timestamps {
+            let adjusted = (timestamp as i64 + offset_ms).clamp(0, u32::MAX as i64) as u32;
+            entries.push((adjusted, lyric_text.to_string()));
+        }
+    }
+    entries.sort_by_key(|(timestamp, _)| *timestamp);
+    entries
+}
+
+fn validate_lrc_content(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("The selected LRC file is empty.".to_string());
+    }
+    if content.len() > 512 * 1024 {
+        return Err("The LRC file exceeds the 512 KiB size limit.".to_string());
+    }
+    if parse_lrc_entries(content).is_empty() {
+        return Err("The selected file does not contain valid timestamped LRC lyrics.".to_string());
+    }
+    Ok(())
+}
+
+fn write_lrc_sidecar(audio_path: &Path, content: &str) -> Result<PathBuf, String> {
+    validate_lrc_content(content)?;
+    let sidecar = audio_path.with_extension("lrc");
+    fs::write(&sidecar, content)
+        .map_err(|e| format!("Could not write LRC sidecar '{}': {}", sidecar.display(), e))?;
+    Ok(sidecar)
+}
+
+fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
+    if !audio_path.extension().and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("mp3")).unwrap_or(false) {
+        return Ok(false);
+    }
+    let entries = parse_lrc_entries(content);
+    if entries.is_empty() {
+        return Err("No valid timestamped lyric lines were found to embed.".to_string());
+    }
+    let mut tag = match Id3Tag::read_from_path(audio_path) {
+        Ok(tag) => tag,
+        Err(Id3Error { kind: Id3ErrorKind::NoTag, .. }) => Id3Tag::new(),
+        Err(error) => return Err(format!("Could not read existing MP3 ID3 tags: {}", error)),
+    };
+    let plain_text = entries.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
+    tag.remove_all_synchronised_lyrics();
+    tag.remove_all_lyrics();
+    tag.add_frame(SynchronisedLyrics {
+        lang: "und".to_string(),
+        timestamp_format: TimestampFormat::Ms,
+        content_type: SynchronisedLyricsType::Lyrics,
+        content: entries,
+        description: "VANTA synchronized lyrics".to_string(),
+    });
+    tag.add_frame(Id3Lyrics {
+        lang: "und".to_string(),
+        description: "VANTA lyrics".to_string(),
+        text: plain_text,
+    });
+    tag.write_to_path(audio_path, Id3Version::Id3v24)
+        .map_err(|error| format!("Could not embed synchronized lyrics into MP3: {}", error))?;
+    Ok(true)
+}
+
+fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
+    if let Err(error) = embed_lrc_lyrics(audio_path, content) {
+        logging::warn("lyrics", &format!(
+            "Could not embed synchronized lyrics into '{}'; preserving the LRC sidecar: {}",
+            audio_path.display(), error
+        ));
+    }
+    write_lrc_sidecar(audio_path, content)?;
+    Ok(())
+}
+
+fn build_subtitle_args(languages: &[String], include_auto: bool) -> Vec<String> {
+    if languages.is_empty() { return Vec::new(); }
+    let mut args = vec!["--write-subs".to_string()];
+    if include_auto { args.push("--write-auto-subs".to_string()); }
+    args.extend([
+        "--sub-langs".to_string(), languages.join(","),
+        "--sub-format".to_string(), "best".to_string(),
+        "--convert-subs".to_string(), "srt".to_string(),
+        "--remux-video".to_string(), "mp4".to_string(),
+        "--embed-subs".to_string(),
+        "--ppa".to_string(),
+        "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default".to_string(),
+    ]);
+    args
 }
 
 fn format_bytes_rust(bytes: f64) -> String {
@@ -68,6 +206,12 @@ pub async fn create_task(
     let trimmed_url = EngineManager::validate_inspection_url(&payload.url)?;
     let is_spotify = crate::spotify::is_spotify_url(&trimmed_url);
     let is_audio = payload.is_audio_only.unwrap_or(is_spotify);
+    if let Some(ref lrc) = payload.lyrics_lrc_content {
+        validate_lrc_content(lrc)?;
+        if !is_audio {
+            return Err("Synchronized LRC lyrics can only be attached to audio downloads.".to_string());
+        }
+    }
 
     let requires_ffmpeg = is_audio
         || is_spotify
@@ -175,13 +319,20 @@ pub async fn create_task(
     let tracks_completed = tracks_requested.map(|_| 0u32);
     let tracks_failed = tracks_requested.map(|_| 0u32);
 
+    let queue_id = payload.queue_id.clone().unwrap_or_else(|| "main".to_string());
+    if !state.get_queues().iter().any(|queue| queue.id == queue_id) {
+        return Err("Selected download queue does not exist.".to_string());
+    }
     let max_order = state
         .get_tasks()
         .iter()
-        .map(|t| t.queue_order)
+        .filter(|task| task.queue_id == queue_id)
+        .map(|task| task.queue_order)
         .max()
         .unwrap_or(0);
     let known_total = payload.total_bytes.unwrap_or(0);
+    // Capture this before moving playlist_mode into DownloadTask.
+    let bg_playlist = payload.playlist_mode.as_deref() == Some("playlist");
 
     let task = DownloadTask {
         id: id.clone(),
@@ -215,6 +366,9 @@ pub async fn create_task(
         current_phase: "Queued".to_string(),
         format_id: payload.format_id.unwrap_or_else(|| "best".to_string()),
         format_note: payload.format_note,
+        subtitle_languages: payload.subtitle_languages.unwrap_or_default(),
+        write_auto_subtitles: payload.write_auto_subtitles.unwrap_or(false),
+        lyrics_lrc_content: payload.lyrics_lrc_content,
         ext,
         video_codec: None,
         audio_codec: None,
@@ -251,6 +405,7 @@ pub async fn create_task(
         }],
         priority: payload.priority.unwrap_or(TaskPriority::Normal),
         queue_order: max_order + 1,
+        queue_id,
         created_at: chrono::Utc::now().to_rfc3339(),
         started_at: None,
         completed_at: None,
@@ -264,8 +419,9 @@ pub async fn create_task(
     if !is_spotify && needs_metadata_enrichment {
         let app_bg = app.clone();
         let bg_id = task.id.clone();
+        // Keep a separate ID for the async lookup; task itself must remain usable below.
+        let bg_lookup_id = task.id.clone();
         let bg_url = task.url.clone();
-        let bg_playlist = payload.playlist_mode.as_deref() == Some("playlist");
         let bg_settings = settings.clone();
         tokio::spawn(async move {
             let inspect_res = tokio::task::spawn_blocking(move || {
@@ -282,7 +438,7 @@ pub async fn create_task(
 
             if let Ok(Ok(meta)) = inspect_res {
                 let st = app_bg.state::<AppState>();
-                if let Some(mut cur) = st.get_task_by_id(&task.id) {
+                if let Some(mut cur) = st.get_task_by_id(&bg_lookup_id) {
                     let mut changed = false;
                     if let Some(ref thumb) = meta.thumbnail {
                         let cur_valid = cur
@@ -327,27 +483,29 @@ pub async fn create_task(
 
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // Persist the paused state before terminating the child. The worker checks this
+    // state before finalization, preventing a pause/exit race from marking the task complete.
+    if let Some(mut task) = state.get_task_by_id(&id) {
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
+            return Ok(());
+        }
+        task.status = TaskStatus::Paused;
+        task.current_phase = "Paused by user".to_string();
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.eta_seconds = None;
+        task.eta_str = "--".to_string();
+        task.active_connections = 0;
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+    }
+
     let removed_pid = {
-        let mut procs = state
-            .active_processes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.remove(&id)
     };
     if let Some(pid) = removed_pid {
         process::kill_process_tree(pid);
-    }
-
-    if let Some(mut t) = state.get_task_by_id(&id) {
-        t.status = TaskStatus::Paused;
-        t.current_phase = "Paused by user".to_string();
-        t.speed_str = "0 B/s".to_string();
-        t.speed_bytes_per_sec = 0.0;
-        t.eta_seconds = None;
-        t.eta_str = "--".to_string();
-        t.active_connections = 0;
-        state.upsert_task(&t);
-        let _ = app.emit("task_updated", &t);
     }
 
     schedule_next(&app, &state);
@@ -356,11 +514,14 @@ pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
 
 #[tauri::command]
 pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    if let Some(mut t) = state.get_task_by_id(&id) {
-        t.status = TaskStatus::Queued;
-        t.current_phase = "Queued to resume".to_string();
-        state.upsert_task(&t);
-        let _ = app.emit("task_updated", &t);
+    if let Some(mut task) = state.get_task_by_id(&id) {
+        if task.status != TaskStatus::Paused {
+            return Ok(());
+        }
+        task.status = TaskStatus::Queued;
+        task.current_phase = "Queued to resume".to_string();
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
         schedule_next(&app, &state);
     }
     Ok(())
@@ -452,30 +613,29 @@ pub fn delete_downloaded_file(
 
 #[tauri::command]
 pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Mark queued and running work first, so a worker starting concurrently will
+    // observe the paused state when it registers its process id.
+    let tasks = state.get_tasks();
+    for mut task in tasks {
+        if task.status.is_active() || task.status == TaskStatus::Queued {
+            task.status = TaskStatus::Paused;
+            task.current_phase = "Paused".to_string();
+            task.speed_str = "0 B/s".to_string();
+            task.speed_bytes_per_sec = 0.0;
+            task.eta_seconds = None;
+            task.eta_str = "--".to_string();
+            task.active_connections = 0;
+            state.upsert_task(&task);
+            let _ = app.emit("task_updated", &task);
+        }
+    }
+
     let pids: Vec<u32> = {
-        let mut procs = state
-            .active_processes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.drain().map(|(_id, pid)| pid).collect()
     };
     for pid in pids {
         process::kill_process_tree(pid);
-    }
-
-    let tasks = state.get_tasks();
-    for mut t in tasks {
-        if t.status.is_active() || t.status == TaskStatus::Queued {
-            t.status = TaskStatus::Paused;
-            t.current_phase = "Paused".to_string();
-            t.speed_str = "0 B/s".to_string();
-            t.speed_bytes_per_sec = 0.0;
-            t.eta_seconds = None;
-            t.eta_str = "--".to_string();
-            t.active_connections = 0;
-            state.upsert_task(&t);
-            let _ = app.emit("task_updated", &t);
-        }
     }
     Ok(())
 }
@@ -526,6 +686,101 @@ pub fn clear_all(
     let remaining = state.get_tasks();
     let _ = app.emit("tasks_cleared", &remaining);
     Ok(())
+}
+
+
+#[tauri::command]
+pub fn get_queues(state: State<'_, AppState>) -> Result<Vec<DownloadQueue>, String> {
+    Ok(state.get_queues())
+}
+
+#[tauri::command]
+pub fn create_queue(app: AppHandle, state: State<'_, AppState>, name: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.create_queue(&name)?;
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn rename_queue(app: AppHandle, state: State<'_, AppState>, id: String, name: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.rename_queue(&id, &name)?;
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn delete_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.delete_queue(&id)?;
+    let _ = app.emit("queues_updated", &queues);
+    let tasks = state.get_tasks();
+    let _ = app.emit("tasks_cleared", &tasks);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    state.set_queue_paused(&id, true)?;
+    let task_ids: Vec<String> = state.get_tasks().into_iter()
+        .filter(|task| task.queue_id == id && (task.status.is_active() || task.status == TaskStatus::Queued))
+        .map(|task| task.id)
+        .collect();
+
+    // Only tasks paused by this queue operation are resumed when the queue starts.
+    // A user's manually paused downloads and scheduler-paused downloads remain paused.
+    for task_id in task_ids {
+        pause_task(app.clone(), state.clone(), task_id.clone())?;
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            if task.status == TaskStatus::Paused {
+                task.current_phase = "Paused by queue".to_string();
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+            }
+        }
+    }
+    let queues = state.get_queues();
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+fn should_resume_queue_paused_task(
+    task_queue_id: &str,
+    status: &TaskStatus,
+    current_phase: &str,
+    queue_id: &str,
+) -> bool {
+    task_queue_id == queue_id
+        && *status == TaskStatus::Paused
+        && current_phase == "Paused by queue"
+}
+
+#[tauri::command]
+pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
+    state.set_queue_paused(&id, false)?;
+    for mut task in state.get_tasks().into_iter().filter(|task| {
+        should_resume_queue_paused_task(
+            &task.queue_id,
+            &task.status,
+            &task.current_phase,
+            &id,
+        )
+    }) {
+        task.status = TaskStatus::Queued;
+        task.current_phase = "Queued in active queue".to_string();
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+    }
+    schedule_next(&app, &state);
+    let queues = state.get_queues();
+    let _ = app.emit("queues_updated", &queues);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn move_tasks_to_queue(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>, queue_id: String) -> Result<Vec<DownloadTask>, String> {
+    let tasks = state.move_tasks_to_queue(&ids, &queue_id)?;
+    let _ = app.emit("tasks_cleared", &tasks);
+    schedule_next(&app, &state);
+    Ok(tasks)
 }
 
 #[tauri::command]
@@ -610,19 +865,67 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.get_settings())
 }
 
+fn sync_windows_startup_registration(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        const VALUE_NAME: &str = "VANTA Download Manager";
+        if settings.launch_on_startup {
+            let executable = std::env::current_exe()
+                .map_err(|error| format!("Could not locate VANTA executable: {}", error))?;
+            let mut launch_command = format!("\"{}\"", executable.display());
+            if settings.start_minimized {
+                launch_command.push_str(" --background");
+            }
+            let output = Command::new("reg.exe")
+                .args(["ADD", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", &launch_command, "/f"])
+                .output()
+                .map_err(|error| format!("Could not update Windows startup registration: {}", error))?;
+            if !output.status.success() {
+                return Err(format!("Windows rejected the startup entry: {}", String::from_utf8_lossy(&output.stderr).trim()));
+            }
+        } else {
+            // Removing a missing entry is intentionally idempotent.
+            let _ = Command::new("reg.exe")
+                .args(["DELETE", RUN_KEY, "/v", VALUE_NAME, "/f"])
+                .output();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if settings.launch_on_startup {
+        return Err("Launch at Windows sign-in is only available on Windows.".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    settings: AppSettings,
+    settings: serde_json::Value,
 ) -> Result<AppSettings, String> {
-    let saved = state.save_settings(&settings)?;
+    // Frontend settings controls send small patches. Merge with persisted values
+    // so toggling startup/tray does not reset unrelated IDM-style preferences.
+    let mut merged = serde_json::to_value(state.get_settings())
+        .map_err(|error| format!("Could not read current settings: {}", error))?;
+    let patch = settings.as_object()
+        .ok_or_else(|| "Settings payload must be a JSON object.".to_string())?;
+    let target = merged.as_object_mut()
+        .ok_or_else(|| "Stored settings are invalid.".to_string())?;
+    for (key, value) in patch {
+        target.insert(key.clone(), value.clone());
+    }
+    let normalized: AppSettings = serde_json::from_value(merged)
+        .map_err(|error| format!("Invalid settings payload: {}", error))?;
+    sync_windows_startup_registration(&normalized)?;
+    let saved = state.save_settings(&normalized)?;
     let _ = app.emit("settings_updated", &saved);
     Ok(saved)
 }
 
 #[tauri::command]
 pub fn reset_settings(app: AppHandle, state: State<'_, AppState>) -> Result<AppSettings, String> {
+    sync_windows_startup_registration(&AppSettings::default())?;
     let saved = state.reset_settings()?;
     let _ = app.emit("settings_updated", &saved);
     Ok(saved)
@@ -725,79 +1028,67 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
     res
 }
 
+fn invalidate_engine_status_cache(state: &AppState) {
+    let mut cache = state
+        .cached_engine_status
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *cache = None;
+}
+
 #[tauri::command]
 pub async fn check_engine_updates() -> Result<HashMap<String, EngineUpdateInfo>, String> {
-    let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
-        .await
-        .map_err(|e| format!("Update check failed: {}", e))?;
-
-    let mut updates = HashMap::new();
-    updates.insert(
-        "ytdlp".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ytdlp.version.clone(),
-            latest_version: status.ytdlp.version,
-            update_available: !status.ytdlp.available,
-        },
-    );
-    updates.insert(
-        "spotdl".to_string(),
-        EngineUpdateInfo {
-            current_version: status.spotdl.version.clone(),
-            latest_version: status.spotdl.version,
-            update_available: !status.spotdl.available,
-        },
-    );
-    updates.insert(
-        "ffmpeg".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ffmpeg.version.clone(),
-            latest_version: status.ffmpeg.version,
-            update_available: !status.ffmpeg.available,
-        },
-    );
-    updates.insert(
-        "ffprobe".to_string(),
-        EngineUpdateInfo {
-            current_version: status.ffprobe.version.clone(),
-            latest_version: status.ffprobe.version,
-            update_available: !status.ffprobe.available,
-        },
-    );
-    Ok(updates)
+    EngineManager::check_engine_updates().await
 }
 
 #[tauri::command]
 pub async fn install_engine(
     app: AppHandle,
+    state: State<'_, AppState>,
     name: String,
     force: Option<bool>,
 ) -> Result<EngineUpdateResult, String> {
-    Ok(EngineManager::install_engine_async(Some(&app), &name, force.unwrap_or(false)).await)
+    let result = EngineManager::install_engine_async(Some(&app), &name, force.unwrap_or(false)).await;
+    invalidate_engine_status_cache(&state);
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn install_all_engines(
     app: AppHandle,
+    state: State<'_, AppState>,
     include_spotdl: Option<bool>,
     force: Option<bool>,
 ) -> Result<Vec<EngineUpdateResult>, String> {
-    Ok(EngineManager::install_all_required_async(
+    let results = EngineManager::install_all_required_async(
         Some(&app),
         include_spotdl.unwrap_or(true),
         force.unwrap_or(false),
     )
-    .await)
+    .await;
+    invalidate_engine_status_cache(&state);
+    Ok(results)
 }
 
 #[tauri::command]
-pub async fn update_engine(app: AppHandle, name: String) -> Result<EngineUpdateResult, String> {
-    Ok(EngineManager::update_engine_async(Some(&app), &name).await)
+pub async fn update_engine(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<EngineUpdateResult, String> {
+    let result = EngineManager::update_engine_async(Some(&app), &name).await;
+    invalidate_engine_status_cache(&state);
+    Ok(result)
 }
 
 #[tauri::command]
-pub async fn update_all_engines(app: AppHandle) -> Result<Vec<EngineUpdateResult>, String> {
-    Ok(EngineManager::install_all_required_async(Some(&app), true, true).await)
+pub async fn update_all_engines(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<EngineUpdateResult>, String> {
+    let results = EngineManager::install_all_required_async(Some(&app), true, true).await;
+    invalidate_engine_status_cache(&state);
+    Ok(results)
 }
 
 #[tauri::command]
@@ -1179,13 +1470,112 @@ pub fn app_safe_shutdown(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn exit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.safe_shutdown();
+    app.exit(0);
+    Ok(())
+}
+
+fn scheduler_window_is_open_at(
+    scheduler: &crate::models::SchedulerSettings,
+    today: u32,
+    current: u32,
+) -> bool {
+    let parse_minutes = |value: &str| -> Option<u32> {
+        let mut parts = value.split(':');
+        let hour = parts.next()?.parse::<u32>().ok()?;
+        let minute = parts.next()?.parse::<u32>().ok()?;
+        if parts.next().is_some() || hour > 23 || minute > 59 {
+            return None;
+        }
+        Some(hour * 60 + minute)
+    };
+
+    let Some(start) = parse_minutes(&scheduler.start_time) else { return true; };
+    let Some(stop) = parse_minutes(&scheduler.stop_time) else { return true; };
+    let allowed = |day: u32| scheduler.days.is_empty() || scheduler.days.contains(&day);
+
+    if start == stop {
+        return allowed(today);
+    }
+    if start < stop {
+        return allowed(today) && current >= start && current < stop;
+    }
+    if current >= start {
+        return allowed(today);
+    }
+    if current < stop {
+        return allowed((today + 6) % 7);
+    }
+    false
+}
+
+fn scheduler_window_is_open(settings: &AppSettings) -> bool {
+    if !settings.scheduler.enabled {
+        return true;
+    }
+    let now = chrono::Local::now();
+    scheduler_window_is_open_at(
+        &settings.scheduler,
+        now.weekday().num_days_from_sunday(),
+        now.hour() * 60 + now.minute(),
+    )
+}
+
+/// Enforces the configured schedule and is called periodically by the desktop runtime.
+pub fn scheduler_tick(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.is_shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let settings = state.get_settings();
+    if scheduler_window_is_open(&settings) {
+        for mut task in state.get_tasks().into_iter().filter(|task| {
+            task.status == TaskStatus::Paused && task.current_phase == "Paused by scheduler"
+        }) {
+            task.status = TaskStatus::Queued;
+            task.current_phase = "Queued by scheduler".to_string();
+            state.upsert_task(&task);
+            let _ = app.emit("task_updated", &task);
+        }
+        schedule_next(app, &state);
+        return;
+    }
+
+    if settings.scheduler.pause_on_stop {
+        let active_ids: Vec<String> = state.get_tasks().into_iter()
+            .filter(|task| task.status.is_active())
+            .map(|task| task.id)
+            .collect();
+        for id in active_ids {
+            let _ = pause_task(app.clone(), state.clone(), id.clone());
+            if let Some(mut task) = state.get_task_by_id(&id) {
+                if task.status == TaskStatus::Paused {
+                    task.current_phase = "Paused by scheduler".to_string();
+                    state.upsert_task(&task);
+                    let _ = app.emit("task_updated", &task);
+                }
+            }
+        }
+    }
+}
+
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
     }
 
     let settings = state.get_settings();
+    if !scheduler_window_is_open(&settings) {
+        return;
+    }
     let tasks = state.get_tasks();
+    let paused_queues: HashSet<String> = state.get_queues().into_iter()
+        .filter(|queue| queue.is_paused)
+        .map(|queue| queue.id)
+        .collect();
 
     let active_count = tasks.iter().filter(|t| t.status.is_active()).count();
     let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
@@ -1196,7 +1586,7 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
     let mut queued: Vec<DownloadTask> = tasks
         .into_iter()
-        .filter(|t| t.status == TaskStatus::Queued)
+        .filter(|t| t.status == TaskStatus::Queued && !paused_queues.contains(&t.queue_id))
         .collect();
 
     queued.sort_by(|a, b| {
@@ -1218,7 +1608,10 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
         let app_clone = app.clone();
         let task_id = next_task.id.clone();
-        tokio::spawn(async move {
+        // schedule_next() is also called by synchronous Tauri commands, where
+        // no Tokio reactor is entered on the calling thread. Use Tauri's
+        // managed async runtime instead of tokio::spawn() directly.
+        tauri::async_runtime::spawn(async move {
             run_download_task(app_clone, task_id).await;
         });
     }
@@ -1227,27 +1620,73 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 async fn run_download_task(app: AppHandle, task_id: String) {
     let app_for_blocking = app.clone();
     let tid_for_blocking = task_id.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let worker_result = tokio::task::spawn_blocking(move || {
         run_download_task_blocking(&app_for_blocking, &tid_for_blocking);
     })
     .await;
+
+    if let Err(join_error) = worker_result {
+        let state = app.state::<AppState>();
+        let reason = if join_error.is_panic() {
+            format!("Download worker panicked: {}", join_error)
+        } else {
+            format!("Download worker could not complete: {}", join_error)
+        };
+        logging::error("queue", &format!("Task '{}' failed in background worker: {}", task_id, reason));
+
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            if !matches!(task.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                task.status = TaskStatus::Failed;
+                task.current_phase = "Engine crashed".to_string();
+                task.speed_str = "0 B/s".to_string();
+                task.speed_bytes_per_sec = 0.0;
+                task.eta_seconds = None;
+                task.eta_str = "--".to_string();
+                task.active_connections = 0;
+                task.error_message = Some(reason);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+            }
+        }
+    }
 
     let state = app.state::<AppState>();
     schedule_next(&app, &state);
 }
 
+fn collect_files_recursive(dir: &Path, depth: usize, output: &mut Vec<PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() {
+            output.push(path);
+        } else if kind.is_dir() {
+            collect_files_recursive(&path, depth + 1, output);
+        }
+    }
+}
+
 fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
+    let audio_exts = [
+        "mp3", "flac", "wav", "m4a", "aac", "opus", "ogg", "oga", "aiff", "aif", "alac",
+        "wma", "m4b",
+    ];
     let media_exts = [
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
+        "ogg", "oga", "aiff", "aif", "alac", "wma", "m4b",
     ];
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
+    for p in files {
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
@@ -1287,34 +1726,40 @@ fn find_recent_output_file(dir: &Path, started_at_unix: i64, is_audio: bool) -> 
 
 fn snapshot_dir_file_sizes(dir: &Path) -> HashMap<PathBuf, u64> {
     let mut map = HashMap::new();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return map;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Ok(meta) = fs::metadata(&p) {
-                map.insert(p, meta.len());
-            }
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    for path in files {
+        if let Ok(meta) = fs::metadata(&path) {
+            map.insert(path, meta.len());
         }
     }
     map
 }
 
+fn is_audio_output_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "opus" | "ogg" | "oga" | "aiff" | "aif" | "alac" | "wma" | "m4b"
+    )
+}
+
 fn measure_dir_growth_bytes(dir: &Path, baseline: &HashMap<PathBuf, u64>) -> u64 {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut total = 0u64;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Ok(meta) = fs::metadata(&p) {
-                let len = meta.len();
-                let prev = baseline.get(&p).copied().unwrap_or(0);
-                if len > prev {
-                    total = total.saturating_add(len - prev);
-                }
+    for path in files {
+        if !is_audio_output_path(&path) {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(&path) {
+            let len = meta.len();
+            let prev = baseline.get(&path).copied().unwrap_or(0);
+            if len > prev {
+                total = total.saturating_add(len - prev);
             }
         }
     }
@@ -1326,17 +1771,14 @@ fn find_new_output_file(
     baseline: &HashMap<PathBuf, u64>,
     is_audio: bool,
 ) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     let audio_exts = ["mp3", "flac", "wav", "m4a", "aac", "opus", "ogg"];
     let media_exts = [
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "mp3", "flac", "m4a", "opus",
     ];
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() || baseline.contains_key(&p) {
-            continue;
-        }
+    for p in files {
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
@@ -1354,6 +1796,9 @@ fn find_new_output_file(
             if meta.len() == 0 {
                 continue;
             }
+            if baseline.get(&p).map(|previous_size| *previous_size == meta.len()).unwrap_or(false) {
+                continue;
+            }
             if let Ok(mtime) = meta.modified() {
                 let replace = best
                     .as_ref()
@@ -1366,6 +1811,104 @@ fn find_new_output_file(
         }
     }
     best.map(|(_, p)| p)
+}
+
+fn promote_staged_output_tree(
+    staging_root: &Path,
+    destination_root: &Path,
+    overwrite: bool,
+) -> Result<HashMap<PathBuf, PathBuf>, String> {
+    let mut files = Vec::new();
+    collect_files_recursive(staging_root, 0, &mut files);
+    let mut moved = HashMap::new();
+
+    for source in files {
+        let relative = source
+            .strip_prefix(staging_root)
+            .map_err(|e| format!("Invalid staged output path '{}': {}", source.display(), e))?;
+        let mut destination = destination_root.join(relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| format!("Invalid destination path '{}'.", destination.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create output directory '{}': {}", parent.display(), e))?;
+
+        if destination.exists() && !overwrite {
+            let stem = destination.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+            let extension = destination.extension().and_then(|s| s.to_str());
+            let mut index = 1u32;
+            loop {
+                let file_name = match extension {
+                    Some(ext) => format!("{} ({}).{}", stem, index, ext),
+                    None => format!("{} ({})", stem, index),
+                };
+                let candidate = parent.join(file_name);
+                if !candidate.exists() {
+                    destination = candidate;
+                    break;
+                }
+                index = index.saturating_add(1);
+            }
+        } else if destination.exists() && overwrite {
+            fs::remove_file(&destination).map_err(|e| {
+                format!("Could not replace existing output '{}': {}", destination.display(), e)
+            })?;
+        }
+
+        match fs::rename(&source, &destination) {
+            Ok(()) => {}
+            Err(rename_error) => {
+                fs::copy(&source, &destination).map_err(|copy_error| {
+                    format!(
+                        "Could not move '{}' to '{}' (rename: {}; copy: {}).",
+                        source.display(),
+                        destination.display(),
+                        rename_error,
+                        copy_error
+                    )
+                })?;
+                fs::remove_file(&source).map_err(|e| {
+                    format!("Copied '{}' but could not remove staging copy: {}", source.display(), e)
+                })?;
+            }
+        }
+        moved.insert(source, destination);
+    }
+
+    if staging_root.exists() {
+        fs::remove_dir_all(staging_root)
+            .map_err(|e| format!("Outputs were moved, but staging cleanup failed: {}", e))?;
+    }
+    Ok(moved)
+}
+
+fn find_track_audio_output(dir: &Path, track_number: usize) -> Option<PathBuf> {
+    let prefix = format!("{:02} - ", track_number);
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    files.into_iter()
+        .filter(|path| {
+            is_audio_output_path(path)
+                && path.file_stem().and_then(|s| s.to_str())
+                    .map(|stem| stem.starts_with(&prefix)).unwrap_or(false)
+                && fs::metadata(path).map(|meta| meta.is_file() && meta.len() > 0).unwrap_or(false)
+        })
+        .max_by_key(|path| {
+            fs::metadata(path).and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
+}
+
+fn find_latest_audio_output_file(dir: &Path) -> Option<PathBuf> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, 0, &mut files);
+    files.into_iter()
+        .filter(|path| is_audio_output_path(path)
+            && fs::metadata(path).map(|meta| meta.is_file() && meta.len() > 0).unwrap_or(false))
+        .max_by_key(|path| {
+            fs::metadata(path).and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
 }
 
 fn parse_eta_str_seconds(eta_raw: &str) -> Option<u64> {
@@ -1460,6 +2003,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         return;
     }
 
+    logging::info("queue", &format!("Worker started for task '{}'; engine='{}'.", task_id, task.engine));
     let settings = state.get_settings();
     if task.engine == "direct" {
         task.status = TaskStatus::Failed;
@@ -1480,7 +2024,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         || settings.embed_metadata
         || task.format_id == "best";
 
+    logging::info("queue", &format!("Task '{}': checking required engines (ffmpeg={}, spotdl={}).", task_id, requires_ffmpeg, is_spotdl));
     if let Err(err_msg) = EngineManager::ensure_required_engines(requires_ffmpeg, is_spotdl) {
+        logging::error("queue", &format!("Task '{}': engine preflight failed: {}", task_id, err_msg));
         task.status = TaskStatus::Failed;
         task.current_phase = "Failed".to_string();
         task.error_message = Some(err_msg);
@@ -1489,11 +2035,26 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         return;
     }
 
-    let out_dir = PathBuf::from(&task.output_path);
-    if let Err(e) = fs::create_dir_all(&out_dir) {
+    let destination_dir = PathBuf::from(&task.output_path);
+    if let Err(e) = fs::create_dir_all(&destination_dir) {
         task.status = TaskStatus::Failed;
         task.current_phase = "Failed".to_string();
         task.error_message = Some(format!("Failed creating output directory: {}", e));
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        return;
+    }
+
+    // Keep partial downloads and temporary media out of the user-visible destination.
+    // The task-specific folder survives pause/retry, and is promoted only after verification.
+    let out_dir = std::env::temp_dir()
+        .join("VANTA")
+        .join("staging")
+        .join(&task.id);
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        task.status = TaskStatus::Failed;
+        task.current_phase = "Failed".to_string();
+        task.error_message = Some(format!("Failed creating staging directory: {}", e));
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
         return;
@@ -1579,6 +2140,14 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
                 let track_started_unix = chrono::Utc::now().timestamp();
                 let dir_baseline = snapshot_dir_file_sizes(&track_dir);
+                if let Some(existing_output) = find_track_audio_output(&track_dir, idx + 1) {
+                    completed_count += 1;
+                    if let Ok(meta) = fs::metadata(&existing_output) {
+                        accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                    }
+                    last_output_file = Some(existing_output);
+                    continue;
+                }
                 let mut prev_track_bytes: u64 = 0;
                 let mut prev_sample_at = Instant::now();
                 let mut last_emit_at = Instant::now();
@@ -1628,6 +2197,17 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         {
                             let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
                             procs.insert(task_id.to_string(), pid);
+                        }
+                        let stop_after_spawn = state
+                            .get_task_by_id(task_id)
+                            .map(|current| matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled))
+                            .unwrap_or(true);
+                        if stop_after_spawn {
+                            let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+                            procs.remove(task_id);
+                            drop(procs);
+                            process::kill_process_tree(pid);
+                            return;
                         }
                         let stream_res = process::stream_child_lines_with_tick(
                             child,
@@ -1704,10 +2284,33 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                                 return;
                             }
                         }
+                        match &stream_res {
+                            Ok((st, diagnostic)) => {
+                                let clean = logging::redact_secrets(diagnostic);
+                                let tail = clean.lines().rev().take(6).collect::<Vec<_>>()
+                                    .into_iter().rev().collect::<Vec<_>>().join(" | ");
+                                logging::info(
+                                    "queue",
+                                    &format!(
+                                        "spotDL task '{}', track {}/{}: exit={:?}, success={}, diagnostics='{}'",
+                                        task_id, idx + 1, total_tracks, st.code(), st.success(), tail
+                                    ),
+                                );
+                            }
+                            Err(error) => logging::error(
+                                "queue",
+                                &format!(
+                                    "spotDL task '{}', track {}/{}: stream failed: {}",
+                                    task_id, idx + 1, total_tracks, logging::redact_secrets(error)
+                                ),
+                            ),
+                        }
                         match stream_res {
                             Ok((st, _)) if st.success() => {
                                 let newly_created = find_new_output_file(&track_dir, &dir_baseline, true)
-                                    .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true).filter(|p| !dir_baseline.contains_key(p)));
+                                    .or_else(|| find_recent_output_file(&track_dir, track_started_unix, true)
+                                        .filter(|p| !dir_baseline.contains_key(p)))
+                                    .or_else(|| find_track_audio_output(&track_dir, idx + 1));
                                 if let Some(found) = newly_created {
                                     completed_count += 1;
                                     if let Ok(m) = fs::metadata(&found) {
@@ -1759,21 +2362,53 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     "{} of {} tracks succeeded; {} failed. {}",
                     completed_count, total_tracks, failed_count, last_error
                 ));
-                if let Some(ref p) = last_output_file {
-                    final_t.output_path = p.parent().unwrap_or(&track_dir).to_string_lossy().to_string();
-                }
+                // Keep partial files in private staging for retry; the user-visible
+                // output directory must never point into the temporary area.
                 state.upsert_task(&final_t);
                 let _ = app.emit("task_updated", &final_t);
             } else {
                 let final_file = last_output_file
+                    .as_ref()
+                    .cloned()
                     .or_else(|| find_recent_output_file(&track_dir, started_unix, true));
                 if let Some(ref fp) = final_file {
                     if let Some((audio_sum, acodec, _vcodec, _res)) = EngineManager::verify_media_file(fp) {
                         final_t.verified_audio_info = audio_sum;
                         final_t.audio_codec = acodec;
                     }
-                    final_t.output_path = track_dir.to_string_lossy().to_string();
                 }
+                let relative_track_dir = track_dir.strip_prefix(&out_dir).unwrap_or(Path::new(""));
+                let moved_files = match promote_staged_output_tree(
+                    &out_dir,
+                    &destination_dir,
+                    settings.conflict_strategy == "overwrite",
+                ) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        final_t.status = TaskStatus::Failed;
+                        final_t.current_phase = "Could not move completed files".to_string();
+                        final_t.error_message = Some(error);
+                        state.upsert_task(&final_t);
+                        let _ = app.emit("task_updated", &final_t);
+                        return;
+                    }
+                };
+                if let (Some(content), Some(source_audio)) =
+                    (final_t.lyrics_lrc_content.as_deref(), last_output_file.as_ref())
+                {
+                    if let Some(promoted_audio) = moved_files.get(source_audio) {
+                        if let Err(error) = write_lrc_assets(promoted_audio, content) {
+                            final_t.status = TaskStatus::Failed;
+                            final_t.current_phase = "Could not write LRC sidecar".to_string();
+                            final_t.error_message = Some(error);
+                            state.upsert_task(&final_t);
+                            let _ = app.emit("task_updated", &final_t);
+                            return;
+                        }
+                    }
+                    final_t.lyrics_lrc_content = None;
+                }
+                final_t.output_path = destination_dir.join(relative_track_dir).to_string_lossy().to_string();
                 final_t.status = TaskStatus::Completed;
                 final_t.progress_percentage = 100.0;
                 final_t.percentage_known = true;
@@ -1890,15 +2525,26 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "after_move:VANTA_OUTPUT_FILE:%(filepath)s".to_string(),
             "-o".to_string(),
             template.to_string_lossy().to_string(),
+            // Be conservative with segmented streams: transient CDN failures are common,
+            // but silently skipping a fragment can produce a playable yet incomplete file.
             "--retries".to_string(),
-            "10".to_string(),
+            "15".to_string(),
             "--fragment-retries".to_string(),
-            "10".to_string(),
+            "20".to_string(),
             "--file-access-retries".to_string(),
-            "5".to_string(),
+            "10".to_string(),
+            "--retry-sleep".to_string(),
+            "fragment:exp=1:60".to_string(),
             "--socket-timeout".to_string(),
-            "30".to_string(),
+            "60".to_string(),
+            "--extractor-retries".to_string(),
+            "5".to_string(),
         ];
+
+        // When enabled, yt-dlp must fail rather than silently produce media with missing fragments.
+        if settings.verify_fragments {
+            args.push("--abort-on-unavailable-fragments".to_string());
+        }
 
         if task.playlist_mode.as_deref() == Some("playlist") {
             args.push("--yes-playlist".to_string());
@@ -1947,15 +2593,18 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
         }
 
-        if settings.fragment_concurrency > 1 {
+        // Keep segmented downloads reliable on CDNs that throttle parallel fragment requests.
+        // A low concurrency is slower on paper but avoids frequent 403/timeouts and missing chunks.
+        let safe_fragment_concurrency = settings.fragment_concurrency.clamp(1, 2);
+        if safe_fragment_concurrency > 1 {
             args.push("-N".to_string());
-            args.push(settings.fragment_concurrency.to_string());
+            args.push(safe_fragment_concurrency.to_string());
         }
 
         if task.retries > 0 {
+            // Avoid stale cached extractor responses on retry. YouTube player clients
+            // are selected centrally by build_ytdlp_request_args for inspection and download.
             args.push("--no-cache-dir".to_string());
-            args.push("--extractor-args".to_string());
-            args.push("youtube:player_client=default,web,android".to_string());
         }
 
         if task.is_audio_only {
@@ -1995,6 +2644,13 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push("mp4".to_string());
         }
 
+        if !is_spotdl && !task.is_audio_only {
+            args.extend(build_subtitle_args(
+                &task.subtitle_languages,
+                task.write_auto_subtitles,
+            ));
+        }
+
         if settings.embed_thumbnail {
             args.push("--embed-thumbnail".to_string());
         }
@@ -2022,6 +2678,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         ema_speed: f64,
         stream_known_total: u64,
         stream_max_downloaded: u64,
+        completed_stream_total: u64,
+        completed_stream_downloaded: u64,
         last_activity_at: Instant,
         last_emit_at: Instant,
         spotdl_prev_bytes: u64,
@@ -2031,16 +2689,15 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
     let started_unix = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
-    let spotdl_baseline = if is_spotdl {
-        snapshot_dir_file_sizes(&out_dir)
-    } else {
-        HashMap::new()
-    };
+    let output_baseline = snapshot_dir_file_sizes(&out_dir);
+    let spotdl_baseline = output_baseline.clone();
 
     let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
         ema_speed: 0.0,
-        stream_known_total: task.total_bytes,
+        stream_known_total: 0,
         stream_max_downloaded: 0,
+        completed_stream_total: 0,
+        completed_stream_downloaded: 0,
         last_activity_at: Instant::now(),
         last_emit_at: Instant::now(),
         spotdl_prev_bytes: 0,
@@ -2079,6 +2736,18 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         procs.insert(task_id.to_string(), pid);
+    }
+
+    let stop_after_spawn = state
+        .get_task_by_id(task_id)
+        .map(|current| matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled))
+        .unwrap_or(true);
+    if stop_after_spawn {
+        let mut procs = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+        procs.remove(task_id);
+        drop(procs);
+        process::kill_process_tree(pid);
+        return;
     }
 
     let stream_res = process::stream_child_lines_with_tick(
@@ -2196,7 +2865,13 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     .trim()
                     .trim_matches(|c| c == '"' || c == '\'');
                 if !dest.is_empty() {
-                    if tel.detected_output_path.as_deref() != Some(dest) {
+                    if tel.detected_output_path.as_deref().map(|previous| previous != dest).unwrap_or(false) {
+                        tel.completed_stream_downloaded = tel
+                            .completed_stream_downloaded
+                            .saturating_add(tel.stream_max_downloaded);
+                        tel.completed_stream_total = tel
+                            .completed_stream_total
+                            .saturating_add(tel.stream_known_total);
                         tel.stream_known_total = 0;
                         tel.stream_max_downloaded = 0;
                     }
@@ -2314,15 +2989,17 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 if raw_total > 0 {
                     tel.stream_known_total = tel.stream_known_total.max(raw_total);
                 }
-                let total = if tel.stream_known_total > 0 {
-                    tel.stream_known_total
-                } else {
-                    raw_total
-                };
+                if raw_total > tel.stream_known_total {
+                    tel.stream_known_total = raw_total;
+                }
                 if raw_downloaded > tel.stream_max_downloaded {
                     tel.stream_max_downloaded = raw_downloaded;
                 }
-                let downloaded = tel.stream_max_downloaded.max(raw_downloaded);
+                let active_total = tel.stream_known_total.max(raw_total);
+                let total = tel.completed_stream_total.saturating_add(active_total);
+                let downloaded = tel
+                    .completed_stream_downloaded
+                    .saturating_add(tel.stream_max_downloaded.max(raw_downloaded));
 
                 if speed_bytes > 0.0 {
                     tel.ema_speed = if tel.ema_speed == 0.0 {
@@ -2472,7 +3149,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         None => return,
     };
 
-    if matches!(t.status, TaskStatus::Cancelled | TaskStatus::Paused)
+    if matches!(t.status, TaskStatus::Cancelled | TaskStatus::Paused | TaskStatus::Queued)
+        || (t.status == TaskStatus::Connecting && t.current_phase == "Starting engine...")
         || state.is_shutting_down.load(Ordering::SeqCst)
     {
         return;
@@ -2480,12 +3158,36 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
     let detected_output_path = loop_telemetry.into_inner().detected_output_path;
 
+    if is_spotdl {
+        match &stream_res {
+            Ok((status, diagnostic)) => {
+                let clean = logging::redact_secrets(diagnostic);
+                let tail = clean.lines().rev().take(8).collect::<Vec<_>>()
+                    .into_iter().rev().collect::<Vec<_>>().join(" | ");
+                logging::info(
+                    "queue",
+                    &format!(
+                        "spotDL task '{}': process exit={:?}, success={}, output scan starting; diagnostics='{}'",
+                        task_id, status.code(), status.success(), tail
+                    ),
+                );
+            }
+            Err(error) => logging::error(
+                "queue",
+                &format!("spotDL task '{}': process wait/stream failed: {}", task_id, logging::redact_secrets(error)),
+            ),
+        }
+    }
+
     match stream_res {
         Ok((status, _err_log)) if status.success() => {
             let candidate_path = detected_output_path
                 .map(PathBuf::from)
                 .filter(|p| p.is_file())
-                .or_else(|| find_recent_output_file(&out_dir, started_unix, t.is_audio_only));
+                .or_else(|| find_new_output_file(&out_dir, &output_baseline, t.is_audio_only))
+                .or_else(|| find_recent_output_file(&out_dir, started_unix, t.is_audio_only)
+                    .filter(|p| !output_baseline.contains_key(p)))
+                .or_else(|| if is_spotdl { find_latest_audio_output_file(&out_dir) } else { None });
 
             let valid_file = candidate_path.and_then(|p| {
                 fs::metadata(&p)
@@ -2497,7 +3199,10 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let Some((final_path, file_size)) = valid_file else {
                 t.status = TaskStatus::Failed;
                 t.current_phase = "Verification failed".to_string();
-                t.error_message = Some("Engine exited cleanly, but no non-empty output file was found on disk.".to_string());
+                t.error_message = Some(format!(
+                    "Engine exited successfully, but no new non-empty media file was detected in staging '{}'. Existing files were excluded; check the engine log for the actual output path.",
+                    out_dir.display()
+                ));
                 state.upsert_task(&t);
                 let _ = app.emit("task_updated", &t);
                 return;
@@ -2519,6 +3224,40 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 t.ext = ext_str.to_lowercase();
             }
 
+            let moved_files = match promote_staged_output_tree(
+                &out_dir,
+                &destination_dir,
+                settings.conflict_strategy == "overwrite",
+            ) {
+                Ok(files) => files,
+                Err(error) => {
+                    t.status = TaskStatus::Failed;
+                    t.current_phase = "Could not move completed file".to_string();
+                    t.error_message = Some(error);
+                    state.upsert_task(&t);
+                    let _ = app.emit("task_updated", &t);
+                    return;
+                }
+            };
+            let Some(final_path) = moved_files.get(&final_path).cloned() else {
+                t.status = TaskStatus::Failed;
+                t.current_phase = "Output promotion verification failed".to_string();
+                t.error_message = Some("The verified file was not present in the staging promotion map.".to_string());
+                state.upsert_task(&t);
+                let _ = app.emit("task_updated", &t);
+                return;
+            };
+            let file_size = fs::metadata(&final_path).map(|meta| meta.len()).unwrap_or(file_size);
+            if let Some(content) = t.lyrics_lrc_content.take() {
+                if let Err(error) = write_lrc_assets(&final_path, &content) {
+                    t.status = TaskStatus::Failed;
+                    t.current_phase = "Could not write LRC sidecar".to_string();
+                    t.error_message = Some(error);
+                    state.upsert_task(&t);
+                    let _ = app.emit("task_updated", &t);
+                    return;
+                }
+            }
             t.status = TaskStatus::Completed;
             t.progress_percentage = 100.0;
             t.percentage_known = true;
@@ -2610,5 +3349,94 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
         }
+    }
+}
+
+#[cfg(test)]
+mod subtitle_and_lyrics_tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_lrc_timestamps_and_offsets() {
+        let content = "[offset:100]\n[00:01.2][00:02.34]Hello\n[00:03,005]World\n[ar:Artist]";
+        assert_eq!(parse_lrc_entries(content), vec![
+            (1300, "Hello".to_string()),
+            (2440, "Hello".to_string()),
+            (3105, "World".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn builds_embedded_subtitle_arguments_with_default_track() {
+        let args = build_subtitle_args(&["en".to_string(), "fa".to_string()], true);
+        assert!(args.contains(&"--write-subs".to_string()));
+        assert!(args.contains(&"--write-auto-subs".to_string()));
+        assert!(args.contains(&"--embed-subs".to_string()));
+        assert!(args.contains(&"--remux-video".to_string()));
+        assert!(args.windows(2).any(|pair| pair[0] == "--ppa"
+            && pair[1] == "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default"));
+        assert_eq!(build_subtitle_args(&[], false), Vec::<String>::new());
+    }
+}
+
+
+#[cfg(test)]
+mod scheduler_window_tests {
+    use super::*;
+    use crate::models::SchedulerSettings;
+
+    fn enabled_window(start: &str, stop: &str, days: Vec<u32>) -> SchedulerSettings {
+        SchedulerSettings {
+            enabled: true,
+            start_time: start.to_string(),
+            stop_time: stop.to_string(),
+            pause_on_stop: true,
+            days,
+        }
+    }
+
+    #[test]
+    fn queue_start_only_resumes_tasks_paused_by_that_queue() {
+        assert!(should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by queue", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by user", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Paused, "Paused by scheduler", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_b", &TaskStatus::Paused, "Paused by queue", "queue_a"
+        ));
+        assert!(!should_resume_queue_paused_task(
+            "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
+        ));
+    }
+
+    #[test]
+    fn scheduler_enforces_same_day_window_and_selected_days() {
+        let settings = enabled_window("09:00", "17:00", vec![1]);
+        assert!(scheduler_window_is_open_at(&settings, 1, 9 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 1, 16 * 60 + 59));
+        assert!(!scheduler_window_is_open_at(&settings, 1, 17 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 10 * 60));
+    }
+
+    #[test]
+    fn scheduler_handles_overnight_window_using_previous_day_after_midnight() {
+        let settings = enabled_window("22:00", "06:00", vec![1]);
+        assert!(scheduler_window_is_open_at(&settings, 1, 23 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 2, 2 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 7 * 60));
+        assert!(!scheduler_window_is_open_at(&settings, 2, 23 * 60));
+    }
+
+    #[test]
+    fn equal_start_and_stop_means_all_day_on_selected_days() {
+        let settings = enabled_window("00:00", "00:00", vec![0, 6]);
+        assert!(scheduler_window_is_open_at(&settings, 0, 12 * 60));
+        assert!(scheduler_window_is_open_at(&settings, 6, 23 * 60 + 59));
+        assert!(!scheduler_window_is_open_at(&settings, 1, 12 * 60));
     }
 }

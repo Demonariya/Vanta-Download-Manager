@@ -65,7 +65,7 @@ The desktop workspace provides:
 
 - **Cookie Authentication & Diagnostics**
   - Strict Netscape `cookies.txt` validation (`cookies.ts` / `cookies.rs`) with secret-redacted logging (`logging.rs`).
-  - Managed storage at `%LOCALAPPDATA%\com.vanta.downloadmanager\cookies.txt`, browser cookie profile detection (`Chrome`, `Edge`, `Firefox`, `Brave`, `Opera`, `Vivaldi`), and live URL authentication testing.
+  - Managed storage at `%APPDATA%\VANTA Download Manager\cookies.txt`, browser cookie profile detection (`Chrome`, `Edge`, `Firefox`, `Brave`, `Opera`, `Vivaldi`), and live URL authentication testing.
   - Built-in diagnostics runner to check binary paths, versions, and latency, plus one-click managed engine installation and updates.
 
 - **SQLite Persistence & JSON Export/Import**
@@ -77,11 +77,11 @@ The desktop workspace provides:
 
 | Engine | Role | Packaging & Runtime Discovery | Integrity Verification |
 | :--- | :--- | :--- | :--- |
-| **yt-dlp** | Primary video, playlist, and HTTP stream extractor & downloader | Side-by-side (`bin/`), managed `%LOCALAPPDATA%\...\engines\bin`, or system `PATH` | SHA-256 verified against upstream `SHA2-256SUMS` |
-| **spotDL** | Spotify track/album/playlist audio matching & tagging (`v4.6.0` pinned) | Managed `%LOCALAPPDATA%\...\engines\bin` or system `PATH` | Pinned Windows release SHA-256 verified |
-| **FFmpeg & FFprobe** | Container muxing, audio transcoding (`FLAC`/`MP3`/`M4A`/`OPUS`/`WAV`), and stream inspection | Managed compact Windows GPL-shared build or system `PATH` | SHA-256 verified against `BtbN/FFmpeg-Builds` checksums |
+| **yt-dlp** | Primary video, playlist, and HTTP stream extractor & downloader | Managed `Engine\yt-dlp`, optional side-by-side `bin/`, or system `PATH` | SHA-256 verified against upstream `SHA2-256SUMS` |
+| **spotDL** | Spotify track/album/playlist audio matching & tagging | Managed isolated Python environment at `Engine\spotdl\venv` or configured Python runtime | Installed/upgraded from the official PyPI index |
+| **FFmpeg & FFprobe** | Container muxing, audio transcoding (`FLAC`/`MP3`/`M4A`/`OPUS`/`WAV`), and stream inspection | Managed compact Windows GPL-shared build at `Engine\ffmpeg\bin` or system `PATH` | SHA-256 verified against `FFmpeg-Builds/FFmpeg-Builds` release checksums |
 
-VANTA builds **slim installers** by default (no 300+ MiB bundled engine binaries inside the installer). On first launch or from **Diagnostics**, the app automatically downloads, SHA-256 verifies, and installs the required Windows binaries into `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin` (while **Portable ZIP** builds also check a local `bin/` folder beside `VANTA.exe`).
+VANTA builds **slim installers** by default (no 300+ MiB bundled engine binaries inside the installer). On first launch or from **Diagnostics**, the app downloads and verifies managed engines into the `Engine/` directory beside the desktop executable. Portable builds also support a local `bin/` directory beside `VANTA.exe`.
 
 ---
 
@@ -107,7 +107,7 @@ VANTA builds **slim installers** by default (no 300+ MiB bundled engine binaries
    ```powershell
    Get-FileHash ".\VANTA Download Manager_0.0.1_x64-setup.exe" -Algorithm SHA256
    ```
-4. **Upgrading / Installing from an earlier internal `1.0.0` dev build:** Because `0.0.1` is lower than `1.0.0`, Windows Installer/NSIS downgrade protection blocks in-place downgrade over `1.0.0` without changing the app identifier or `upgradeCode`. If an internal `1.0.0` build is installed, uninstall it first via Windows **Settings → Apps → Installed apps** and then install `0.0.1` (user settings, download history, and cookies in `%LOCALAPPDATA%\com.vanta.downloadmanager` are preserved across uninstall).
+4. **Upgrading from an earlier internal `1.0.0` build:** Because `0.0.1` is lower than `1.0.0`, Windows Installer/NSIS downgrade protection blocks an in-place downgrade. Uninstall the older build first via Windows **Settings → Apps → Installed apps**; user data is stored separately under `%APPDATA%\VANTA Download Manager` and is preserved.
 5. Launch VANTA and open **Diagnostics** if prompted to fetch managed engine binaries (`yt-dlp`, `FFmpeg`/`FFprobe`, `spotDL`).
 
 ---
@@ -235,11 +235,11 @@ Vanta-Download-Manager/
 
 ### Windows Desktop App (`Tauri`)
 
-- **App Data Root**: `%LOCALAPPDATA%\com.vanta.downloadmanager\`
-- **SQLite Database**: `%LOCALAPPDATA%\com.vanta.downloadmanager\vanta_native.db`
-- **Managed Engines**: `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin\` and `manifest.json`
-- **Managed Cookies File**: `%LOCALAPPDATA%\com.vanta.downloadmanager\cookies.txt`
-- **Rotating Diagnostic Logs**: `%LOCALAPPDATA%\com.vanta.downloadmanager\logs\vanta.log` (secrets redacted automatically)
+- **App Data Root**: `%APPDATA%\VANTA Download Manager\` (unless `VANTA_DATA_DIR` overrides it)
+- **SQLite Database**: `%APPDATA%\VANTA Download Manager\vanta_native.db`
+- **Managed Engines (installed app)**: `Engine\` beside `VANTA.exe` (`yt-dlp\`, `spotdl\venv\`, `ffmpeg\bin\`)
+- **Managed Cookies File**: `%APPDATA%\VANTA Download Manager\cookies.txt`
+- **Rotating Diagnostic Logs**: `%APPDATA%\VANTA Download Manager\logs\vanta.log` (secrets redacted automatically)
 
 ### Optional Environment Variables (`.env`)
 
@@ -258,7 +258,7 @@ Copy `.env.example` or define optional environment variables when needed:
 - **Missing MSVC linker (`link.exe not found`)**: Install Visual Studio 2022 Build Tools with the **Desktop development with C++** workload and Windows 10/11 SDK, then restart your PowerShell terminal.
 - **Rolldown Windows native binding error during Vite build**: `build.ps1` runs `npm ci --include=optional` and verifies `@rolldown/binding-win32-x64-msvc`. If an interrupted install broke `node_modules`, run `.\build.ps1 -Clean`.
 - **Browser Cookie Extraction Fails on Windows Chrome/Edge**: Chromium browsers on Windows lock their SQLite cookie database while open and apply App-Bound Encryption. Export a Netscape `cookies.txt` file and import/paste it in **Settings → Cookies**, or close the browser before testing profile extraction.
-- **Missing Engines (`yt-dlp` / `ffmpeg` / `spotdl`)**: Open **Diagnostics → Install / Update Managed Engines** inside VANTA, or place standalone Windows binaries in `%LOCALAPPDATA%\com.vanta.downloadmanager\engines\bin\`.
+- **Missing Engines (`yt-dlp` / `ffmpeg` / `spotdl`)**: Open **Diagnostics → Install / Update Managed Engines** inside VANTA, or configure the managed engine root with `VANTA_ENGINE_ROOT`. Portable builds can also use the adjacent `bin/` directory.
 - **Execution Policy blocks `.\build.ps1`**: Run once with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or invoke via `pwsh -ExecutionPolicy Bypass -File .\build.ps1`.
 
 ---

@@ -36,6 +36,11 @@ export interface SchedulerSettings {
   days: number[]; // 0 (Sun) - 6 (Sat)
 }
 
+export interface SubtitleLanguage {
+  code: string;
+  name: string;
+}
+
 export interface FormatOption {
   format_id: string;
   ext: string;
@@ -90,6 +95,8 @@ export interface MediaMetadata {
   thumbnail?: string;
   description?: string;
   formats: FormatOption[];
+  subtitles?: SubtitleLanguage[];
+  automatic_subtitles?: SubtitleLanguage[];
   is_playlist: boolean;
   playlist_count?: number;
   extractor: string;
@@ -106,6 +113,14 @@ export interface MediaMetadata {
   total_tracks?: number;
   partial_tracks?: boolean;
   metadata_source?: string;
+}
+
+export interface DownloadQueue {
+  id: string;
+  name: string;
+  is_default: boolean;
+  is_paused: boolean;
+  queue_order: number;
 }
 
 export interface DownloadTask {
@@ -136,6 +151,9 @@ export interface DownloadTask {
   current_phase: string;
   format_id: string;
   format_note?: string;
+  subtitle_languages?: string[];
+  write_auto_subtitles?: boolean;
+  lyrics_lrc_content?: string | null;
   ext: string;
   video_codec?: string | null;
   audio_codec?: string | null;
@@ -159,6 +177,7 @@ export interface DownloadTask {
   logs?: TaskLogEntry[];
   priority: TaskPriority;
   queue_order?: number;
+  queue_id?: string;
   created_at: string;
   started_at?: string | null;
   completed_at?: string;
@@ -279,15 +298,16 @@ export interface AppSettings {
   embed_metadata: boolean;
   filename_template: string;
   proxy_url: string;
-  floating_notifications_enabled: boolean;
-  floating_widget_enabled?: boolean;
   auto_dismiss_seconds: number;
   theme: ThemeMode;
   auto_retry_failed: boolean;
   auto_resume_on_startup: boolean;
+  launch_on_startup?: boolean;
+  start_minimized?: boolean;
   clipboard_monitoring?: boolean;
   conflict_strategy?: ConflictStrategy;
   verify_media_on_complete?: boolean;
+  verify_fragments?: boolean;
   tray_minimize_on_close?: boolean;
   scheduler?: SchedulerSettings;
   cookies_browser?: BrowserCookieSource;

@@ -38,7 +38,6 @@ function makeBaseSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     embed_metadata: true,
     filename_template: '%(title)s [%(id)s].%(ext)s',
     proxy_url: '',
-    floating_notifications_enabled: true,
     auto_dismiss_seconds: 5,
     theme: 'dark',
     auto_retry_failed: true,

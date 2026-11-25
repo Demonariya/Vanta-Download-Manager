@@ -15,6 +15,13 @@ import {
   Monitor,
   Terminal,
   RotateCcw,
+  SlidersHorizontal,
+  Download,
+  Gauge,
+  CalendarClock,
+  Music2,
+  Network,
+  Info,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -41,6 +48,7 @@ type SettingsSection =
   | 'general'
   | 'downloads'
   | 'connection'
+  | 'proxy'
   | 'scheduler'
   | 'media'
   | 'python'
@@ -301,19 +309,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const sectionTabs: Array<{ id: SettingsSection; label: string }> = [
-    { id: 'general', label: 'General & Theme' },
-    { id: 'downloads', label: 'Downloads & Files' },
-    { id: 'connection', label: 'Connection & Limits' },
-    { id: 'scheduler', label: 'Queue & Scheduler' },
-    { id: 'media', label: 'Audio & Video' },
-    { id: 'python', label: 'Python Configuration' },
-    { id: 'cookies', label: 'Cookies & Auth' },
-    { id: 'about', label: 'About' },
+  const sectionTabs: Array<{
+    id: SettingsSection;
+    label: string;
+    description: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }> = [
+    { id: 'general', label: 'General', description: 'Appearance and startup', icon: SlidersHorizontal },
+    { id: 'downloads', label: 'Downloads', description: 'Folder and file naming', icon: Download },
+    { id: 'connection', label: 'Connection', description: 'Speed and retry rules', icon: Gauge },
+    { id: 'proxy', label: 'Proxy / SOCKS', description: 'Route media requests', icon: Network },
+    { id: 'scheduler', label: 'Scheduler', description: 'Queue and time windows', icon: CalendarClock },
+    { id: 'media', label: 'Media', description: 'Video and audio defaults', icon: Music2 },
+    { id: 'python', label: 'Python', description: 'spotDL runtime', icon: Terminal },
+    { id: 'cookies', label: 'Cookies & Auth', description: 'Browser sessions', icon: Cookie },
+    { id: 'about', label: 'About', description: 'Version and shortcuts', icon: Info },
   ];
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4 max-w-5xl">
+    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-4">
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
@@ -325,7 +339,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           {onResetSettings && (
             <button
               type="button"
@@ -364,36 +378,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* Section Navigation */}
-      <div className="flex items-center gap-1 overflow-x-auto p-1 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-        {sectionTabs.map((tab) => {
-          const active = section === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setSection(tab.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
-                active
-                  ? 'bg-[var(--vanta-accent)] text-white'
-                  : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
+      {/* Responsive settings navigation: compact grid on small windows, vertical rail on desktop. */}
+      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start lg:gap-4">
+        <nav aria-label="Settings sections" role="tablist" className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2 sm:grid-cols-4 lg:sticky lg:top-3 lg:grid-cols-1 lg:max-h-[calc(100dvh-190px)] lg:overflow-y-auto">
+          {sectionTabs.map((tab) => {
+            const active = section === tab.id;
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setSection(tab.id)}
+                className={`flex min-w-0 items-center gap-2.5 rounded-lg border px-2.5 py-2.5 text-left transition-colors ${
+                  active
+                    ? 'border-[var(--vanta-accent)]/40 bg-[var(--vanta-accent)]/10 text-[var(--vanta-accent)]'
+                    : 'border-transparent text-[var(--vanta-text-secondary)] hover:border-[var(--vanta-border)] hover:bg-[var(--vanta-surface-hover)]'
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-semibold">{tab.label}</span>
+                  <span className="hidden truncate text-[10px] text-[var(--vanta-muted)] lg:block">{tab.description}</span>
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="settings-content min-w-0 space-y-4">
       {/* Section 1: General & Theme */}
       {section === 'general' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
           <div>
             <h2 className="text-sm font-semibold text-[var(--vanta-text)] mb-1">Appearance</h2>
             <p className="text-[var(--vanta-muted)] mb-3">
               Choose how VANTA Download Manager renders on your desktop.
             </p>
-            <div className="grid grid-cols-3 gap-2.5 max-w-md">
+            <div className="grid grid-cols-3 gap-2.5 max-w-xl">
               {(
                 [
                   { id: 'dark', label: 'Dark', icon: Moon },
@@ -448,27 +470,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={form.floating_notifications_enabled}
-                  onChange={(e) =>
-                    setForm({ ...form, floating_notifications_enabled: e.target.checked })
-                  }
+                  checked={Boolean(form.tray_minimize_on_close)}
+                  onChange={(e) => setForm({ ...form, tray_minimize_on_close: e.target.checked })}
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
                 />
                 <span className="text-[var(--vanta-text-secondary)]">
-                  Show floating active transfers dock
+                  Close to System Tray instead of exiting the application
                 </span>
               </label>
 
               <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={Boolean(form.tray_minimize_on_close)}
-                  onChange={(e) => setForm({ ...form, tray_minimize_on_close: e.target.checked })}
+                  checked={Boolean(form.launch_on_startup)}
+                  onChange={(e) => setForm({ ...form, launch_on_startup: e.target.checked })}
                   className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
                 />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Minimize to background tray when closing with active transfers
-                </span>
+                <span className="text-[var(--vanta-text-secondary)]">Launch VANTA when I sign in to Windows</span>
+              </label>
+
+              <label className={`flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] ${form.launch_on_startup ? 'cursor-pointer' : 'opacity-50'}`}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.start_minimized)}
+                  disabled={!form.launch_on_startup}
+                  onChange={(e) => setForm({ ...form, start_minimized: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Start minimized in the system tray</span>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.auto_resume_on_startup)}
+                  onChange={(e) => setForm({ ...form, auto_resume_on_startup: e.target.checked })}
+                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
+                />
+                <span className="text-[var(--vanta-text-secondary)]">Restore queued downloads when VANTA starts</span>
               </label>
 
               <label className="flex items-center gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
@@ -487,9 +526,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
+      {section === 'general' && (
+        <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-4 sm:p-5 space-y-3 text-xs">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Notifications</h2>
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">Choose how long transient status messages remain visible.</p>
+          </div>
+          <div className="max-w-sm space-y-1.5">
+            <label className="block font-medium text-[var(--vanta-text-secondary)]">Notification auto-dismiss time</label>
+            <select
+              value={form.auto_dismiss_seconds}
+              onChange={(e) => setForm({ ...form, auto_dismiss_seconds: parseInt(e.target.value, 10) })}
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 text-[var(--vanta-text)]"
+            >
+              <option value={3}>3 seconds</option>
+              <option value={5}>5 seconds</option>
+              <option value={8}>8 seconds</option>
+              <option value={10}>10 seconds</option>
+              <option value={15}>15 seconds</option>
+              <option value={30}>30 seconds</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       {/* Section 2: Downloads & Storage */}
       {section === 'downloads' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="space-y-1.5">
             <label className="font-medium text-[var(--vanta-text-secondary)] block">
               Download Destination Folder
@@ -573,7 +636,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Section 3: Connection & Limits */}
       {section === 'connection' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
@@ -644,24 +707,76 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
-          <div className="space-y-1.5 pt-2">
-            <label className="font-medium text-[var(--vanta-text-secondary)] block">
-              HTTP / SOCKS5 Proxy URL (Optional)
-            </label>
+          <label className="flex items-start gap-2.5 p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.verify_fragments !== false}
+              onChange={(e) => setForm({ ...form, verify_fragments: e.target.checked })}
+              className="mt-0.5 w-4 h-4 rounded accent-[var(--vanta-accent)]"
+            />
+            <span className="min-w-0">
+              <span className="block font-medium text-[var(--vanta-text)]">Verify Fragments</span>
+              <span className="mt-1 block text-[11px] leading-relaxed text-[var(--vanta-muted)]">Do not mark a media download as successful when required fragments are unavailable. Failed fragments must exhaust retries or the download remains failed.</span>
+            </span>
+          </label>
+
+        </div>
+      )}
+
+      {section === 'proxy' && (
+        <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-4 sm:p-5 space-y-4 text-xs">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Proxy / SOCKS</h2>
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">Route supported media extraction and download requests through an HTTP or SOCKS5 proxy.</p>
+          </div>
+          <div className="space-y-1.5 max-w-2xl">
+            <label className="font-medium text-[var(--vanta-text-secondary)] block">Proxy URL</label>
             <input
               type="text"
+              autoComplete="off"
+              spellCheck={false}
               placeholder="http://127.0.0.1:8080 or socks5://127.0.0.1:1080"
               value={form.proxy_url}
               onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
-              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+              className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2.5 font-mono text-[var(--vanta-text)]"
             />
+            <p className="text-[10px] text-[var(--vanta-muted)]">Leave empty to use the normal network route. Credentials, if required, must be included in the proxy URL.</p>
+          </div>
+        </div>
+      )}
+
+      {section === 'connection' && (
+        <div className="grid grid-cols-1 gap-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-4 sm:grid-cols-2 sm:p-5">
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3">
+            <input
+              type="checkbox"
+              checked={Boolean(form.auto_retry_failed)}
+              onChange={(e) => setForm({ ...form, auto_retry_failed: e.target.checked })}
+              className="mt-0.5 h-4 w-4 rounded accent-[var(--vanta-accent)]"
+            />
+            <span>
+              <span className="block text-xs font-medium text-[var(--vanta-text-secondary)]">Automatically retry failed downloads</span>
+              <span className="mt-0.5 block text-[10px] text-[var(--vanta-muted)]">Retry transient network and extraction failures.</span>
+            </span>
+          </label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--vanta-text-secondary)]">Delay between retries (seconds)</label>
+            <input
+              type="number"
+              min="1"
+              max="120"
+              value={form.retry_delay_seconds}
+              onChange={(e) => setForm({ ...form, retry_delay_seconds: Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 1)) })}
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 font-mono tabular-nums text-[var(--vanta-text)]"
+            />
+            <p className="text-[10px] text-[var(--vanta-muted)]">Used when automatic retry is enabled.</p>
           </div>
         </div>
       )}
 
       {/* Section 4: Queue & Scheduler */}
       {section === 'scheduler' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
@@ -799,7 +914,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Section 5: Audio & Video Defaults */}
       {section === 'media' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
           <div className="space-y-1.5">
             <label className="font-medium text-[var(--vanta-text-secondary)] block">
               Default Video Container
@@ -850,9 +965,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
+      {section === 'media' && (
+        <div className="grid grid-cols-1 gap-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-4 sm:grid-cols-2 sm:p-5">
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--vanta-text-secondary)]">Default PCM sample rate</label>
+            <select
+              value={form.default_audio_sample_rate ?? 48000}
+              onChange={(e) => setForm({ ...form, default_audio_sample_rate: parseInt(e.target.value, 10) })}
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 text-[var(--vanta-text)]"
+            >
+              <option value={44100}>44.1 kHz</option>
+              <option value={48000}>48 kHz</option>
+              <option value={96000}>96 kHz</option>
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--vanta-text-secondary)]">Default PCM bit depth</label>
+            <select
+              value={form.default_audio_bit_depth ?? 24}
+              onChange={(e) => setForm({ ...form, default_audio_bit_depth: parseInt(e.target.value, 10) })}
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 text-[var(--vanta-text)]"
+            >
+              <option value={16}>16-bit</option>
+              <option value={24}>24-bit</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       {/* Section 6: Python Configuration (for spotDL) */}
       {section === 'python' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--vanta-border)]">
             <div>
               <h2 className="text-sm font-semibold text-[var(--vanta-text)] flex items-center gap-2">
@@ -882,7 +1025,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   setPythonValidation(null);
                 }}
                 placeholder="C:\\Program Files\\Python312\\python.exe or /usr/bin/python3"
-                className="flex-1 min-w-[240px] bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg p-2 font-mono text-[var(--vanta-text)]"
+                className="w-full min-w-0 flex-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg p-2 font-mono text-[var(--vanta-text)]"
               />
               {api.isTauri() && (
                 <button
@@ -957,7 +1100,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Section 7: Cookies & Auth */}
       {section === 'cookies' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-4 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[var(--vanta-border)]">
             <div className="flex items-center gap-2">
               <Cookie className="w-4 h-4 text-emerald-600 dark:text-[#3fb950]" />
@@ -1200,7 +1343,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Section 8: About */}
       {section === 'about' && (
-        <div className="p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-2 text-xs">
+        <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-2 text-xs">
           <h2 className="text-sm font-semibold text-[var(--vanta-text)]">
             VANTA Download Manager
           </h2>
@@ -1212,6 +1355,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
       )}
+
+        </div>
+      </div>
 
       <ConfirmDialog
         isOpen={confirmResetOpen}

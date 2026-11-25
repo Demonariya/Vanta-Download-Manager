@@ -128,7 +128,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '2160',
     label: '4K Ultra HD (2160p)',
-    formatSelector: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best',
+    formatSelector: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
     detail: 'Up to 2160p video + best audio muxed via FFmpeg',
     height: 2160,
     hasAudio: true,
@@ -137,7 +137,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '1440',
     label: '2K Quad HD (1440p)',
-    formatSelector: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+    formatSelector: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
     detail: 'Up to 1440p video + best audio muxed via FFmpeg',
     height: 1440,
     hasAudio: true,
@@ -146,7 +146,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '1080',
     label: 'Full HD (1080p)',
-    formatSelector: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    formatSelector: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
     detail: '1080p video + best audio muxed via FFmpeg',
     height: 1080,
     hasAudio: true,
@@ -155,7 +155,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '720',
     label: 'HD (720p)',
-    formatSelector: 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+    formatSelector: 'bestvideo[height<=720]+bestaudio/best[height<=720]',
     detail: '720p video + best audio',
     height: 720,
     hasAudio: true,
@@ -164,7 +164,7 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
   {
     id: '480',
     label: 'Standard (480p)',
-    formatSelector: 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+    formatSelector: 'bestvideo[height<=480]+bestaudio/best[height<=480]',
     detail: '480p compact video + audio',
     height: 480,
     hasAudio: true,
@@ -230,7 +230,7 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const h of sortedHeights) {
     const fmt = byHeight.get(h)!;
     const isVideoOnly = fmt.is_video_only || !fmt.acodec || fmt.acodec === 'none';
-    const selector = isVideoOnly ? `${fmt.format_id}+bestaudio/best` : fmt.format_id;
+    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
@@ -239,9 +239,9 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
 
     realOptions.push({
       id: selector,
-      label: `${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
+      label: `Up to ${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
       formatSelector: selector,
-      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · stream #${fmt.format_id}`,
+      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · best matching stream (detected #${fmt.format_id})`,
       height: h,
       hasAudio: true,
       needsMux: Boolean(isVideoOnly),

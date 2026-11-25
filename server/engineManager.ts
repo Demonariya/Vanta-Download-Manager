@@ -727,7 +727,7 @@ export class EngineManager {
     const reqId = requestId || `insp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const timeoutMs = options?.timeoutMs ?? INSPECT_URL_TIMEOUT_MS;
     const maxStdoutBytes = options?.maxStdoutBytes ?? INSPECT_MAX_STDOUT_BYTES;
-    const wantsPlaylist = options?.includePlaylist ?? isPlaylistCandidateUrl(url);
+    const wantsPlaylist = isPlaylistCandidateUrl(url) && (options?.includePlaylist ?? true);
 
     const args = [
       '--dump-single-json',
@@ -896,19 +896,22 @@ export class EngineManager {
             const entries: PlaylistEntry[] | undefined =
               isPlaylist && Array.isArray(raw.entries)
                 ? raw.entries
-                    .filter((e: any) => Boolean(e))
-                    .slice(0, 200)
-                    .map((e: any, idx: number): PlaylistEntry => {
+                    .map((entry: any, rawIndex: number) => ({ entry, rawIndex }))
+                    .filter(({ entry }: { entry: any }) => Boolean(entry))
+                    .slice(0, 1000)
+                    .map(({ entry: e, rawIndex }: { entry: any; rawIndex: number }): PlaylistEntry => {
+                      const candidateUrl = e.webpage_url || e.original_url || e.url;
+                      const isAbsoluteMediaUrl =
+                        typeof candidateUrl === 'string' && /^https?:\/\//i.test(candidateUrl);
                       const entryUrl =
-                        e.webpage_url ||
-                        e.url ||
-                        (e.id && raw.extractor_key?.toLowerCase().includes('youtube')
+                        (isAbsoluteMediaUrl ? candidateUrl : undefined) ||
+                        (e.id && /youtube/i.test(String(raw.extractor_key || raw.extractor || ''))
                           ? `https://www.youtube.com/watch?v=${e.id}`
                           : url);
                       return {
-                        id: String(e.id || idx + 1),
-                        index: idx + 1,
-                        title: String(e.title || `Item ${idx + 1}`),
+                        id: String(e.id || rawIndex + 1),
+                        index: Number.isInteger(e.playlist_index) && e.playlist_index > 0 ? e.playlist_index : rawIndex + 1,
+                        title: String(e.title || `Item ${rawIndex + 1}`),
                         url: String(entryUrl),
                         duration: typeof e.duration === 'number' ? e.duration : undefined,
                         duration_string: e.duration ? formatDuration(e.duration) : undefined,
@@ -1201,12 +1204,15 @@ export class EngineManager {
       'after_move:VANTA_OUTPUT_FILE:%(filepath)s',
       '-o',
       outTemplate,
-      '--retries', '10',
-      '--fragment-retries', '10',
-      '--file-access-retries', '5',
-      '--retry-sleep', 'fragment:exp=1:30',
-      '--socket-timeout', '30',
-      '--extractor-retries', '3',
+      // Retry transient CDN/segment failures and never report a file as complete
+      // when yt-dlp had to skip an unavailable media fragment.
+      '--retries', '15',
+      '--fragment-retries', '20',
+      '--file-access-retries', '10',
+      '--retry-sleep', 'fragment:exp=1:60',
+      '--socket-timeout', '60',
+      '--extractor-retries', '5',
+      '--abort-on-unavailable-fragments',
     ];
 
     if (task.playlist_mode === 'playlist') {
@@ -1254,13 +1260,20 @@ export class EngineManager {
       args.push('-x');
       const audioFormat = task.audio_format || settings.default_audio_format || 'mp3';
       args.push('--audio-format', audioFormat);
-      if (task.audio_bitrate) {
+      // Lossless containers do not use a lossy encoder bitrate target.
+      if (task.audio_bitrate && !['flac', 'wav'].includes(audioFormat.toLowerCase())) {
         args.push('--audio-quality', task.audio_bitrate);
       }
       if (task.audio_sample_rate || task.audio_bit_depth) {
         let pp = 'ExtractAudio:';
         if (task.audio_sample_rate) pp += ` -ar ${task.audio_sample_rate}`;
-        if (task.audio_bit_depth === 24) pp += ' -sample_fmt s24';
+        // FFmpeg has no packed s24 sample format. Use 32-bit working samples and
+        // explicitly request 24-bit FLAC encoding; don't pass the invalid "s24" format.
+        if (task.audio_bit_depth === 24 && audioFormat.toLowerCase() === 'flac') {
+          pp += ' -sample_fmt s32 -bits_per_raw_sample 24';
+        } else if (task.audio_bit_depth === 24 && audioFormat.toLowerCase() === 'wav') {
+          pp += ' -sample_fmt s32';
+        }
         args.push('--postprocessor-args', pp.trim());
       }
     } else {
@@ -1280,8 +1293,10 @@ export class EngineManager {
       args.push('--embed-metadata');
     }
 
-    if (settings.fragment_concurrency > 1) {
-      args.push('-N', String(settings.fragment_concurrency));
+    // Conservative concurrency reduces CDN throttling and missing HLS/DASH fragments.
+    const safeFragmentConcurrency = Math.max(1, Math.min(2, settings.fragment_concurrency || 1));
+    if (safeFragmentConcurrency > 1) {
+      args.push('-N', String(safeFragmentConcurrency));
     }
 
     let validatedTaskUrl = task.url;
@@ -2428,8 +2443,16 @@ export class EngineManager {
 
         const pipRes = await runProcessAsync(
           venvPy,
-          ['-m', 'pip', 'install', '--upgrade', 'spotdl'],
-          120_000
+          [
+            '-m', 'pip', '--isolated', 'install', '--upgrade',
+            '--index-url', 'https://pypi.org/simple',
+            '--retries', '5',
+            '--timeout', '90',
+            '--no-cache-dir',
+            '--disable-pip-version-check',
+            'spotdl',
+          ],
+          600_000
         );
         if (pipRes.code !== 0) {
           throw new Error(pipRes.stderr || pipRes.stdout || 'pip install spotdl failed');

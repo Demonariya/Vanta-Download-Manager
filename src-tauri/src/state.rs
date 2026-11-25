@@ -1,7 +1,7 @@
 use crate::logging;
 use crate::models::{
-    AppSettings, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry, TaskPriority,
-    TaskStatus,
+    AppSettings, DownloadQueue, DownloadTask, EngineStatusMap, NotificationItem, TaskLogEntry,
+    TaskPriority, TaskStatus,
 };
 use crate::process;
 use rusqlite::{params, Connection};
@@ -17,6 +17,19 @@ use std::time::Instant;
 pub struct TrackedInspection {
     pub pid: Arc<AtomicU32>,
     pub cancelled: Arc<AtomicBool>,
+}
+
+fn completed_output_file_size(status: &TaskStatus, output_path: &str) -> Option<u64> {
+    if !matches!(status, TaskStatus::Completed) || output_path.trim().is_empty() {
+        return None;
+    }
+
+    let metadata = fs::metadata(output_path).ok()?;
+    if metadata.is_file() && metadata.len() > 0 {
+        Some(metadata.len())
+    } else {
+        None
+    }
 }
 
 pub struct AppState {
@@ -209,6 +222,8 @@ impl AppState {
                 current_phase TEXT DEFAULT 'Queued',
                 format_id TEXT DEFAULT 'best',
                 format_note TEXT,
+                subtitle_languages_json TEXT,
+                write_auto_subtitles INTEGER DEFAULT 0,
                 ext TEXT DEFAULT 'mp4',
                 is_audio_only INTEGER DEFAULT 0,
                 audio_format TEXT,
@@ -226,12 +241,21 @@ impl AppState {
                 retries INTEGER DEFAULT 0,
                 max_retries INTEGER DEFAULT 3,
                 album TEXT,
-                content_type TEXT
+                content_type TEXT,
+                lyrics_lrc_content TEXT
             );
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS download_queues (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                is_default INTEGER DEFAULT 0,
+                is_paused INTEGER DEFAULT 0,
+                queue_order INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS notifications (
@@ -247,6 +271,37 @@ impl AppState {
         .map_err(|e| format!("Failed to initialize SQLite tables: {}", e))?;
 
         let migrations = [
+            // Fill in original task columns for databases created by early VANTA builds.
+            // Existing columns are preserved; duplicate ADD COLUMN errors are ignored below.
+            "ALTER TABLE tasks ADD COLUMN uploader TEXT",
+            "ALTER TABLE tasks ADD COLUMN duration INTEGER",
+            "ALTER TABLE tasks ADD COLUMN duration_string TEXT",
+            "ALTER TABLE tasks ADD COLUMN thumbnail TEXT",
+            "ALTER TABLE tasks ADD COLUMN progress_percentage REAL DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN speed_str TEXT DEFAULT '0 B/s'",
+            "ALTER TABLE tasks ADD COLUMN speed_bytes_per_sec REAL DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN downloaded_bytes INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN total_bytes INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN eta_str TEXT DEFAULT '--'",
+            "ALTER TABLE tasks ADD COLUMN current_phase TEXT DEFAULT 'Queued'",
+            "ALTER TABLE tasks ADD COLUMN format_id TEXT DEFAULT 'best'",
+            "ALTER TABLE tasks ADD COLUMN format_note TEXT",
+            "ALTER TABLE tasks ADD COLUMN subtitle_languages_json TEXT",
+            "ALTER TABLE tasks ADD COLUMN write_auto_subtitles INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN ext TEXT DEFAULT 'mp4'",
+            "ALTER TABLE tasks ADD COLUMN is_audio_only INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN audio_format TEXT",
+            "ALTER TABLE tasks ADD COLUMN audio_bitrate TEXT",
+            "ALTER TABLE tasks ADD COLUMN audio_sample_rate INTEGER",
+            "ALTER TABLE tasks ADD COLUMN audio_bit_depth INTEGER",
+            "ALTER TABLE tasks ADD COLUMN audio_channels INTEGER",
+            "ALTER TABLE tasks ADD COLUMN is_lossy_source INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN verified_audio_info TEXT",
+            "ALTER TABLE tasks ADD COLUMN error_message TEXT",
+            "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'",
+            "ALTER TABLE tasks ADD COLUMN completed_at TEXT",
+            "ALTER TABLE tasks ADD COLUMN retries INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN max_retries INTEGER DEFAULT 3",
             "ALTER TABLE tasks ADD COLUMN album TEXT",
             "ALTER TABLE tasks ADD COLUMN content_type TEXT",
             "ALTER TABLE tasks ADD COLUMN remaining_bytes INTEGER DEFAULT 0",
@@ -267,11 +322,21 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN tracks_failed INTEGER",
             "ALTER TABLE tasks ADD COLUMN logs_json TEXT",
             "ALTER TABLE tasks ADD COLUMN queue_order INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN queue_id TEXT DEFAULT 'main'",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
+            "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
         }
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES ('main', 'Main Queue', 1, 0, 0)",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE tasks SET queue_id = 'main' WHERE queue_id IS NULL OR queue_id = ''",
+            [],
+        );
 
         // Preserve existing user tasks while gracefully normalizing abandoned in-flight statuses
         let _ = conn.execute(
@@ -369,8 +434,20 @@ impl AppState {
         let selected_items: Option<Vec<String>> = selected_items_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let subtitle_languages_json: Option<String> = row.get("subtitle_languages_json").ok().flatten();
+        let subtitle_languages: Vec<String> = subtitle_languages_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let write_auto_subtitles: bool = row
+            .get::<_, Option<i32>>("write_auto_subtitles")
+            .ok()
+            .flatten()
+            .map(|value| value != 0)
+            .unwrap_or(false);
+        let lyrics_lrc_content: Option<String> = row.get("lyrics_lrc_content").ok().flatten();
 
-        Ok(DownloadTask {
+        let mut task = DownloadTask {
             id: row.get("id")?,
             url: row.get("url")?,
             title: row.get("title")?,
@@ -398,6 +475,9 @@ impl AppState {
             current_phase: row.get("current_phase")?,
             format_id: row.get("format_id")?,
             format_note: row.get("format_note")?,
+            subtitle_languages,
+            write_auto_subtitles,
+            lyrics_lrc_content,
             ext: row.get("ext")?,
             video_codec: row.get("video_codec").ok().flatten(),
             audio_codec: row.get("audio_codec").ok().flatten(),
@@ -421,12 +501,23 @@ impl AppState {
             logs,
             priority: TaskPriority::from_str(&priority_str),
             queue_order: row.get("queue_order").unwrap_or(0),
+            queue_id: row.get("queue_id").unwrap_or_else(|_| "main".to_string()),
             created_at: row.get("created_at")?,
             started_at: row.get("started_at").ok().flatten(),
             completed_at: row.get("completed_at")?,
             retries: row.get("retries")?,
             max_retries: row.get("max_retries")?,
-        })
+        };
+
+        // A stored progress estimate can differ from the final muxed/processed file size.
+        // For completed single-file downloads, trust the actual file on disk when available.
+        if let Some(actual_size) = completed_output_file_size(&task.status, &task.output_path) {
+            task.downloaded_bytes = actual_size;
+            task.total_bytes = actual_size;
+            task.remaining_bytes = 0;
+        }
+
+        Ok(task)
     }
 
     pub fn get_tasks(&self) -> Vec<DownloadTask> {
@@ -445,6 +536,141 @@ impl AppState {
         };
 
         rows.flatten().collect()
+    }
+
+
+
+    pub fn get_queues(&self) -> Vec<DownloadQueue> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT id, name, is_default, is_paused, queue_order FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                logging::error("queues", &format!("Failed preparing queue query: {}", error));
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok(DownloadQueue {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                is_default: row.get::<_, i32>(2)? != 0,
+                is_paused: row.get::<_, i32>(3)? != 0,
+                queue_order: row.get(4)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.flatten().collect()
+    }
+
+    pub fn create_queue(&self, raw_name: &str) -> Result<Vec<DownloadQueue>, String> {
+        let name = raw_name.trim();
+        if name.is_empty() || name.chars().count() > 40 || name.eq_ignore_ascii_case("Main Queue") {
+            return Err("Choose a queue name between 1 and 40 characters.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let next_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM download_queues", [], |row| row.get(0)
+        ).unwrap_or(1);
+        let id = format!("queue_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+        conn.execute(
+            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES (?1, ?2, 0, 0, ?3)",
+            params![id, name, next_order],
+        ).map_err(|error| {
+            if error.to_string().to_ascii_lowercase().contains("unique") {
+                "A queue with that name already exists.".to_string()
+            } else {
+                format!("Could not create queue: {}", error)
+            }
+        })?;
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn rename_queue(&self, id: &str, raw_name: &str) -> Result<Vec<DownloadQueue>, String> {
+        let name = raw_name.trim();
+        if id == "main" {
+            return Err("Main Queue cannot be renamed.".to_string());
+        }
+        if name.is_empty() || name.chars().count() > 40 || name.eq_ignore_ascii_case("Main Queue") {
+            return Err("Choose a queue name between 1 and 40 characters.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET name = ?1 WHERE id = ?2 AND is_default = 0",
+            params![name, id],
+        ).map_err(|error| {
+            if error.to_string().to_ascii_lowercase().contains("unique") {
+                "A queue with that name already exists.".to_string()
+            } else {
+                format!("Could not rename queue: {}", error)
+            }
+        })?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn delete_queue(&self, id: &str) -> Result<Vec<DownloadQueue>, String> {
+        if id == "main" {
+            return Err("Main Queue cannot be deleted.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM download_queues WHERE id = ?1 AND is_default = 0",
+            params![id], |row| row.get(0)
+        ).unwrap_or(0);
+        if exists == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        conn.execute("UPDATE tasks SET queue_id = 'main' WHERE queue_id = ?1", params![id])
+            .map_err(|error| format!("Could not move queue items to Main Queue: {}", error))?;
+        conn.execute("DELETE FROM download_queues WHERE id = ?1", params![id])
+            .map_err(|error| format!("Could not delete queue: {}", error))?;
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn set_queue_paused(&self, id: &str, paused: bool) -> Result<Vec<DownloadQueue>, String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET is_paused = ?1 WHERE id = ?2",
+            params![if paused { 1 } else { 0 }, id],
+        ).map_err(|error| format!("Could not update queue: {}", error))?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn move_tasks_to_queue(&self, ids: &[String], queue_id: &str) -> Result<Vec<DownloadTask>, String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM download_queues WHERE id = ?1",
+            params![queue_id], |row| row.get(0)
+        ).unwrap_or(0);
+        if exists == 0 {
+            return Err("Destination queue was not found.".to_string());
+        }
+        let mut next_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM tasks WHERE queue_id = ?1",
+            params![queue_id], |row| row.get(0)
+        ).unwrap_or(1);
+        for id in ids {
+            conn.execute(
+                "UPDATE tasks SET queue_id = ?1, queue_order = ?2 WHERE id = ?3",
+                params![queue_id, next_order, id],
+            ).map_err(|error| format!("Could not move download to queue: {}", error))?;
+            next_order += 1;
+        }
+        drop(conn);
+        Ok(self.get_tasks())
     }
 
     pub fn get_task_by_id(&self, id: &str) -> Option<DownloadTask> {
@@ -504,6 +730,8 @@ impl AppState {
             .selected_items
             .as_ref()
             .and_then(|items| serde_json::to_string(items).ok());
+        let subtitle_languages_json =
+            serde_json::to_string(&to_save.subtitle_languages).unwrap_or_else(|_| "[]".to_string());
         let task = &to_save;
 
         if let Err(e) = conn.execute(
@@ -511,22 +739,24 @@ impl AppState {
                 id, url, title, uploader, duration, duration_string, thumbnail, album, content_type, engine, status,
                 progress_percentage, percentage_known, speed_str, speed_bytes_per_sec, avg_speed_bytes_per_sec,
                 downloaded_bytes, total_bytes, remaining_bytes, eta_str, eta_seconds, elapsed_seconds,
-                active_connections, last_progress_at, current_phase, format_id, format_note, ext,
+                active_connections, last_progress_at, current_phase, format_id, format_note,
+                subtitle_languages_json, write_auto_subtitles, ext,
                 video_codec, audio_codec, resolution_label, is_audio_only, audio_format,
                 audio_bitrate, audio_sample_rate, audio_bit_depth, audio_channels, is_lossy_source,
                 verified_audio_info, output_path, custom_filename, playlist_mode,
                 selected_items_json, tracks_requested, tracks_completed, tracks_failed,
-                error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries
+                error_message, logs_json, priority, queue_order, created_at, started_at, completed_at, retries, max_retries,
+                lyrics_lrc_content, queue_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21, ?22,
-                ?23, ?24, ?25, ?26, ?27, ?28,
-                ?29, ?30, ?31, ?32, ?33,
-                ?34, ?35, ?36, ?37, ?38,
-                ?39, ?40, ?41, ?42,
-                ?43, ?44, ?45, ?46,
-                ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55
+                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                ?31, ?32, ?33, ?34, ?35,
+                ?36, ?37, ?38, ?39, ?40,
+                ?41, ?42, ?43, ?44,
+                ?45, ?46, ?47, ?48,
+                ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59
             )",
             params![
                 task.id,
@@ -556,6 +786,8 @@ impl AppState {
                 task.current_phase,
                 task.format_id,
                 task.format_note,
+                subtitle_languages_json,
+                if task.write_auto_subtitles { 1 } else { 0 },
                 task.ext,
                 task.video_codec,
                 task.audio_codec,
@@ -584,6 +816,8 @@ impl AppState {
                 task.completed_at,
                 task.retries,
                 task.max_retries,
+                task.lyrics_lrc_content,
+                task.queue_id,
             ],
         ) {
             logging::error("state", &format!("Failed upserting task '{}': {}", task.id, e));
@@ -595,6 +829,10 @@ impl AppState {
         if !task.output_path.trim().is_empty() {
             let p = Path::new(&task.output_path);
             if p.is_file() && fs::remove_file(p).is_ok() {
+                removed = true;
+            }
+            let lrc_p = p.with_extension("lrc");
+            if lrc_p.is_file() && fs::remove_file(&lrc_p).is_ok() {
                 removed = true;
             }
             let part_p = PathBuf::from(format!("{}.part", task.output_path));
@@ -659,22 +897,22 @@ impl AppState {
     }
 
     pub fn move_task_order(&self, task_id: &str, direction: &str) -> Vec<DownloadTask> {
-        let mut tasks = self.get_tasks();
-        if let Some(idx) = tasks.iter().position(|t| t.id == task_id) {
-            let swap_idx = if direction == "down" {
-                idx.saturating_add(1)
-            } else {
-                idx.saturating_sub(1)
-            };
-            if swap_idx < tasks.len() && swap_idx != idx {
-                tasks.swap(idx, swap_idx);
-            }
+        let all_tasks = self.get_tasks();
+        let Some(target) = all_tasks.iter().find(|task| task.id == task_id) else {
+            return all_tasks;
+        };
+        let queue_id = target.queue_id.clone();
+        let mut tasks: Vec<DownloadTask> = all_tasks.into_iter()
+            .filter(|task| task.queue_id == queue_id).collect();
+        if let Some(idx) = tasks.iter().position(|task| task.id == task_id) {
+            let swap_idx = if direction == "down" { idx.saturating_add(1) } else { idx.saturating_sub(1) };
+            if swap_idx < tasks.len() && swap_idx != idx { tasks.swap(idx, swap_idx); }
         }
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        for (i, t) in tasks.iter().enumerate() {
+        for (index, task) in tasks.iter().enumerate() {
             let _ = conn.execute(
                 "UPDATE tasks SET queue_order = ?1 WHERE id = ?2",
-                params![(i + 1) as i64, t.id],
+                params![(index + 1) as i64, task.id],
             );
         }
         drop(conn);
@@ -1050,11 +1288,31 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SchedulerSettings;
 
     fn make_temp_state_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vanta_state_{}_{}", label, uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn completed_file_size_uses_verified_file_bytes_not_old_estimates() {
+        let dir = make_temp_state_dir("actual_size");
+        let file_path = dir.join("final-video.mp4");
+        fs::write(&file_path, vec![7u8; 257 * 1024]).unwrap();
+
+        let actual = completed_output_file_size(
+            &TaskStatus::Completed,
+            file_path.to_str().unwrap(),
+        );
+        assert_eq!(actual, Some(257 * 1024));
+        assert_eq!(
+            completed_output_file_size(&TaskStatus::Paused, file_path.to_str().unwrap()),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

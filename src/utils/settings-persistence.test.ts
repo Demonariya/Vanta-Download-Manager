@@ -45,6 +45,10 @@ test('writeSettingsToStorage & readSettingsFromStorage persist atomically across
   try {
     initializeDatabaseSchema(db);
     const defaults = buildDefaultSettings();
+    assert.equal(defaults.default_audio_sample_rate, 48000);
+    assert.equal(defaults.default_audio_bit_depth, 24);
+    assert.equal(defaults.launch_on_startup, false);
+    assert.equal(defaults.start_minimized, false);
     const custom = {
       ...defaults,
       theme: 'system' as const,
@@ -76,6 +80,10 @@ test('writeSettingsToStorage & readSettingsFromStorage persist atomically across
     assert.equal(reset.theme, 'dark');
     assert.equal(reset.python_path, '');
     assert.equal(reset.max_concurrent_downloads, 3);
+    assert.equal(reset.default_audio_sample_rate, 48000);
+    assert.equal(reset.default_audio_bit_depth, 24);
+    assert.equal(reset.launch_on_startup, false);
+    assert.equal(reset.start_minimized, false);
   } finally {
     db.close();
     fs.rmSync(dir, { recursive: true, force: true });

@@ -26,12 +26,12 @@ if ([string]::IsNullOrWhiteSpace($scriptPath)) {
     throw 'Unable to resolve Test-VersionConsistency.ps1 location.'
 }
 
-$scriptPath = (Resolve-Path -LiteralPath $scriptPath).Path
-$scriptDirectory = Split-Path -LiteralPath $scriptPath -Parent
+$scriptPath = [System.IO.Path]::GetFullPath($scriptPath)
+$scriptDirectory = [System.IO.Path]::GetDirectoryName($scriptPath)
 $repoRoot = if (-not [string]::IsNullOrWhiteSpace($RepoRootPath)) {
-    (Resolve-Path -LiteralPath $RepoRootPath).Path
+    [System.IO.Path]::GetFullPath($RepoRootPath)
 } else {
-    Split-Path -LiteralPath $scriptDirectory -Parent
+    [System.IO.Path]::GetDirectoryName($scriptDirectory)
 }
 
 $lockValidationHelper = Join-Path $scriptDirectory 'LockfileValidation.ps1'

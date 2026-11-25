@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import {
   AppSettings,
+  DownloadQueue,
   CookieStatus,
   CookieValidationResult,
   DownloadTask,
@@ -43,6 +44,7 @@ import {
 } from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
 import { MediaThumbnail } from './MediaThumbnail';
+import { findTrackLyrics } from '../utils/lyrics';
 
 interface NewDownloadModalProps {
   isOpen: boolean;
@@ -50,6 +52,8 @@ interface NewDownloadModalProps {
   initialUrl?: string;
   tasks: DownloadTask[];
   settings: AppSettings | null;
+  queues: DownloadQueue[];
+  defaultQueueId: string;
   onTaskCreated: () => void;
   onOpenCookieSettings?: () => void;
 }
@@ -71,11 +75,14 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   initialUrl = '',
   tasks,
   settings,
+  queues,
+  defaultQueueId,
   onTaskCreated,
   onOpenCookieSettings,
 }) => {
   const [url, setUrl] = useState(initialUrl);
   const [mode, setMode] = useState<'single' | 'batch'>('single');
+  const [selectedQueueId, setSelectedQueueId] = useState(defaultQueueId || 'main');
   const [batchUrls, setBatchUrls] = useState('');
   const [isExtracting, setIsExtracting] = useState(false);
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
@@ -86,6 +93,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [orderedEntries, setOrderedEntries] = useState<PlaylistEntry[]>([]);
   const [orderedSpotifyTracks, setOrderedSpotifyTracks] = useState<SpotifyTrackItem[]>([]);
   const [selectedPlaylistKeys, setSelectedPlaylistKeys] = useState<Record<string, boolean>>({});
+  const [playlistSearch, setPlaylistSearch] = useState('');
   const [includePlaylistMode, setIncludePlaylistMode] = useState(true);
 
   // Live cookie status & inline import panel
@@ -100,7 +108,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   // Output & task options
   const [selectedTab, setSelectedTab] = useState<'video' | 'audio'>('video');
-  const [selectedFormatId, setSelectedFormatId] = useState<string>('best');
+  const [selectedFormatId, setSelectedFormatId] = useState<string>('bestvideo+bestaudio/best');
   const [selectedContainer, setSelectedContainer] = useState<string>('mp4');
   const [selectedAudioFormat, setSelectedAudioFormat] = useState<string>('mp3');
   const [selectedAudioBitrate, setSelectedAudioBitrate] = useState<string>('320k');
@@ -110,13 +118,20 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const [customFilename, setCustomFilename] = useState('');
   const [outputDir, setOutputDir] = useState('');
   const [downloadWholeCollection, setDownloadWholeCollection] = useState(true);
+  const [downloadSubtitles, setDownloadSubtitles] = useState(false);
+  const [includeAutoSubtitles, setIncludeAutoSubtitles] = useState(true);
+  const [selectedSubtitleLanguages, setSelectedSubtitleLanguages] = useState<string[]>([]);
+  const [subtitleDropdownOpen, setSubtitleDropdownOpen] = useState(false);
+  const [lrcFile, setLrcFile] = useState<{ name: string; content: string } | null>(null);
+  const [isFindingLyrics, setIsFindingLyrics] = useState(false);
+  const [lyricsSearchMessage, setLyricsSearchMessage] = useState<string | null>(null);
+  const [plainLyricsPreview, setPlainLyricsPreview] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const lastInspectedUrlRef = useRef(initialUrl);
 
   const entryKey = (e: PlaylistEntry) => `entry-${e.index}-${e.id}`;
-  const trackKey = (t: SpotifyTrackItem, fallbackIdx: number) =>
-    `track-${t.track_number ?? fallbackIdx + 1}-${t.id}`;
+  const trackKey = (t: SpotifyTrackItem, _fallbackIdx: number) => `track-${t.id}`;
 
   const applyInspectionPatch = (
     patch: Partial<{
@@ -130,12 +145,19 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     if (patch.metadata !== undefined) {
       setMetadata(patch.metadata);
       if (patch.metadata) {
+        setPlaylistSearch('');
         const detectedKind = detectInspectedMediaKind(
           patch.metadata,
           patch.metadata.url || lastInspectedUrlRef.current
         );
         setSelectedTab(detectedKind);
+        setSelectedFormatId('bestvideo+bestaudio/best');
         setDownloadWholeCollection(true);
+        const subtitleCodes = new Set([
+          ...(patch.metadata.subtitles || []).map((item) => item.code),
+          ...(patch.metadata.automatic_subtitles || []).map((item) => item.code),
+        ]);
+        setSelectedSubtitleLanguages([...subtitleCodes]);
         if (patch.metadata.entries && patch.metadata.entries.length > 0) {
           setOrderedEntries([...patch.metadata.entries]);
           setOrderedSpotifyTracks([]);
@@ -161,6 +183,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         setOrderedEntries([]);
         setOrderedSpotifyTracks([]);
         setSelectedPlaylistKeys({});
+        setSelectedSubtitleLanguages([]);
       }
     }
     if (patch.extractError !== undefined) setExtractError(patch.extractError);
@@ -184,6 +207,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   };
 
   const handleCloseModal = () => {
+    setLrcFile(null);
     handleCancelInspection();
     onClose();
   };
@@ -220,6 +244,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      const preferredQueue = queues.find((queue) => queue.id === defaultQueueId);
+      const firstRunningQueue = queues.find((queue) => !queue.is_paused);
+      setSelectedQueueId(
+        preferredQueue && !preferredQueue.is_paused
+          ? preferredQueue.id
+          : firstRunningQueue?.id || preferredQueue?.id || 'main'
+      );
       refreshCookies();
       if (settings) {
         setSelectedContainer(settings.default_video_format || 'mp4');
@@ -278,6 +309,22 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const isSpotifyContent = metadata?.extractor === 'spotdl' || isSpotifyUrl(url.trim());
   const detectedMediaKind = detectInspectedMediaKind(metadata, url);
   const routingLabel = formatMediaRoutingLabel(metadata, selectedTab, url);
+  const subtitleLanguageOptions = (() => {
+    const map = new Map<string, { code: string; name: string; manual: boolean; automatic: boolean }>();
+    for (const item of metadata?.subtitles || []) {
+      const current = map.get(item.code) || { code: item.code, name: item.name, manual: false, automatic: false };
+      current.name = item.name || current.name;
+      current.manual = true;
+      map.set(item.code, current);
+    }
+    for (const item of metadata?.automatic_subtitles || []) {
+      const current = map.get(item.code) || { code: item.code, name: item.name, manual: false, automatic: false };
+      current.name = item.name || current.name;
+      current.automatic = true;
+      map.set(item.code, current);
+    }
+    return [...map.values()].sort((a, b) => a.code.localeCompare(b.code));
+  })();
 
   const handlePasteClipboard = async () => {
     try {
@@ -290,6 +337,68 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
     } catch {
       // ignore
+    }
+  };
+
+  const handleFindLyrics = async () => {
+    const selectedTrack = orderedSpotifyTracks.filter(
+      (track, idx) => selectedPlaylistKeys[trackKey(track, idx)] !== false
+    )[0];
+    const title = selectedTrack?.title || metadata?.title || '';
+    const artist = selectedTrack?.artists?.join(', ') || metadata?.artists?.join(', ') || metadata?.uploader || '';
+    const album = selectedTrack?.album || metadata?.album || undefined;
+    const duration = selectedTrack?.duration || metadata?.duration || undefined;
+
+    if (!title.trim() || !artist.trim()) {
+      setLyricsSearchMessage('Analyze the media URL first so VANTA can identify the track and artist.');
+      return;
+    }
+
+    setIsFindingLyrics(true);
+    setLyricsSearchMessage(null);
+    setPlainLyricsPreview(null);
+    try {
+      const result = await findTrackLyrics({ title, artist, album, duration });
+      if (result.syncedLyrics?.trim()) {
+        setLrcFile({ name: `${result.trackName} - ${result.artistName}.lrc`, content: result.syncedLyrics.trim() });
+        setPlainLyricsPreview(null);
+        setLyricsSearchMessage(`Found synchronized lyrics: ${result.trackName} — ${result.artistName}`);
+      } else if (result.plainLyrics?.trim()) {
+        setLrcFile(null);
+        setPlainLyricsPreview(result.plainLyrics.trim());
+        setLyricsSearchMessage('Only plain lyrics were found. They cannot be embedded as synchronized LRC without timestamps.');
+      } else {
+        setLyricsSearchMessage('This track has no available lyrics record.');
+      }
+    } catch (error) {
+      setLyricsSearchMessage(error instanceof Error ? error.message : 'Lyrics search failed.');
+    } finally {
+      setIsFindingLyrics(false);
+    }
+  };
+
+  const handleLrcFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.lrc')) {
+      setExtractError('Choose a .lrc synchronized lyrics file.');
+      return;
+    }
+    if (file.size > 512 * 1024) {
+      setExtractError('The LRC file must be 512 KiB or smaller.');
+      return;
+    }
+    try {
+      const content = await file.text();
+      if (!/^\s*\[\d{1,3}:\d{2}(?:[.,:]\d{1,3})?\]/m.test(content)) {
+        setExtractError('This file does not contain valid LRC timestamps.');
+        return;
+      }
+      setLrcFile({ name: file.name, content });
+      setExtractError(null);
+    } catch {
+      setExtractError('Could not read the selected LRC file.');
     }
   };
 
@@ -346,6 +455,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       setIsSubmitting(true);
       setExtractError(null);
       try {
+        const selectedQueue = queues.find((queue) => queue.id === selectedQueueId);
+        if (api.isTauri() && selectedQueue?.is_paused) {
+          await api.startQueue(selectedQueueId);
+        }
         for (const line of batchValidation.valid) {
           const lineIsSpotify = isSpotifyUrl(line);
           const isAudioOnly =
@@ -355,6 +468,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           const ext = isAudioOnly ? selectedAudioFormat : selectedContainer;
           await api.createTask({
             url: line,
+            queue_id: selectedQueueId,
             title: lineIsSpotify ? undefined : `Batch Media: ${line.substring(0, 48)}`,
             engine: lineIsSpotify ? 'spotdl' : 'yt-dlp',
             format_id: isAudioOnly ? 'bestaudio' : 'best',
@@ -392,6 +506,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     setExtractError(null);
     setIsSubmitting(true);
     try {
+      // "Start Download" must not silently add work to a stopped queue.
+      // Quick Queue intentionally preserves the selected queue's stopped state.
+      const selectedQueue = queues.find((queue) => queue.id === selectedQueueId);
+      if (!quickDownload && api.isTauri() && selectedQueue?.is_paused) {
+        await api.startQueue(selectedQueueId);
+      }
+
       const urlIsSpotify = metadata?.extractor === 'spotdl' || checked.engine === 'spotdl';
       const isAudioOnly = selectedTab === 'audio' || urlIsSpotify;
       const chosenFormatId = quickDownload ? (isAudioOnly ? 'bestaudio' : 'best') : selectedFormatId;
@@ -402,6 +523,51 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           ? metadata.artists.join(', ')
           : metadata?.owner || metadata?.uploader;
       const resolvedArtwork = metadata?.album_artwork || metadata?.thumbnail;
+      let effectiveUrl = checked.normalized;
+      let effectiveTitle = metadata?.title || (urlIsSpotify ? undefined : 'Media Download');
+      let effectiveUploader = resolvedUploader;
+      let effectiveDuration = metadata?.duration;
+      let effectiveDurationString = metadata?.duration_string;
+
+      // In single-item mode, use the selected item's own URL instead of passing the
+      // parent playlist URL with --no-playlist (which would otherwise grab its first item).
+      if (!downloadWholeCollection && orderedEntries.length > 0) {
+        const picked = orderedEntries.filter((entry) => selectedPlaylistKeys[entryKey(entry)] !== false);
+        if (picked.length !== 1) {
+          setExtractError('Select exactly one video from the playlist for single-item mode.');
+          setIsSubmitting(false);
+          return;
+        }
+        const selected = picked[0];
+        if (!/^https?:\/\//i.test(selected.url) || selected.url === checked.normalized) {
+          setExtractError('The selected playlist item does not have a direct media URL. Use Playlist / Album mode instead.');
+          setIsSubmitting(false);
+          return;
+        }
+        effectiveUrl = selected.url;
+        effectiveTitle = selected.title;
+        effectiveUploader = selected.uploader || resolvedUploader;
+        effectiveDuration = selected.duration;
+        effectiveDurationString = selected.duration_string;
+      } else if (!downloadWholeCollection && orderedSpotifyTracks.length > 0) {
+        const picked = orderedSpotifyTracks.filter((track, idx) => selectedPlaylistKeys[trackKey(track, idx)] !== false);
+        if (picked.length !== 1) {
+          setExtractError('Select exactly one track for single-item mode.');
+          setIsSubmitting(false);
+          return;
+        }
+        const selectedTrackUrl = picked[0].url?.trim();
+        if (!selectedTrackUrl || !/^https?:\/\//i.test(selectedTrackUrl)) {
+          setExtractError('The selected Spotify track does not have a direct track URL. Use Playlist / Album mode instead.');
+          setIsSubmitting(false);
+          return;
+        }
+        effectiveUrl = selectedTrackUrl;
+        effectiveTitle = picked[0].title;
+        effectiveUploader = picked[0].artists.join(', ') || resolvedUploader;
+        effectiveDuration = picked[0].duration;
+        effectiveDurationString = picked[0].duration_string;
+      }
 
       // Playlist / Album selection + custom ordering for yt-dlp
       if (orderedEntries.length > 0 && downloadWholeCollection && !quickDownload) {
@@ -415,6 +581,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         }
         await api.createTask({
           url: checked.normalized,
+          queue_id: selectedQueueId,
           title: metadata?.title || 'Media Playlist',
           uploader: resolvedUploader,
           duration: metadata?.duration,
@@ -433,6 +600,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           custom_filename: customFilename.trim() || undefined,
           playlist_mode: 'playlist',
           selected_items: pickedEntries.map((e) => String(e.index)),
+          subtitle_languages: downloadSubtitles ? selectedSubtitleLanguages : [],
+          write_auto_subtitles: downloadSubtitles && includeAutoSubtitles,
           tracks_requested: pickedEntries.length,
           priority,
         });
@@ -457,6 +626,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
         await api.createTask({
           url: checked.normalized,
+          queue_id: selectedQueueId,
           title: metadata?.title,
           uploader: resolvedUploader,
           duration: metadata?.duration,
@@ -478,6 +648,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           playlist_mode: trackUrls.length === 1 && !metadata?.is_playlist ? 'single' : 'playlist',
           selected_items: trackUrls.length > 0 ? trackUrls : undefined,
           tracks_requested: trackUrls.length > 0 ? trackUrls.length : undefined,
+          lyrics_lrc_content: trackUrls.length === 1 ? lrcFile?.content : undefined,
           priority,
         });
         handleCloseModal();
@@ -486,11 +657,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       }
 
       await api.createTask({
-        url: checked.normalized,
-        title: metadata?.title || (urlIsSpotify ? undefined : 'Media Download'),
-        uploader: resolvedUploader,
-        duration: metadata?.duration,
-        duration_string: metadata?.duration_string,
+        url: effectiveUrl,
+        queue_id: selectedQueueId,
+        title: effectiveTitle,
+        uploader: effectiveUploader,
+        duration: effectiveDuration,
+        duration_string: effectiveDurationString,
         thumbnail: resolvedArtwork,
         album: metadata?.album,
         content_type: metadata?.content_type,
@@ -505,6 +677,9 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         is_lossy_source: isSourceLossy,
         output_path: resolvedOutputDir,
         custom_filename: customFilename.trim() || undefined,
+        subtitle_languages: downloadSubtitles ? selectedSubtitleLanguages : [],
+        write_auto_subtitles: downloadSubtitles && includeAutoSubtitles,
+        lyrics_lrc_content: isAudioOnly ? lrcFile?.content : undefined,
         playlist_mode:
           downloadWholeCollection && includePlaylistMode && metadata?.is_playlist
             ? 'playlist'
@@ -527,6 +702,19 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
   const selectedTrackCount = orderedSpotifyTracks.filter(
     (t, idx) => selectedPlaylistKeys[trackKey(t, idx)] !== false
   ).length;
+  const playlistQuery = playlistSearch.trim().toLocaleLowerCase();
+  const visibleEntries = orderedEntries
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) =>
+      !playlistQuery ||
+      `${entry.title} ${entry.uploader || ''} ${entry.id}`.toLocaleLowerCase().includes(playlistQuery)
+    );
+  const visibleSpotifyTracks = orderedSpotifyTracks
+    .map((track, index) => ({ track, index }))
+    .filter(({ track }) =>
+      !playlistQuery ||
+      `${track.title} ${track.artists.join(' ')} ${track.album || ''}`.toLocaleLowerCase().includes(playlistQuery)
+    );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/70 backdrop-blur-xs select-none">
@@ -549,6 +737,23 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
         {/* Body */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-4 text-xs">
+          <div className="flex items-center gap-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <label htmlFor="download-queue" className="block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Add to Queue</label>
+              <select
+                id="download-queue"
+                value={selectedQueueId}
+                onChange={(e) => setSelectedQueueId(e.target.value)}
+                className="mt-0.5 w-full bg-transparent text-xs font-medium text-[var(--vanta-text)] outline-none"
+              >
+                {queues.map((queue) => (
+                  <option key={queue.id} value={queue.id}>{queue.name}{queue.is_paused ? ' · Stopped' : ''}</option>
+                ))}
+              </select>
+            </div>
+            <span className="shrink-0 text-[10px] text-[var(--vanta-muted)]">Downloads are grouped here</span>
+          </div>
+
           {/* Mode Switcher */}
           <div className="flex items-center gap-1 p-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
             <button
@@ -1024,6 +1229,20 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                 </div>
               )}
 
+              {(orderedEntries.length > 0 || orderedSpotifyTracks.length > 0) && downloadWholeCollection && (
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--vanta-muted)]" />
+                  <input
+                    type="search"
+                    value={playlistSearch}
+                    onChange={(e) => setPlaylistSearch(e.target.value)}
+                    placeholder="Search playlist items by title, artist, or ID..."
+                    aria-label="Search playlist items"
+                    className="w-full pl-9 pr-3 py-2 rounded-md bg-[var(--vanta-surface)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none text-[11px] text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)]"
+                  />
+                </div>
+              )}
+
               {/* yt-dlp Playlist Selection & Ordering */}
               {orderedEntries.length > 0 && downloadWholeCollection && (
                 <div className="pt-2.5 border-t border-[var(--vanta-border)] space-y-2">
@@ -1052,7 +1271,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     </div>
                   </div>
                   <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {orderedEntries.map((entry, idx) => {
+                    {visibleEntries.map(({ entry, index: idx }) => {
                       const key = entryKey(entry);
                       const checked = selectedPlaylistKeys[key] !== false;
                       return (
@@ -1141,7 +1360,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                     </div>
                   </div>
                   <div className="max-h-48 overflow-y-auto divide-y divide-[var(--vanta-border)] rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
-                    {orderedSpotifyTracks.map((track, idx) => {
+                    {visibleSpotifyTracks.map(({ track, index: idx }) => {
                       const key = trackKey(track, idx);
                       const checked = selectedPlaylistKeys[key] !== false;
                       return (
@@ -1377,6 +1596,169 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Optional local synchronized lyrics sidecar */}
+          {mode === 'single' && selectedTab === 'audio' &&
+            (orderedSpotifyTracks.length === 0 || selectedTrackCount === 1) && (
+            <div className="space-y-2 pt-3 border-t border-[var(--vanta-border)]">
+              <div className="flex items-center justify-between gap-3">
+                <label className="block text-xs font-semibold text-[var(--vanta-text)]">
+                  Synchronized lyrics
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void handleFindLyrics(); }}
+                    disabled={isFindingLyrics}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--vanta-accent)]/40 px-2.5 py-1.5 text-[11px] font-medium text-[var(--vanta-accent)] hover:bg-[var(--vanta-accent)]/10 disabled:opacity-50"
+                  >
+                    {isFindingLyrics ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+                    {isFindingLyrics ? 'Searching…' : 'Find Lyrics'}
+                  </button>
+                  <span className="text-[10px] text-[var(--vanta-muted)]">Optional · .LRC</span>
+                </div>
+              </div>
+              <textarea
+                value={lrcFile?.content || ''}
+                onChange={(event) => {
+                  const content = event.target.value;
+                  if (new TextEncoder().encode(content).length > 512 * 1024) {
+                    setExtractError('Lyrics must be 512 KiB or smaller.');
+                    return;
+                  }
+                  setLrcFile(content.trim() ? { name: 'Pasted lyrics.lrc', content } : null);
+                  if (!content.trim() || /^\s*\[\d{1,3}:\d{2}(?:[.,:]\d{1,3})?\]/m.test(content)) {
+                    setExtractError(null);
+                  } else {
+                    setExtractError('Use timestamped LRC lines such as [00:12.40]...');
+                  }
+                }}
+                rows={4}
+                maxLength={512 * 1024}
+                placeholder={'Paste your synchronized LRC text here…\n[00:12.40] First line\n[00:16.20] Next line'}
+                className="w-full resize-y min-h-[92px] rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-[11px] leading-5 font-mono text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:outline-none focus:border-[var(--vanta-accent)]"
+              />
+              {lyricsSearchMessage && (
+                <p role="status" className="text-[10px] leading-4 text-[var(--vanta-text-secondary)]">{lyricsSearchMessage}</p>
+              )}
+              {plainLyricsPreview && (
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-medium text-[var(--vanta-muted)]">Plain lyrics preview (not timestamped)</span>
+                  <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 text-[10px] leading-4 text-[var(--vanta-text-secondary)]">{plainLyricsPreview}</pre>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] text-[var(--vanta-muted)]">Search online, paste text directly, or import an existing LRC file.</span>
+                <label className="cursor-pointer rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-1.5 text-[11px] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
+                  Import .LRC
+                  <input type="file" accept=".lrc,text/plain" onChange={handleLrcFileChange} className="hidden" />
+                </label>
+              </div>
+              {lrcFile && (
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="truncate text-[var(--vanta-text-secondary)]">{lrcFile.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => setLrcFile(null)}
+                    className="shrink-0 text-[var(--vanta-muted)] hover:text-red-500"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+              <p className="text-[10px] text-[var(--vanta-muted)]">
+                VANTA embeds timestamped lyrics in MP3 ID3 tags (SYLT) and also saves an .LRC sidecar. Other audio formats keep the .LRC sidecar beside the track.
+              </p>
+            </div>
+          )}
+
+          {/* Subtitle selection */}
+          {selectedTab === 'video' && !isSpotifyContent && subtitleLanguageOptions.length > 0 && (
+            <div className="space-y-2.5 pt-3 border-t border-[var(--vanta-border)]">
+              <label className="flex items-center gap-2 text-xs font-medium text-[var(--vanta-text)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={downloadSubtitles}
+                  onChange={(e) => {
+                    setDownloadSubtitles(e.target.checked);
+                    if (e.target.checked) setSubtitleDropdownOpen(true);
+                  }}
+                  className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
+                />
+                Embed subtitles in video ({subtitleLanguageOptions.length} languages available)
+              </label>
+              {downloadSubtitles && (
+                <>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSubtitleDropdownOpen((open) => !open)}
+                      aria-expanded={subtitleDropdownOpen}
+                      className="w-full flex items-center justify-between gap-2 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-xs text-[var(--vanta-text)]"
+                    >
+                      <span className="truncate text-left">
+                        {selectedSubtitleLanguages.length === 0
+                          ? 'Select subtitle languages'
+                          : selectedSubtitleLanguages.length === subtitleLanguageOptions.length
+                            ? 'All languages selected'
+                            : subtitleLanguageOptions.filter((item) => selectedSubtitleLanguages.includes(item.code)).map((item) => item.name).join(', ')}
+                      </span>
+                      <span className="text-[var(--vanta-muted)] shrink-0">{subtitleDropdownOpen ? '▲' : '▼'}</span>
+                    </button>
+                    {subtitleDropdownOpen && (
+                      <div className="absolute z-30 mt-1 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] shadow-xl p-2">
+                        <div className="flex items-center justify-between px-1 pb-2 text-[11px]">
+                          <span className="text-[var(--vanta-muted)]">{selectedSubtitleLanguages.length} / {subtitleLanguageOptions.length} selected</span>
+                          <div className="flex gap-3">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSubtitleLanguages(subtitleLanguageOptions.map((item) => item.code))}
+                              className="text-[var(--vanta-accent)] hover:underline"
+                            >Select all</button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSubtitleLanguages([])}
+                              className="text-[var(--vanta-muted)] hover:underline"
+                            >Clear</button>
+                          </div>
+                        </div>
+                        <div className="max-h-48 overflow-y-auto space-y-1">
+                          {subtitleLanguageOptions.map((item) => (
+                            <label key={item.code} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-[var(--vanta-surface-2)] text-[11px] cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={selectedSubtitleLanguages.includes(item.code)}
+                                onChange={(e) => setSelectedSubtitleLanguages((prev) =>
+                                  e.target.checked
+                                    ? [...new Set([...prev, item.code])]
+                                    : prev.filter((code) => code !== item.code)
+                                )}
+                                className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)] shrink-0"
+                              />
+                              <span className="truncate text-[var(--vanta-text)]">{item.name}</span>
+                              <span className="font-mono text-[var(--vanta-muted)] ml-auto shrink-0">{item.code}</span>
+                              <span className="text-[9px] text-[var(--vanta-muted)] shrink-0">
+                                {item.manual && item.automatic ? 'Manual + Auto' : item.manual ? 'Manual' : 'Auto'}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <label className="flex items-center gap-2 text-[11px] text-[var(--vanta-text-secondary)] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includeAutoSubtitles}
+                      onChange={(e) => setIncludeAutoSubtitles(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]"
+                    />
+                    Include auto-generated captions
+                  </label>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Filename, Priority & Output Directory */}
           <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">

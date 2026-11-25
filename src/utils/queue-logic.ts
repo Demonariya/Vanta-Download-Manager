@@ -145,8 +145,8 @@ export function filterAndSortTasks(
       return a.title.localeCompare(b.title) * mult;
     }
     if (field === 'size') {
-      const sizeA = a.total_bytes || a.downloaded_bytes || 0;
-      const sizeB = b.total_bytes || b.downloaded_bytes || 0;
+      const sizeA = a.status === 'completed' ? (a.downloaded_bytes || a.total_bytes || 0) : (a.total_bytes || a.downloaded_bytes || 0);
+      const sizeB = b.status === 'completed' ? (b.downloaded_bytes || b.total_bytes || 0) : (b.total_bytes || b.downloaded_bytes || 0);
       return (sizeA - sizeB) * mult;
     }
     if (field === 'progress') {
@@ -169,7 +169,7 @@ export function computeHistoryStats(tasks: DownloadTask[]): HistoryStats {
   for (const t of tasks) {
     if (t.status === 'completed') {
       totalCompleted += 1;
-      totalBytesDownloaded += t.total_bytes || t.downloaded_bytes || 0;
+      totalBytesDownloaded += t.downloaded_bytes || t.total_bytes || 0;
       totalElapsedSeconds += t.elapsed_seconds || 0;
     } else if (t.status === 'failed') {
       totalFailed += 1;

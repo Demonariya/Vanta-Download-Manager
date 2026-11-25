@@ -113,7 +113,7 @@ function Test-LockfileConsistency {
     $resolvedPkgJson = if (-not [string]::IsNullOrWhiteSpace($PackageJsonPath)) {
         $PackageJsonPath
     } else {
-        $parentDir = Split-Path -LiteralPath $LockfilePath -Parent
+        $parentDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($LockfilePath))
         if (-not [string]::IsNullOrWhiteSpace($parentDir)) {
             Join-Path $parentDir 'package.json'
         } else {

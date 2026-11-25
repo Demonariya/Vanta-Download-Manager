@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  DownloadQueue,
   DownloadTask,
   EngineInfo,
   EngineStatusMap,
@@ -24,10 +25,12 @@ import { HistoryView } from './components/HistoryView';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { SettingsView } from './components/SettingsView';
 import { NewDownloadModal } from './components/NewDownloadModal';
-import { FloatingProgressDock } from './components/FloatingProgressDock';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
 import { TitleBar } from './components/TitleBar';
 import { SafeCloseDialog } from './components/SafeCloseDialog';
+import { AppMenuBar } from './components/AppMenuBar';
+import { ActionToolbar } from './components/ActionToolbar';
+import { StatusBar } from './components/StatusBar';
 
 function makeCheckingEngine(): EngineInfo {
   return {
@@ -67,12 +70,15 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }]);
+  const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
     createInitialCheckingEngineStatus
   );
   const isRefreshingEnginesRef = useRef(false);
+  const pendingEngineScanRef = useRef(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
@@ -112,6 +118,33 @@ export default function App() {
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
   }, [theme]);
+
+  useEffect(() => {
+    const syncLayout = () => setIsSidebarCollapsed(window.innerWidth < 1024);
+    syncLayout();
+    window.addEventListener('resize', syncLayout, { passive: true });
+    return () => window.removeEventListener('resize', syncLayout);
+  }, []);
+
+  // Disable the browser/WebView context menu on the app surface while preserving
+  // native editing menus in text fields so copy/paste remains available.
+  useEffect(() => {
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, [contenteditable="true"], [data-native-context-menu="true"]')) return;
+      event.preventDefault();
+    };
+    const preventMediaDrag = (event: DragEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('img, video, audio, [data-media-thumbnail]')) event.preventDefault();
+    };
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    document.addEventListener('dragstart', preventMediaDrag, true);
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      document.removeEventListener('dragstart', preventMediaDrag, true);
+    };
+  }, []);
 
   // Global keyboard shortcuts (Ctrl/Cmd+N for New Download, Escape to close inspector)
   useEffect(() => {
@@ -153,11 +186,10 @@ export default function App() {
   const executeNativeClose = async () => {
     try {
       if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().close();
+        await api.exitApp();
       }
     } catch (err) {
-      console.warn('Native close called in non-Tauri context', err);
+      console.warn('Native application exit failed', err);
     }
   };
 
@@ -183,7 +215,12 @@ export default function App() {
   };
 
   const runEngineScan = async (forceRefresh: boolean, isStillMounted?: () => boolean) => {
-    if (isRefreshingEnginesRef.current) return;
+    if (isRefreshingEnginesRef.current) {
+      // Never drop a forced refresh requested after an install/update. Queue one
+      // fresh scan so the UI cannot retain the pre-update engine version.
+      if (forceRefresh) pendingEngineScanRef.current = true;
+      return;
+    }
     isRefreshingEnginesRef.current = true;
     try {
       const status = await api.getEngineStatus(forceRefresh);
@@ -194,6 +231,10 @@ export default function App() {
       console.error('Engine status scan failed:', err);
     } finally {
       isRefreshingEnginesRef.current = false;
+      if (pendingEngineScanRef.current) {
+        pendingEngineScanRef.current = false;
+        void runEngineScan(true, isStillMounted);
+      }
     }
   };
 
@@ -211,7 +252,16 @@ export default function App() {
         }
       })
       .catch(console.error);
-    api.getTasks().then((t) => mounted && setTasks(t)).catch(console.error);
+    api.getTasks().then((nextTasks) => {
+      if (!mounted) return;
+      setTasks(nextTasks);
+      if (nextTasks.length > 0) setSelectedTaskId((current) => current || nextTasks[0].id);
+    }).catch(console.error);
+    api.getQueues().then((next) => {
+      if (!mounted) return;
+      setQueues(next);
+      setSelectedQueueId((current) => current === 'all' || next.some((queue) => queue.id === current) ? current : 'main');
+    }).catch(console.error);
     api.getNotifications().then((n) => mounted && setNotifications(n)).catch(console.error);
 
     const unsubscribe = api.subscribeEvents({
@@ -332,21 +382,52 @@ export default function App() {
   };
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
+  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
+
+  const handleDeleteSelectedTask = async () => {
+    if (!selectedTask) return;
+    try {
+      await api.deleteTask(selectedTask.id, false);
+      setSelectedTaskId(null);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not remove the selected download.');
+    }
+  };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
+    <div className="flex flex-col h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-[var(--vanta-bg)] text-[var(--vanta-text)]">
       <TitleBar activeDownloadsCount={activeCount} onRequestClose={handleInitiateClose} />
+      <AppMenuBar
+        theme={theme}
+        onNewDownload={() => {
+          setInitialInspectUrl('');
+          setIsNewDownloadOpen(true);
+        }}
+        onPauseAll={() => { void api.pauseAll(); }}
+        onResumeAll={() => { void api.resumeAll(); }}
+        onOpenHistory={() => setActiveTab('history')}
+        onOpenDiagnostics={() => setActiveTab('diagnostics')}
+        onOpenSettings={() => setActiveTab('settings')}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        onCycleTheme={handleCycleTheme}
+        onExit={handleInitiateClose}
+      />
 
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
         <Sidebar
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          onOpenNewDownload={() => {
-            setInitialInspectUrl('');
-            setIsNewDownloadOpen(true);
-          }}
           engineStatus={engineStatus}
-          activeCount={activeCount}
+          tasks={tasks}
+          queues={queues}
+          selectedQueueId={selectedQueueId}
+          onSelectQueue={(id) => setSelectedQueueId(id)}
+          onQueuesChanged={(next) => {
+            setQueues(next);
+            setSelectedQueueId((current) => current === 'all' || next.some((queue) => queue.id === current) ? current : 'main');
+          }}
+          scopeFilter={scopeFilter}
+          setScopeFilter={setScopeFilter}
           isCollapsed={isSidebarCollapsed}
           setIsCollapsed={setIsSidebarCollapsed}
           isMobileOpen={isMobileMenuOpen}
@@ -359,26 +440,35 @@ export default function App() {
               setInitialInspectUrl('');
               setIsNewDownloadOpen(true);
             }}
+            onAddUrl={(url) => {
+              setInitialInspectUrl(url);
+              setIsNewDownloadOpen(true);
+            }}
             onOpenNotifications={() => setIsNotificationsOpen(true)}
             unreadNotificationsCount={notifications.length}
-            activeCount={activeCount}
-            onPauseAll={() => api.pauseAll()}
-            onResumeAll={() => api.resumeAll()}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
             theme={theme}
             onCycleTheme={handleCycleTheme}
-            floatingDockEnabled={Boolean(settings?.floating_notifications_enabled)}
-            onToggleFloatingDock={() =>
-              handleSaveSettings({
-                floating_notifications_enabled: !settings?.floating_notifications_enabled,
-              })
-            }
             onToggleMobileMenu={() => setIsMobileMenuOpen((v) => !v)}
           />
 
-          <div className="flex flex-1 min-h-0 overflow-hidden relative">
-            <main className="flex-1 min-w-0 overflow-y-auto p-3 sm:p-5 pb-24 sm:pb-10 select-text">
+          {activeTab === 'downloads' && (
+            <ActionToolbar
+              selectedTask={selectedTask}
+              activeCount={activeCount}
+              pausedCount={pausedCount}
+              onPauseSelected={() => { if (selectedTask) void api.pauseTask(selectedTask.id); }}
+              onResumeSelected={() => { if (selectedTask) void api.resumeTask(selectedTask.id); }}
+              onRetrySelected={() => { if (selectedTask) void api.retryTask(selectedTask.id); }}
+              onDeleteSelected={() => { void handleDeleteSelectedTask(); }}
+              onPauseAll={() => { void api.pauseAll(); }}
+              onResumeAll={() => { void api.resumeAll(); }}
+            />
+          )}
+
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
+            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-4 select-text">
               <ClipboardMonitorBanner
                 detectedUrl={clipboardUrl}
                 onInspect={handleQuickInspect}
@@ -388,11 +478,16 @@ export default function App() {
               {activeTab === 'downloads' && (
                 <DownloadCenterView
                   tasks={tasks}
+                  queues={queues}
+                  selectedQueueId={selectedQueueId}
+                  onSelectQueue={(id) => {
+                    setSelectedQueueId(id);
+                    setScopeFilter('all');
+                  }}
+                  onTasksChanged={setTasks}
                   engineStatus={engineStatus}
                   scopeFilter={scopeFilter}
-                  setScopeFilter={setScopeFilter}
                   searchQuery={searchQuery}
-                  selectedTaskId={selectedTaskId}
                   onSelectTask={(t) => setSelectedTaskId(t.id)}
                   onOpenNewDownload={() => {
                     setInitialInspectUrl('');
@@ -441,26 +536,19 @@ export default function App() {
               )}
             </main>
 
-            {/* Download Details Docked / Slide-Over Inspector */}
-            <DownloadDetailsDrawer
-              task={selectedTask}
-              onClose={() => setSelectedTaskId(null)}
-              onRetryTask={(id) => api.retryTask(id)}
-            />
+            {/* Keep the download inspector inside the download workspace only. */}
+            {activeTab === 'downloads' && selectedTask && (
+              <DownloadDetailsDrawer
+                task={selectedTask}
+                onClose={() => setSelectedTaskId(null)}
+                onRetryTask={(id) => api.retryTask(id)}
+              />
+            )}
           </div>
         </div>
       </div>
 
-      {/* Floating Active Transfers Dock */}
-      {settings?.floating_notifications_enabled && (
-        <FloatingProgressDock
-          tasks={tasks}
-          onPauseTask={(id) => api.pauseTask(id)}
-          onResumeTask={(id) => api.resumeTask(id)}
-          onCancelTask={(id) => api.cancelTask(id)}
-          onOpenQueue={() => setActiveTab('downloads')}
-        />
-      )}
+      <StatusBar tasks={tasks} />
 
       {/* New Download Modal */}
       <NewDownloadModal
@@ -469,6 +557,8 @@ export default function App() {
         initialUrl={initialInspectUrl}
         tasks={tasks}
         settings={settings}
+        queues={queues}
+        defaultQueueId={selectedQueueId === 'all' ? 'main' : selectedQueueId}
         onTaskCreated={() => {
           setActiveTab('downloads');
           setScopeFilter('all');

@@ -33,7 +33,7 @@ export interface SpotifyResolverOptions {
 
 const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
-const MAX_WEB_API_PLAYLIST_TRACKS = 500;
+const MAX_WEB_API_PLAYLIST_TRACKS = 1000;
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CRAWLER_USER_AGENT = 'curl/8.5.0';
