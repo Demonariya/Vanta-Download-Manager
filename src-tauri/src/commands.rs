@@ -3953,11 +3953,11 @@ mod subtitle_and_lyrics_tests {
     fn overwrite_strategy_keeps_partial_download_resume_enabled() {
         let mut args = Vec::new();
         append_conflict_strategy_args(&mut args, "overwrite");
-        assert_eq!(args, vec!["--force-overwrites", "--continue"]);
+        assert_eq!(args, vec!["--force-overwrites".to_string(), "--continue".to_string()]);
 
         let mut rename_args = Vec::new();
         append_conflict_strategy_args(&mut rename_args, "rename");
-        assert_eq!(rename_args, vec!["--no-overwrites"]);
+        assert_eq!(rename_args, vec!["--no-overwrites".to_string()]);
     }
 
     #[test]
