@@ -566,6 +566,12 @@ pub struct DownloadQueue {
     pub is_default: bool,
     pub is_paused: bool,
     pub queue_order: i64,
+    /// Zero inherits the application's global concurrent-download limit.
+    #[serde(default)]
+    pub max_concurrent_downloads: u32,
+    /// Zero inherits the application's global bandwidth policy.
+    #[serde(default)]
+    pub bandwidth_limit_kbps: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
