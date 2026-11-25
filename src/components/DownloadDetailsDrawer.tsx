@@ -142,7 +142,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
 
       <div className="flex-1 min-h-0 min-w-0 w-full max-w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4">
         {tab === 'details' && (
-          <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(240px,1.2fr)_minmax(220px,1fr)] gap-3 xl:gap-4">
+          <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,220px)_minmax(0,1.2fr)_minmax(0,1fr)] gap-3 xl:gap-4">
             <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 flex items-center gap-3 min-w-0">
               <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
               <div className="min-w-0">
@@ -152,7 +152,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               </div>
             </div>
 
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 space-y-3 min-w-0">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 min-w-0 max-w-full overflow-hidden space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-[var(--vanta-text)]">Transfer progress</span>
                 <span className="text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.status === 'completed' ? '100%' : task.percentage_known === false ? '—' : `${Math.min(100, Math.max(0, task.progress_percentage || 0)).toFixed(1)}%`}</span>
@@ -166,7 +166,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               </div>
             </div>
 
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 space-y-2.5 min-w-0">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 min-w-0 max-w-full overflow-hidden space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-[var(--vanta-text)]">File & source</span>
                 <button type="button" onClick={copyUrl} className="text-[11px] text-[var(--vanta-accent)] inline-flex items-center gap-1"><Copy className="w-3 h-3" />{copiedUrl ? 'Copied' : 'Copy URL'}</button>
