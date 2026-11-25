@@ -220,9 +220,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
         checkboxLabel: 'Also delete downloaded files from disk',
         onConfirm: async (deleteFiles) => {
           setConfirmState(null);
-          if (targetIds.length === 1) onDeleteTask(targetIds[0], deleteFiles);
-          else await api.bulkTaskAction(targetIds, 'delete', deleteFiles);
-          setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
+          try {
+            if (targetIds.length === 1) {
+              onDeleteTask(targetIds[0], deleteFiles);
+            } else {
+              const updatedTasks = await api.bulkTaskAction(targetIds, 'delete', deleteFiles);
+              if (Array.isArray(updatedTasks)) onTasksChanged(updatedTasks);
+            }
+            setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
+          } catch (error) {
+            window.alert(error instanceof Error ? error.message : 'Failed to remove the selected downloads.');
+          }
         },
       });
       return;
