@@ -293,20 +293,27 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
     // Pin the choice to the exact stream discovered during inspection instead
     // of asking yt-dlp to re-rank every format at download time. Video-only
     // streams are paired with the best available audio stream.
+    // If the inspected format ID is unavailable during the actual download
+    // (YouTube can expose different format sets between extraction requests),
+    // fall back to the best video-only stream at or below the selected height.
+    // Falling back to "best[height<=h]" alone can silently drop to a low-res
+    // muxed rendition such as 240p even when higher video-only streams exist.
+    const fallback = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
     const selector = hasMuxedAudio
-      ? `${fmt.format_id}/best[height<=${h}]`
-      : `${fmt.format_id}+bestaudio/best[height<=${h}]`;
+      ? `${fmt.format_id}/${fallback}`
+      : `${fmt.format_id}+bestaudio/${fallback}`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
+    const containerLabel = (fmt.ext || 'unknown').toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
     const sizePart = size ? ` · ~${formatBytes(size)}` : '';
     const audioPart = isVideoOnly ? '+Audio Mux' : '+Audio';
 
     realOptions.push({
       id: selector,
-      label: `Up to ${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
+      label: `Up to ${h}p${fpsPart} (${vcodecShort || containerLabel} ${audioPart})${sizePart}`,
       formatSelector: selector,
-      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · pinned detected stream #${fmt.format_id}`,
+      detail: `${fmt.resolution || `${h}p`} · ${containerLabel} · preferred stream #${fmt.format_id}`,
       height: h,
       hasAudio: true,
       needsMux: Boolean(isVideoOnly),
