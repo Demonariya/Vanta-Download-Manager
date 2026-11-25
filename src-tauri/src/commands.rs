@@ -3313,7 +3313,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     struct StreamLoopTelemetry {
         ema_speed: f64,
         stream_known_total: u64,
-        stream_max_downloaded: u64,
+        stream_estimated_total: u64,
+        stream_max_downloaded: u64, 
         completed_stream_total: u64,
         completed_stream_downloaded: u64,
         last_activity_at: Instant,
@@ -3336,6 +3337,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
         ema_speed: 0.0,
         stream_known_total: 0,
+        stream_estimated_total: 0,
         stream_max_downloaded: 0,
         completed_stream_total: 0,
         completed_stream_downloaded: 0,
@@ -3517,6 +3519,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                             .completed_stream_total
                             .saturating_add(tel.stream_known_total);
                         tel.stream_known_total = 0;
+                        tel.stream_estimated_total = 0;
                         tel.stream_max_downloaded = 0;
                     }
                     tel.detected_output_path = Some(dest.to_string());
@@ -3603,43 +3606,50 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     let downloaded = crate::parse_bytes(parts[1]);
                     let exact_total = crate::parse_bytes(parts[2]);
                     let est_total = crate::parse_bytes(parts[3]);
-                    let total = if exact_total > 0 { exact_total } else { est_total };
+                    let total = exact_total;
+                    let estimated_total = est_total;
                     let speed_bytes = crate::parse_bytes(parts[4].trim_end_matches("/s")) as f64;
                     let eta_raw = Some(parts[5].trim().to_string());
                     let phase = parts[6].trim().to_string();
-                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
+                    Some((pct_val, downloaded, total, estimated_total, speed_bytes, eta_raw, phase))
                 } else if parts.len() >= 6 {
                     let pct_raw = parts[0].trim().trim_end_matches('%').trim();
                     let pct_val = pct_raw.parse::<f64>().ok().filter(|v| v.is_finite());
                     let downloaded = crate::parse_bytes(parts[1]);
-                    let total = crate::parse_bytes(parts[2]);
+                    let total = 0;
+                    let estimated_total = crate::parse_bytes(parts[2]);
                     let speed_bytes = crate::parse_bytes(parts[3].trim_end_matches("/s")) as f64;
                     let eta_raw = Some(parts[4].trim().to_string());
                     let phase = parts[5].trim().to_string();
-                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
+                    Some((pct_val, downloaded, total, estimated_total, speed_bytes, eta_raw, phase))
                 } else {
                     None
                 }
             } else {
                 extract_bracket_ytdlp_metrics(trimmed).map(|(pct_val, dl, tot, spd, eta)| {
-                    (pct_val, dl, tot, spd, eta, "downloading".to_string())
+                    (pct_val, dl, 0, tot, spd, eta, "downloading".to_string())
                 })
             };
 
-            if let Some((pct_val, raw_downloaded, raw_total, speed_bytes, eta_raw, phase_raw)) =
+            if let Some((pct_val, raw_downloaded, raw_exact_total, raw_estimated_total, speed_bytes, eta_raw, phase_raw)) =
                 parsed_progress
             {
                 tel.last_activity_at = Instant::now();
-                if raw_total > 0 {
-                    tel.stream_known_total = tel.stream_known_total.max(raw_total);
-                }
-                if raw_total > tel.stream_known_total {
-                    tel.stream_known_total = raw_total;
+                // Exact yt-dlp totals always override estimates. Estimates are allowed to
+                // grow while formats/segments are resolved, but never replace an exact total.
+                if raw_exact_total > 0 {
+                    tel.stream_known_total = raw_exact_total;
+                } else if raw_estimated_total > 0 && tel.stream_known_total == 0 {
+                    tel.stream_estimated_total = tel.stream_estimated_total.max(raw_estimated_total);
                 }
                 if raw_downloaded > tel.stream_max_downloaded {
                     tel.stream_max_downloaded = raw_downloaded;
                 }
-                let active_total = tel.stream_known_total.max(raw_total);
+                let active_total = if tel.stream_known_total > 0 {
+                    tel.stream_known_total
+                } else {
+                    tel.stream_estimated_total
+                };
                 let total = tel.completed_stream_total.saturating_add(active_total);
                 let downloaded = tel
                     .completed_stream_downloaded
@@ -3663,10 +3673,10 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 };
 
                 let pct_known = total > 0 || pct_val.is_some();
-                let pct = if total > 0 {
+                let pct = if tel.stream_known_total > 0 && total > 0 {
                     ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
                 } else {
-                    pct_val.unwrap_or(0.0).clamp(0.0, 100.0)
+                    pct_val.unwrap_or_else(|| if total > 0 { downloaded as f64 / total as f64 * 100.0 } else { 0.0 }).clamp(0.0, 100.0)
                 };
 
                 let next_status = if phase_raw.eq_ignore_ascii_case("processing")
