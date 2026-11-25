@@ -13,7 +13,7 @@ export interface MediaThumbnailProps {
   className?: string;
 }
 
-export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
+const MediaThumbnailView: React.FC<MediaThumbnailProps> = ({
   src,
   title,
   isAudio = false,
@@ -96,3 +96,6 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
     </div>
   );
 };
+
+export const MediaThumbnail = React.memo(MediaThumbnailView);
+MediaThumbnail.displayName = 'MediaThumbnail';
