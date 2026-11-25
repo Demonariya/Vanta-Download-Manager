@@ -244,7 +244,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setSelectedQueueId(queues.some((queue) => queue.id === defaultQueueId) ? defaultQueueId : 'main');
+      const preferredQueue = queues.find((queue) => queue.id === defaultQueueId);
+      const firstRunningQueue = queues.find((queue) => !queue.is_paused);
+      setSelectedQueueId(
+        preferredQueue && !preferredQueue.is_paused
+          ? preferredQueue.id
+          : firstRunningQueue?.id || preferredQueue?.id || 'main'
+      );
       refreshCookies();
       if (settings) {
         setSelectedContainer(settings.default_video_format || 'mp4');
@@ -449,6 +455,10 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
       setIsSubmitting(true);
       setExtractError(null);
       try {
+        const selectedQueue = queues.find((queue) => queue.id === selectedQueueId);
+        if (api.isTauri() && selectedQueue?.is_paused) {
+          await api.startQueue(selectedQueueId);
+        }
         for (const line of batchValidation.valid) {
           const lineIsSpotify = isSpotifyUrl(line);
           const isAudioOnly =
@@ -496,6 +506,13 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
     setExtractError(null);
     setIsSubmitting(true);
     try {
+      // "Start Download" must not silently add work to a stopped queue.
+      // Quick Queue intentionally preserves the selected queue's stopped state.
+      const selectedQueue = queues.find((queue) => queue.id === selectedQueueId);
+      if (!quickDownload && api.isTauri() && selectedQueue?.is_paused) {
+        await api.startQueue(selectedQueueId);
+      }
+
       const urlIsSpotify = metadata?.extractor === 'spotdl' || checked.engine === 'spotdl';
       const isAudioOnly = selectedTab === 'audio' || urlIsSpotify;
       const chosenFormatId = quickDownload ? (isAudioOnly ? 'bestaudio' : 'best') : selectedFormatId;
