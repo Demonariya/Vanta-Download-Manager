@@ -148,7 +148,7 @@ describe('Truthful video format selection', () => {
     ]);
     assert.deepEqual(options.slice(1).map((option) => option.height), [1080, 360]);
     assert.equal(options.some((option) => option.height === 2160), false);
-    assert.equal(options[1].formatSelector, 'bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+    assert.equal(options[1].formatSelector, '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]');
   });
 });
 
