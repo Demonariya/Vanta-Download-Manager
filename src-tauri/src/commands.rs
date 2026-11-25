@@ -1904,7 +1904,19 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
             .then_with(|| a.created_at.cmp(&b.created_at))
     });
 
-    for mut next_task in queued.into_iter().take(available_slots) {
+    let mut scheduled = 0usize;
+    for mut next_task in queued {
+        if scheduled >= available_slots {
+            break;
+        }
+        let queue_cap = queue_limits.get(&next_task.queue_id).copied().unwrap_or(0);
+        let queue_active = active_by_queue.get(&next_task.queue_id).copied().unwrap_or(0);
+        if queue_cap > 0 && queue_active >= queue_cap as usize {
+            continue;
+        }
+        *active_by_queue.entry(next_task.queue_id.clone()).or_insert(0) += 1;
+        scheduled += 1;
+
         next_task.status = TaskStatus::Connecting;
         next_task.current_phase = "Starting engine...".to_string();
         if next_task.started_at.is_none() {
