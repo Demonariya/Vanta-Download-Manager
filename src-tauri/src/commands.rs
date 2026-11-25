@@ -190,6 +190,11 @@ fn parse_lrc_entries(content: &str) -> Vec<(u32, String)> {
     entries
 }
 
+fn format_selector_requires_ffmpeg(format_id: Option<&str>) -> bool {
+    let selector = format_id.unwrap_or("best").trim();
+    selector.is_empty() || selector == "best" || selector.contains('+')
+}
+
 fn validate_lrc_content(content: &str) -> Result<(), String> {
     if content.trim().is_empty() {
         return Err("The selected LRC file is empty.".to_string());
@@ -406,7 +411,7 @@ pub async fn create_task(
         || is_spotify
         || settings.embed_thumbnail
         || settings.embed_metadata
-        || payload.format_id.as_deref().unwrap_or("best") == "best";
+        || format_selector_requires_ffmpeg(payload.format_id.as_deref());
 
     tokio::task::spawn_blocking(move || {
         EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)
@@ -3934,6 +3939,16 @@ mod subtitle_and_lyrics_tests {
             (2440, "Hello".to_string()),
             (3105, "World".to_string()),
         ]);
+    }
+
+    #[test]
+    fn format_selector_preflight_detects_all_muxing_paths() {
+        assert!(format_selector_requires_ffmpeg(None));
+        assert!(format_selector_requires_ffmpeg(Some("best")));
+        assert!(format_selector_requires_ffmpeg(Some("bestvideo+bestaudio/best")));
+        assert!(format_selector_requires_ffmpeg(Some("137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]")));
+        assert!(!format_selector_requires_ffmpeg(Some("22")));
+        assert!(!format_selector_requires_ffmpeg(Some("")));
     }
 
     #[test]
