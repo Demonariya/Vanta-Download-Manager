@@ -1248,6 +1248,12 @@ pub fn save_settings(
     sync_windows_startup_registration(&normalized)?;
     let saved = state.save_settings(&normalized)?;
     let _ = app.emit("settings_updated", &saved);
+
+    // Applying scheduler changes must immediately release or hold queued tasks.
+    // In particular, disabling the schedule should start waiting downloads now,
+    // without requiring the user to resume each task or restart the application.
+    schedule_next(&app, &state);
+
     Ok(saved)
 }
 
