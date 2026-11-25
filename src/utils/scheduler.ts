@@ -2,8 +2,8 @@ import { SchedulerSettings } from '../types';
 
 export const DEFAULT_SCHEDULER_SETTINGS: SchedulerSettings = {
   enabled: false,
-  start_time: '01:00',
-  stop_time: '06:00',
+  start_time: '00:00',
+  stop_time: '00:00',
   pause_on_stop: true,
   days: [0, 1, 2, 3, 4, 5, 6],
 };
