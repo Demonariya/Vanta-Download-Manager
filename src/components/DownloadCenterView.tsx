@@ -38,6 +38,21 @@ import { MediaThumbnail } from './MediaThumbnail';
 import { ConfirmDialog } from './ConfirmDialog';
 import { api } from '../services/api';
 
+const RUNNING_TASK_STATUSES = new Set<DownloadTask['status']>([
+  'downloading',
+  'connecting',
+  'resuming',
+  'inspecting',
+  'processing',
+  'muxing',
+  'verifying',
+]);
+
+const PAUSABLE_TASK_STATUSES = new Set<DownloadTask['status']>([
+  ...RUNNING_TASK_STATUSES,
+  'queued',
+]);
+
 export type QueueScopeFilter =
   | 'all'
   | 'active'
@@ -184,7 +199,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     const resumable: string[] = [];
     const retryable: string[] = [];
     for (const task of selectedTasks) {
-      if (['connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying', 'queued'].includes(task.status)) {
+      if (PAUSABLE_TASK_STATUSES.has(task.status)) {
         pausable.push(task.id);
       } else if (task.status === 'paused') {
         resumable.push(task.id);
@@ -602,7 +617,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 {visibleTasks.map((task, index) => {
                   const isSelectedRow = selectedIdSet.has(task.id);
                   const isChecked = selectedIdSet.has(task.id);
-                  const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
+                  const isRunning = RUNNING_TASK_STATUSES.has(task.status);
                   const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
                   const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
                   const downloaded = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0 ? task.total_bytes : task.downloaded_bytes;
