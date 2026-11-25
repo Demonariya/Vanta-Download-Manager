@@ -640,12 +640,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
-                Fragment Concurrency (yt-dlp -N): {form.fragment_concurrency}
+                Max Fragment Connections (auto-fallback after retry): {form.fragment_concurrency}
               </label>
               <input
                 type="range"
                 min="1"
-                max="16"
+                max="3"
                 value={form.fragment_concurrency}
                 onChange={(e) =>
                   setForm({ ...form, fragment_concurrency: parseInt(e.target.value, 10) })
@@ -672,7 +672,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
-                Global Bandwidth Cap (KB/s, 0 = unlimited)
+                Global Bandwidth Cap (KB/s, 0 = unlimited; shared across max downloads)
               </label>
               <input
                 type="number"
