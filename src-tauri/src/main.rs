@@ -88,7 +88,7 @@ fn main() {
                 // Active statuses persisted in SQLite cannot represent live worker
                 // processes after a crash or forced shutdown. Recover them before
                 // scheduling so stale "Downloading" tasks do not occupy slots forever.
-                let recovered = recover_interrupted_tasks(app.handle(), &state);
+                let _recovered = recover_interrupted_tasks(app.handle(), &state);
                 let settings = state.get_settings();
                 if settings.auto_resume_on_startup {
                     schedule_next(app.handle(), &state);
