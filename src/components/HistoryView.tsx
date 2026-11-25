@@ -149,6 +149,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
             Completed, failed, and cancelled transfer archive
           </p>
+          {importNotice && (
+            <p role="status" aria-live="polite" className="mt-2 text-[11px] text-[var(--vanta-muted)]">
+              {importNotice}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -205,11 +210,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
             <span>Clear Completed</span>
           </button>
         </div>
-        {importNotice && (
-          <p role="status" aria-live="polite" className="mt-2 text-[11px] text-[var(--vanta-muted)]">
-            {importNotice}
-          </p>
-        )}
       </div>
 
       {/* Real Computed Stats Strip */}
