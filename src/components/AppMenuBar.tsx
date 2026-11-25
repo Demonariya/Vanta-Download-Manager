@@ -89,7 +89,7 @@ export const AppMenuBar: React.FC<AppMenuBarProps> = ({
 
   return (
     <>
-      <div ref={rootRef} className="relative z-40 flex h-8 shrink-0 items-center gap-0.5 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-2 text-[11px]">
+      <div ref={rootRef} className="relative z-40 flex h-9 shrink-0 items-center gap-1 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3 text-xs">
         {menus.map((menu) => (
           <div className="relative h-full" key={menu.label}>
             <button
