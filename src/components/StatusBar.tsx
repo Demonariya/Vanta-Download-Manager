@@ -16,7 +16,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ tasks }) => {
   const aggregateSpeed = calculateAggregateSpeed(tasks);
 
   return (
-    <footer role="status" aria-label="Download status" className="flex h-8 shrink-0 items-center gap-3 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-[10px] text-[var(--vanta-muted)] sm:gap-4 sm:px-4">
+    <footer role="status" aria-label="Download status" className="flex h-9 shrink-0 items-center gap-4 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-4 text-[11px] text-[var(--vanta-muted)] sm:gap-4 sm:px-4">
       <span className="inline-flex shrink-0 items-center gap-1.5">
         <Download className="h-3 w-3" />
         <span>{tasks.length} downloads</span>
