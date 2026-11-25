@@ -892,7 +892,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     type="button"
                     onClick={() => {
                       const nextDays = active
-                        ? scheduler.days.filter((d) => d !== idx)
+                        ? scheduler.days.length > 1
+                          ? scheduler.days.filter((d) => d !== idx)
+                          : scheduler.days
                         : [...scheduler.days, idx].sort((a, b) => a - b);
                       setForm({
                         ...form,
