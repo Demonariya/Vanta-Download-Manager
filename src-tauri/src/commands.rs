@@ -915,7 +915,7 @@ pub fn read_clipboard_text() -> Result<String, String> {
                 return Err("The system clipboard is temporarily busy.".to_string());
             }
 
-            let result = (|| {
+            let result = (|| unsafe {
                 // CF_UNICODETEXT
                 let handle = GetClipboardData(13);
                 if handle.is_null() {
