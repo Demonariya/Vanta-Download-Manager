@@ -105,10 +105,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     if (settings) {
-      setForm({
-        ...settings,
-        scheduler: settings.scheduler || DEFAULT_SCHEDULER_SETTINGS,
-      });
+      const storedScheduler = settings.scheduler || DEFAULT_SCHEDULER_SETTINGS;
+      // Migrate the old built-in 01:00–06:00 default: it unintentionally blocked
+      // normal downloads whenever users enabled the scheduler without configuring it.
+      const migrateLegacyDefault = storedScheduler.enabled
+        && storedScheduler.start_time === '01:00'
+        && storedScheduler.stop_time === '06:00';
+      const scheduler = migrateLegacyDefault
+        ? { ...storedScheduler, start_time: '00:00', stop_time: '00:00' }
+        : storedScheduler;
+      setForm({ ...settings, scheduler });
+      if (migrateLegacyDefault) {
+        void onSaveSettings({ scheduler }).catch((error: any) => {
+          setSaveError(error?.message || 'Could not migrate the default scheduler window.');
+        });
+      }
     }
     refreshCookieStatus();
   }, [settings]);
