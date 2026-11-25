@@ -81,9 +81,11 @@ test('resolveVideoFormatSelector and buildCuratedVideoOptions always pair video-
   assert.equal(resolveVideoFormatSelector('best', formats), 'bestvideo+bestaudio/best');
 
   const curated = buildCuratedVideoOptions(formats);
-  assert.ok(curated.some((o) =>
-    o.formatSelector === 'bestvideo[height<=1080]+bestaudio/best[height<=1080]' && o.needsMux
-  ));
+  const highQuality = curated.find((option) => option.height === 1080);
+  assert.ok(highQuality);
+  assert.equal(highQuality.needsMux, true);
+  assert.match(highQuality.formatSelector, /^137\\+bestaudio\\//);
+  assert.match(highQuality.formatSelector, /bestvideo\\[height<=1080\\]\\+bestaudio/);
 });
 
 test('Scheduler evaluates overnight and active download windows deterministically', () => {
