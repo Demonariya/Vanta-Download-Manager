@@ -140,7 +140,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
+      <div className="flex-1 min-h-0 min-w-0 w-full max-w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4">
         {tab === 'details' && (
           <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(240px,1.2fr)_minmax(220px,1fr)] gap-3 xl:gap-4">
             <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 flex items-center gap-3 min-w-0">
@@ -210,7 +210,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
         )}
 
         {tab === 'logs' && (
-          <div className="flex h-full min-h-[180px] flex-col gap-3">
+          <div className="flex h-full min-h-[180px] min-w-0 w-full max-w-full flex-col gap-3 overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-semibold text-[var(--vanta-text)]">Download activity log</h3>
@@ -229,16 +229,16 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               ))}
               {logsNotice && <span role="status" className="ml-auto text-[10px] text-[var(--vanta-muted)]">{logsNotice}</span>}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+            <div className="min-h-0 min-w-0 w-full max-w-full flex-1 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
               {filteredLogs.length ? (
-                <div className="divide-y divide-[var(--vanta-border)]">
+                <div className="min-w-0 max-w-full divide-y divide-[var(--vanta-border)]">
                   {[...filteredLogs].reverse().map((entry, index) => (
-                    <div key={entry.timestamp + '-' + index} className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 px-3 py-2.5 text-[11px]">
+                    <div key={entry.timestamp + '-' + index} className="grid min-w-0 grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-3 px-3 py-2.5 text-[11px]">
                       <div className="flex flex-col items-start gap-1">
-                        <span className="font-mono text-[10px] text-[var(--vanta-muted)] whitespace-nowrap">{entry.timestamp}</span>
+                        <span className="max-w-full font-mono text-[10px] text-[var(--vanta-muted)] break-all">{entry.timestamp}</span>
                         <span className={"rounded px-1.5 py-0.5 text-[9px] font-bold uppercase " + (entry.level === 'error' ? 'bg-red-500/10 text-red-500' : entry.level === 'warn' ? 'bg-amber-500/10 text-amber-500' : 'bg-[var(--vanta-surface)] text-[var(--vanta-muted)]')}>{entry.level}</span>
                       </div>
-                      <p className="min-w-0 break-words text-[var(--vanta-text-secondary)]">{entry.message}</p>
+                      <p className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-[var(--vanta-text-secondary)]">{entry.message}</p>
                     </div>
                   ))}
                 </div>
