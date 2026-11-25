@@ -255,7 +255,9 @@ impl AppState {
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 is_default INTEGER DEFAULT 0,
                 is_paused INTEGER DEFAULT 0,
-                queue_order INTEGER DEFAULT 0
+                queue_order INTEGER DEFAULT 0,
+                max_concurrent_downloads INTEGER DEFAULT 0,
+                bandwidth_limit_kbps INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS notifications (
@@ -325,6 +327,8 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN queue_id TEXT DEFAULT 'main'",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
             "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
+            "ALTER TABLE download_queues ADD COLUMN max_concurrent_downloads INTEGER DEFAULT 0",
+            "ALTER TABLE download_queues ADD COLUMN bandwidth_limit_kbps INTEGER DEFAULT 0",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -543,7 +547,7 @@ impl AppState {
     pub fn get_queues(&self) -> Vec<DownloadQueue> {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, name, is_default, is_paused, queue_order FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
+            "SELECT id, name, is_default, is_paused, queue_order, max_concurrent_downloads, bandwidth_limit_kbps FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
         ) {
             Ok(stmt) => stmt,
             Err(error) => {
@@ -558,6 +562,8 @@ impl AppState {
                 is_default: row.get::<_, i32>(2)? != 0,
                 is_paused: row.get::<_, i32>(3)? != 0,
                 queue_order: row.get(4)?,
+                max_concurrent_downloads: row.get::<_, i64>(5).unwrap_or(0).clamp(0, 32) as u32,
+                bandwidth_limit_kbps: row.get::<_, i64>(6).unwrap_or(0).max(0) as u64,
             })
         }) {
             Ok(rows) => rows,
@@ -577,7 +583,7 @@ impl AppState {
         ).unwrap_or(1);
         let id = format!("queue_{}", &uuid::Uuid::new_v4().to_string()[..12]);
         conn.execute(
-            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES (?1, ?2, 0, 0, ?3)",
+            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order, max_concurrent_downloads, bandwidth_limit_kbps) VALUES (?1, ?2, 0, 0, ?3, 0, 0)",
             params![id, name, next_order],
         ).map_err(|error| {
             if error.to_string().to_ascii_lowercase().contains("unique") {
@@ -642,6 +648,30 @@ impl AppState {
             "UPDATE download_queues SET is_paused = ?1 WHERE id = ?2",
             params![if paused { 1 } else { 0 }, id],
         ).map_err(|error| format!("Could not update queue: {}", error))?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn update_queue_limits(
+        &self,
+        id: &str,
+        max_concurrent_downloads: u32,
+        bandwidth_limit_kbps: u64,
+    ) -> Result<Vec<DownloadQueue>, String> {
+        if max_concurrent_downloads > 32 {
+            return Err("Queue concurrency must be between 0 (inherit) and 32.".to_string());
+        }
+        if bandwidth_limit_kbps > 10_000_000 {
+            return Err("Queue bandwidth limit is outside the supported range.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET max_concurrent_downloads = ?1, bandwidth_limit_kbps = ?2 WHERE id = ?3",
+            params![max_concurrent_downloads as i64, bandwidth_limit_kbps as i64, id],
+        ).map_err(|error| format!("Could not update queue limits: {}", error))?;
         if changed == 0 {
             return Err("Queue was not found.".to_string());
         }
