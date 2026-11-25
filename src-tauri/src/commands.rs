@@ -712,10 +712,21 @@ pub async fn create_task(
     if let Some(persisted) = state.get_task_by_id(&task.id) {
         if persisted.status == TaskStatus::Queued {
             let reason = queued_task_block_reason(&state, &persisted);
-            logging::warn(
-                "queue",
-                &format!("Task '{}' remains queued: {}", persisted.id, reason),
-            );
+            if let Some(mut queued_task) = state.get_task_by_id(&task.id) {
+                queued_task.current_phase = format!("Waiting: {}", reason);
+                queued_task.logs.push(TaskLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    level: "warning".to_string(),
+                    message: format!("Scheduler did not start this task: {}", reason),
+                });
+                if queued_task.logs.len() > 100 {
+                    let excess = queued_task.logs.len() - 100;
+                    queued_task.logs.drain(..excess);
+                }
+                state.upsert_task(&queued_task);
+                let _ = app.emit("task_updated", &queued_task);
+            }
+            logging::warn("queue", &format!("Task '{}' remains queued: {}", persisted.id, reason));
         }
     }
 
@@ -1955,20 +1966,29 @@ fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
         return format!("queue '{}' is paused", task.queue_id);
     }
 
-    let active_count = state
-        .get_tasks()
-        .iter()
-        .filter(|candidate| candidate.status.is_active())
-        .count();
+    let tasks = state.get_tasks();
+    let active_count = tasks.iter().filter(|candidate| candidate.status.is_active()).count();
     let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
     if active_count >= max_concurrent {
-        return format!(
-            "all download slots are occupied ({}/{})",
-            active_count, max_concurrent
-        );
+        return format!("all global download slots are occupied ({}/{}); increase the global concurrency limit or wait for an active task", active_count, max_concurrent);
     }
 
-    "the scheduler did not select this task; inspect queue order and task state".to_string()
+    let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
+    if let Some(queue) = queue {
+        if queue.is_paused {
+            return format!("queue '{}' is paused; start this queue to allow downloads", queue.name);
+        }
+        let queue_active = tasks.iter().filter(|candidate| candidate.queue_id == task.queue_id && candidate.status.is_active()).count();
+        if queue.max_concurrent_downloads > 0 && queue_active >= queue.max_concurrent_downloads as usize {
+            return format!("queue '{}' reached its concurrency limit ({}/{})", queue.name, queue_active, queue.max_concurrent_downloads);
+        }
+    }
+
+    if settings.scheduler.enabled && !scheduler_window_is_open(&settings) {
+        return format!("scheduler is enabled and its allowed time window is closed ({}–{})", settings.scheduler.start_time, settings.scheduler.stop_time);
+    }
+
+    "task is queued but no scheduler slot was claimed; check application shutdown state and queue configuration".to_string()
 }
 
 fn queue_has_available_slot(queue_cap: u32, active_count: usize) -> bool {
