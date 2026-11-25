@@ -67,10 +67,11 @@ export function detectMediaProvider(url: string): string {
   if (isSpotifyUrl(trimmed)) return 'Spotify';
   try {
     const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'Media Link';
+    if (!parsed.hostname || parsed.username || parsed.password) return 'Media Link';
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
     const matches = (domain: string) => host === domain || host.endsWith(`.${domain}`);
     if (matches('youtube.com') || host === 'youtu.be' || matches('youtube-nocookie.com')) return 'YouTube';
-    if (matches('youtu.be')) return 'YouTube';
     if (matches('vimeo.com')) return 'Vimeo';
     if (matches('soundcloud.com') || matches('snd.sc')) return 'SoundCloud';
     if (matches('dailymotion.com') || host === 'dai.ly') return 'Dailymotion';
