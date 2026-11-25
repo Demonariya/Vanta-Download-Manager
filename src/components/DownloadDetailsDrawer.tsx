@@ -257,7 +257,12 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
           <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
             {[
               ['Engine', task.engine],
-              ['Format', (task.audio_format || task.ext || '—').toUpperCase()],
+              ['Container', (task.ext || '—').toUpperCase()],
+              ['Quality', task.is_audio_only
+                ? (task.audio_bitrate || 'Audio')
+                : (task.resolution_label || task.format_note || task.format_id || 'Auto')],
+              ['Video Codec', task.video_codec || 'Not reported'],
+              ['Audio Codec', task.audio_codec || task.verified_audio_info || 'Not reported'],
               ['Priority', task.priority],
               ['Duration', task.duration_string || '—'],
               ['Connections', String(task.active_connections ?? 0)],
