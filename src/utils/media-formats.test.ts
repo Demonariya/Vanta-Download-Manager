@@ -6,6 +6,7 @@ import {
   buildCuratedVideoOptions,
   detectInspectedMediaKind,
   formatMediaRoutingLabel,
+  getDefaultVideoFormatSelector,
   resolveVideoFormatSelector,
   summarizeVideoOptionCodecs,
 } from './media-formats';
@@ -107,6 +108,22 @@ describe('Unified media kind auto-detection', () => {
     assert.equal(codecSummary.vcodec, 'AVC1');
     assert.equal(codecSummary.acodec, 'MP4A');
     assert.equal(codecSummary.fps, 60);
+  });
+});
+
+describe('Default video quality selection', () => {
+  it('defaults to the highest concrete resolution returned by the extractor', () => {
+    assert.equal(getDefaultVideoFormatSelector([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '22', ext: 'mp4', height: 720, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]), '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+  });
+
+  it('keeps the adaptive preset when no concrete video stream is available', () => {
+    assert.equal(getDefaultVideoFormatSelector([
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+    ]), 'bestvideo+bestaudio/best');
   });
 });
 
