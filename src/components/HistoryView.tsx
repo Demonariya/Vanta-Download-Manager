@@ -141,9 +141,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
           <h1 className="text-base font-semibold text-[var(--vanta-text)]">Download History</h1>
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
@@ -213,7 +213,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
       </div>
 
       {/* Real Computed Stats Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
           <p className="text-[11px] text-[var(--vanta-muted)]">Completed Files</p>
           <p className="text-lg font-semibold font-mono tabular-nums text-emerald-700 dark:text-[#3fb950]">
