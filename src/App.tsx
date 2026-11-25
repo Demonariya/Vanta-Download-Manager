@@ -70,7 +70,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }]);
+  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0, max_concurrent_downloads: 0, bandwidth_limit_kbps: 0 }]);
   const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
