@@ -161,26 +161,63 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isNewDownloadOpen, isNotificationsOpen, isSafeCloseOpen]);
 
-  // Opt-in Clipboard URL monitor on window focus
+  // Opt-in clipboard monitor. Read only while the desktop window is visible and
+  // focused; this avoids background polling and keeps clipboard access user-controlled.
   useEffect(() => {
-    if (!settings?.clipboard_monitoring) return;
+    if (!settings?.clipboard_monitoring) {
+      setClipboardUrl(null);
+      return;
+    }
+
+    let disposed = false;
+    let checking = false;
     const checkClipboard = async () => {
+      if (disposed || checking || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      if (!navigator.clipboard?.readText) return;
+
+      checking = true;
       try {
         const text = (await navigator.clipboard.readText()).trim();
-        if (
-          text &&
-          text !== lastClipboardSeenRef.current &&
-          (text.startsWith('https://') || text.startsWith('http://') || text.startsWith('spotify:'))
-        ) {
+        if (disposed || !text || text === lastClipboardSeenRef.current) return;
+
+        const isSpotifyUri = /^spotify:(?:track|album|playlist|artist):[a-zA-Z0-9]+$/i.test(text);
+        let isHttpUrl = false;
+        if (/^https?:\/\//i.test(text)) {
+          try {
+            const parsed = new URL(text);
+            isHttpUrl = Boolean(parsed.hostname) && !parsed.username && !parsed.password;
+          } catch {
+            isHttpUrl = false;
+          }
+        }
+
+        if (isSpotifyUri || isHttpUrl) {
           lastClipboardSeenRef.current = text;
           setClipboardUrl(text);
         }
       } catch {
-        // clipboard permission denied or unavailable
+        // Clipboard permission may be denied by the WebView; retry on the next focus tick.
+      } finally {
+        checking = false;
       }
     };
-    window.addEventListener('focus', checkClipboard);
-    return () => window.removeEventListener('focus', checkClipboard);
+
+    const handleFocus = () => { void checkClipboard(); };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void checkClipboard();
+    };
+
+    void checkClipboard();
+    const pollId = window.setInterval(() => { void checkClipboard(); }, 1800);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(pollId);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [settings?.clipboard_monitoring]);
 
   const executeNativeClose = async () => {
