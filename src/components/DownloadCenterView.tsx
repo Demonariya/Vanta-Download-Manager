@@ -152,15 +152,12 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   );
 
   const visibleTasks = useMemo(
-    () => {
-      const scoped = scopeFilter === 'finished'
-        ? queueTasks.filter((task) => task.status === 'completed')
-        : scopeFilter === 'unfinished'
-          ? queueTasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled')
-          : queueTasks;
-      const statusFilter = scopeFilter === 'finished' || scopeFilter === 'unfinished' ? 'all' : scopeFilter;
-      return filterAndSortTasks(scoped, { statusFilter, searchQuery, sortField, sortDirection });
-    },
+    () => filterAndSortTasks(queueTasks, {
+      statusFilter: scopeFilter,
+      searchQuery,
+      sortField,
+      sortDirection,
+    }),
     [queueTasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
