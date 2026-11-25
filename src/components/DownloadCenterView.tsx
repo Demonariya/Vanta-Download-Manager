@@ -435,7 +435,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     ...(visibleColumns.status ? ['92px'] : []),
     '64px',
   ].join(' ');
-  const tableGridClassName = 'grid items-center gap-2.5 px-4';
+  const tableGridClassName = 'grid items-center gap-2.5 px-3 sm:px-4';
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
       {/* Missing Engine Inline Alert (only shown when missing) */}
@@ -633,7 +633,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       )}
 
       {/* Main Transfer List */}
-      <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
+      <div className="min-w-0 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
         {isDesktopLayout && <div className="overflow-x-auto">
           <div className="min-w-[1060px]">
             <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
