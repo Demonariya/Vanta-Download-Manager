@@ -85,7 +85,7 @@ describe('Unified media kind auto-detection', () => {
     const options = buildCuratedVideoOptions(videoMeta.formats);
     assert.equal(
       options[1].formatSelector,
-      'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+      '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     );
     assert.equal(resolveVideoFormatSelector('137', videoMeta.formats), '137+bestaudio/best');
     assert.equal(
@@ -117,6 +117,28 @@ describe('Truthful video format selection', () => {
     ]);
     assert.equal(options.length, 1);
     assert.equal(options[0].id, 'best');
+  });
+
+
+  it('falls back to the best video-only stream instead of a low-resolution muxed format', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]);
+    assert.equal(
+      options.find((option) => option.height === 1080)?.formatSelector,
+      '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+    );
+  });
+
+  it('uses the same high-resolution fallback for a muxed inspected stream', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '22', ext: 'mp4', height: 720, vcodec: 'avc1', acodec: 'mp4a' },
+    ]);
+    assert.equal(
+      options.find((option) => option.height === 720)?.formatSelector,
+      '22/bestvideo[height<=720]+bestaudio/best[height<=720]'
+    );
   });
 
   it('only advertises heights present in real video formats', () => {
