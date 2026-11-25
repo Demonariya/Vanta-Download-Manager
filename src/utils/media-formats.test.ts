@@ -136,6 +136,8 @@ describe('Media provider recognition', () => {
     assert.equal(formatMediaRoutingLabel(null, 'video', 'https://youtu.be/abc'), 'YouTube · Video · yt-dlp');
     assert.equal(formatMediaRoutingLabel(null, 'audio', 'https://soundcloud.com/artist/track'), 'SoundCloud · Audio · yt-dlp');
     assert.equal(formatMediaRoutingLabel(null, 'video', 'https://notyoutube.com/watch?v=abc'), 'Media Link · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'ftp://youtube.com/video.mp4'), 'Media Link · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://user:pass@youtube.com/watch?v=abc'), 'Media Link · Video · yt-dlp');
   });
 });
 
