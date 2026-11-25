@@ -44,14 +44,32 @@ export function calculateSidebarTaskStats(tasks: DownloadTask[]): SidebarTaskSta
     const queueId = task.queue_id || 'main';
     stats.queueCounts.set(queueId, (stats.queueCounts.get(queueId) || 0) + 1);
 
-    if (['connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying'].includes(task.status)) {
-      stats.downloading += 1;
+    switch (task.status) {
+      case 'connecting':
+      case 'downloading':
+      case 'resuming':
+      case 'inspecting':
+      case 'processing':
+      case 'muxing':
+      case 'verifying':
+        stats.downloading += 1;
+        break;
+      case 'queued':
+        stats.queued += 1;
+        break;
+      case 'paused':
+        stats.paused += 1;
+        break;
+      case 'completed':
+        stats.completed += 1;
+        break;
+      case 'failed':
+        stats.failed += 1;
+        break;
+      default:
+        break;
     }
-    if (task.status === 'queued') stats.queued += 1;
-    if (task.status === 'paused') stats.paused += 1;
-    if (task.status === 'completed') stats.completed += 1;
     if (task.status !== 'completed' && task.status !== 'cancelled') stats.unfinished += 1;
-    if (task.status === 'failed') stats.failed += 1;
     if (task.is_audio_only || task.engine === 'spotdl') stats.music += 1;
     else stats.video += 1;
   }
