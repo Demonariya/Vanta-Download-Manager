@@ -2734,8 +2734,38 @@ impl EngineManager {
                     .get("resolution")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let width = f.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
-                let height = f.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let format_note = f
+                    .get("format_note")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // Some extractors omit numeric width/height while still reporting
+                // dimensions in "resolution" (for example, "1920x1080") or a
+                // conventional format note (for example, "1080p60").
+                let parsed_dimensions = resolution.as_deref().and_then(|value| {
+                    let (width, height) = value.split_once('x')?;
+                    let width = width.parse::<u32>().ok()?;
+                    let height = height.parse::<u32>().ok()?;
+                    (width > 0 && height > 0 && width <= 32768 && height <= 16384)
+                        .then_some((width, height))
+                });
+                let width = f
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .or_else(|| parsed_dimensions.map(|(width, _)| width));
+                let height = f
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .or_else(|| parsed_dimensions.map(|(_, height)| height))
+                    .or_else(|| {
+                        format_note.as_deref().and_then(|note| {
+                            let (digits, _) = note.split_once('p')?;
+                            let height = digits.parse::<u32>().ok()?;
+                            (height > 0 && height <= 16384).then_some(height)
+                        })
+                    });
                 let fps = f.get("fps").and_then(|v| v.as_f64());
                 let vcodec = f
                     .get("vcodec")
@@ -2747,10 +2777,6 @@ impl EngineManager {
                     .map(|s| s.to_string());
                 let filesize = f.get("filesize").and_then(|v| v.as_u64());
                 let filesize_approx = f.get("filesize_approx").and_then(|v| v.as_u64());
-                let format_note = f
-                    .get("format_note")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
                 let tbr = f.get("tbr").and_then(|v| v.as_f64());
                 let abr = f.get("abr").and_then(|v| v.as_f64());
 
