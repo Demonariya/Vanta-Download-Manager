@@ -625,7 +625,7 @@ impl Default for AppSettings {
             download_dir: default_download_dir,
             python_path: None,
             max_concurrent_downloads: 3,
-            fragment_concurrency: 4,
+            fragment_concurrency: 3,
             global_bandwidth_limit_kbps: 0,
             per_task_bandwidth_limit_kbps: 0,
             max_retries: 3,
@@ -677,6 +677,11 @@ pub fn default_downloads_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_fragment_concurrency_matches_engine_limit() {
+        assert_eq!(AppSettings::default().fragment_concurrency, 3);
+    }
 
     #[test]
     fn test_media_metadata_video_audio_formats_and_entries_roundtrip() {
