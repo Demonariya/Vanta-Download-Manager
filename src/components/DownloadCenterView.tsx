@@ -287,7 +287,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     event.preventDefault();
     event.stopPropagation();
     // Right-click opens actions without changing the selected row or inspector.
-    const nextIds = selectedIds.includes(task.id) ? [...selectedIds] : [task.id];
+    const nextIds = selectedIdSet.has(task.id) ? [...selectedIds] : [task.id];
     setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id, targetIds: nextIds });
   };
 
@@ -553,7 +553,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
           <div className="min-w-[1060px]">
             <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
               <input type="checkbox" aria-label="Select all visible downloads"
-                checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIds.includes(task.id))}
+                checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIdSet.has(task.id))}
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
               <span>#</span>
               <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Name {sortField === 'title' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
@@ -585,8 +585,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 }}
               >
                 {visibleTasks.map((task, index) => {
-                  const isSelectedRow = selectedIds.includes(task.id);
-                  const isChecked = selectedIds.includes(task.id);
+                  const isSelectedRow = selectedIdSet.has(task.id);
+                  const isChecked = selectedIdSet.has(task.id);
                   const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
                   const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
                   const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
@@ -662,7 +662,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             </div>
           ) : visibleTasks.map((task, index) => {
             const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
-            const isSelected = selectedIds.includes(task.id);
+            const isSelected = selectedIdSet.has(task.id);
             const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
             const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
             const downloaded = task.status === 'completed' && task.downloaded_bytes === 0 && task.total_bytes > 0 ? task.total_bytes : task.downloaded_bytes;
