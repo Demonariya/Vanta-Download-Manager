@@ -35,7 +35,7 @@ async function requestJson<T>(url: URL, timeout = 18000): Promise<T> {
 }
 
 function normalize(value: string): string {
-  return value.normalize('NFKD').toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();
+  return value.normalize('NFKD').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
 function scoreRecord(record: LyricsRecord, title: string, artist: string, duration?: number): number {
@@ -67,7 +67,7 @@ function timedLinesToLrc(lines: LiriQoTrack['timed']): string | null {
       const seconds = ((time % 60000) / 1000).toFixed(2).padStart(5, '0');
       return `[${String(minutes).padStart(2, '0')}:${seconds}]${line.text!.trim()}`;
     });
-  return output.length ? output.join('\\n') : null;
+  return output.length ? output.join('\n') : null;
 }
 
 function fromLiriQo(data: any, input: { title: string; artist: string; duration?: number }): LyricsRecord[] {
