@@ -173,11 +173,9 @@ export default function App() {
     let checking = false;
     const checkClipboard = async () => {
       if (disposed || checking || document.visibilityState !== 'visible' || !document.hasFocus()) return;
-      if (!navigator.clipboard?.readText) return;
-
       checking = true;
       try {
-        const text = (await navigator.clipboard.readText()).trim();
+        const text = (await api.readClipboardText()).trim();
         if (disposed || !text || text === lastClipboardSeenRef.current) return;
 
         const isSpotifyUri = /^spotify:(?:track|album|playlist|artist):[a-zA-Z0-9]+$/i.test(text);
