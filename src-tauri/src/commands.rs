@@ -1780,7 +1780,7 @@ pub fn scheduler_tick(app: &AppHandle) {
 fn effective_task_bandwidth_limit_bytes_per_second(
     settings: &AppSettings,
     queue_bandwidth_limit_kbps: u64,
-    active_tasks_in_queue: u32,
+    queue_concurrency_limit: u32,
 ) -> Option<u64> {
     let global_limit = (settings.global_bandwidth_limit_kbps > 0).then(|| {
         settings.global_bandwidth_limit_kbps.saturating_mul(1024)
@@ -1790,7 +1790,7 @@ fn effective_task_bandwidth_limit_bytes_per_second(
         .then(|| settings.per_task_bandwidth_limit_kbps.saturating_mul(1024));
     let queue_limit = (queue_bandwidth_limit_kbps > 0).then(|| {
         queue_bandwidth_limit_kbps.saturating_mul(1024)
-            / u64::from(active_tasks_in_queue.max(1))
+            / u64::from(queue_concurrency_limit.max(1))
     });
 
     [global_limit, per_task_limit, queue_limit]
@@ -3036,13 +3036,14 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         // concurrent tasks. This prevents each yt-dlp process from independently
         // consuming the entire "global" allowance. A per-task cap can tighten it.
         let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
-        let active_in_queue = state.get_tasks().iter()
-            .filter(|candidate| candidate.queue_id == task.queue_id && candidate.status.is_active())
-            .count() as u32;
+        let queue_concurrency = queue.as_ref()
+            .map(|queue| queue.max_concurrent_downloads)
+            .filter(|limit| *limit > 0)
+            .unwrap_or(settings.max_concurrent_downloads.max(1));
         if let Some(limit_bytes_per_second) = effective_task_bandwidth_limit_bytes_per_second(
             &settings,
             queue.as_ref().map(|queue| queue.bandwidth_limit_kbps).unwrap_or(0),
-            active_in_queue,
+            queue_concurrency,
         ) {
             args.push("--limit-rate".to_string());
             args.push(limit_bytes_per_second.to_string());
@@ -3907,8 +3908,8 @@ mod scheduler_window_tests {
             Some(409_600)
         );
         assert_eq!(
-            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 0),
-            Some(819_200)
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 4),
+            Some(204_800)
         );
     }
 
