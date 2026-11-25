@@ -122,9 +122,9 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   ];
 
   return (
-    <aside className="w-full h-[clamp(260px,34vh,380px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
-      <div className="h-12 px-3 sm:px-4 border-b border-[var(--vanta-border)] flex items-center justify-between gap-3 shrink-0">
-        <nav className="flex items-center gap-1 min-w-0 overflow-x-auto" aria-label="Download detail sections">
+    <aside className="w-full h-[clamp(220px,30vh,340px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
+      <div className="min-h-12 px-2 sm:px-4 border-b border-[var(--vanta-border)] flex items-center justify-between gap-2 shrink-0">
+        <nav className="flex flex-1 items-center gap-1 min-w-0 overflow-x-auto scrollbar-thin" aria-label="Download detail sections">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button key={id} type="button" onClick={() => setTab(id)}
               className={`h-9 px-3 rounded-lg text-xs sm:text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors ${tab === id ? 'bg-[var(--vanta-accent)] text-white' : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'}`}>
@@ -142,7 +142,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
         {tab === 'details' && (
-          <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(240px,1.2fr)_minmax(220px,1fr)] gap-3 lg:gap-4">
+          <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(240px,1.2fr)_minmax(220px,1fr)] gap-3 xl:gap-4">
             <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 flex items-center gap-3 min-w-0">
               <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
               <div className="min-w-0">
