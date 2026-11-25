@@ -900,28 +900,33 @@ pub fn read_clipboard_text() -> Result<String, String> {
 
         #[link(name = "user32")]
         extern "system" {
-            fn OpenClipboard(owner: *mut c_void) -> i32;
-            fn GetClipboardData(format: u32) -> *mut c_void;
-            fn CloseClipboard() -> i32;
+            #[link_name = "OpenClipboard"]
+            fn open_clipboard(owner: *mut c_void) -> i32;
+            #[link_name = "GetClipboardData"]
+            fn get_clipboard_data(format: u32) -> *mut c_void;
+            #[link_name = "CloseClipboard"]
+            fn close_clipboard() -> i32;
         }
         #[link(name = "kernel32")]
         extern "system" {
-            fn GlobalLock(memory: *mut c_void) -> *mut c_void;
-            fn GlobalUnlock(memory: *mut c_void) -> i32;
+            #[link_name = "GlobalLock"]
+            fn global_lock(memory: *mut c_void) -> *mut c_void;
+            #[link_name = "GlobalUnlock"]
+            fn global_unlock(memory: *mut c_void) -> i32;
         }
 
         unsafe {
-            if OpenClipboard(ptr::null_mut()) == 0 {
+            if open_clipboard(ptr::null_mut()) == 0 {
                 return Err("The system clipboard is temporarily busy.".to_string());
             }
 
             let result = (|| unsafe {
                 // CF_UNICODETEXT
-                let handle = GetClipboardData(13);
+                let handle = get_clipboard_data(13);
                 if handle.is_null() {
                     return Ok(String::new());
                 }
-                let wide_ptr = GlobalLock(handle) as *const u16;
+                let wide_ptr = global_lock(handle) as *const u16;
                 if wide_ptr.is_null() {
                     return Err("Could not access clipboard text.".to_string());
                 }
@@ -933,11 +938,11 @@ pub fn read_clipboard_text() -> Result<String, String> {
                     length += 1;
                 }
                 let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide_ptr, length));
-                let _ = GlobalUnlock(handle);
+                let _ = global_unlock(handle);
                 Ok(text)
             })();
 
-            let _ = CloseClipboard();
+            let _ = close_clipboard();
             result
         }
     }
