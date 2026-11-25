@@ -122,12 +122,12 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   ];
 
   return (
-    <aside className="w-full h-[clamp(220px,30vh,340px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
-      <div className="min-h-12 px-2 sm:px-4 border-b border-[var(--vanta-border)] flex items-center justify-between gap-2 shrink-0">
+    <aside className="w-full h-[clamp(240px,32vh,360px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
+      <div className="min-h-12 px-3 sm:px-5 border-b border-[var(--vanta-border)] flex items-center justify-between gap-2 shrink-0">
         <nav className="flex flex-1 items-center gap-1 min-w-0 overflow-x-auto scrollbar-thin" aria-label="Download detail sections">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button key={id} type="button" onClick={() => setTab(id)}
-              className={`h-9 px-3 rounded-lg text-xs sm:text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors ${tab === id ? 'bg-[var(--vanta-accent)] text-white' : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'}`}>
+              className={`h-9 px-3.5 rounded-lg text-xs sm:text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors ${tab === id ? 'bg-[var(--vanta-accent)] text-white' : 'text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]'}`}>
               <Icon className="w-4 h-4" />{label}
             </button>
           ))}
@@ -143,7 +143,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
       <div className="flex-1 min-h-0 min-w-0 w-full max-w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4">
         {tab === 'details' && (
           <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,220px)_minmax(0,1.2fr)_minmax(0,1fr)] gap-3 xl:gap-4">
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2.5 flex items-center gap-3 min-w-0">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 flex items-center gap-3 min-w-0 h-full">
               <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-[var(--vanta-text)] line-clamp-2">{task.title}</h3>
@@ -152,21 +152,27 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               </div>
             </div>
 
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 min-w-0 max-w-full overflow-hidden space-y-3">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-4 min-w-0 max-w-full overflow-hidden space-y-3 h-full">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-[var(--vanta-text)]">Transfer progress</span>
                 <span className="text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.status === 'completed' ? '100%' : task.percentage_known === false ? '—' : `${Math.min(100, Math.max(0, task.progress_percentage || 0)).toFixed(1)}%`}</span>
               </div>
               <ProgressDisplay task={task} />
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><span className="block text-[var(--vanta-muted)]">{task.status === 'completed' ? 'Final file size' : 'Downloaded'}</span><strong className="text-[var(--vanta-text)]">{effectiveBytes > 0 ? formatBytes(effectiveBytes) : '—'}</strong></div>
-                {task.status !== 'completed' && <div><span className="block text-[var(--vanta-muted)]">Estimated total</span><strong className="text-[var(--vanta-text)]">{displayedTotalSize ? `≈${formatBytes(displayedTotalSize)}` : '—'}</strong></div>}
-                <div><span className="block text-[var(--vanta-muted)]">Speed</span><strong className="text-[var(--vanta-text)]">{task.speed_str || '—'}</strong></div>
-                <div><span className="block text-[var(--vanta-muted)]">ETA</span><strong className="text-[var(--vanta-text)]">{task.eta_str || '—'}</strong></div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-[var(--vanta-border)]/70 pt-3 text-xs">
+                <div className="min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">{task.status === 'completed' ? 'Final file size' : 'Downloaded'}</span><strong className="block truncate text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{effectiveBytes > 0 ? formatBytes(effectiveBytes) : '—'}</strong></div>
+                {task.status !== 'completed' && <div className="min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Estimated total</span><strong className="block truncate text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{displayedTotalSize ? `≈${formatBytes(displayedTotalSize)}` : '—'}</strong></div>}
+                {task.status === 'completed' ? (
+                  <div className="min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Duration</span><strong className="block truncate text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{(task.elapsed_seconds ?? 0) > 0 ? formatDuration(task.elapsed_seconds) : '—'}</strong></div>
+                ) : (
+                  <>
+                    <div className="min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Speed</span><strong className="block truncate text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.speed_str || '—'}</strong></div>
+                    <div className="min-w-0"><span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">ETA</span><strong className="block truncate text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.eta_str || '—'}</strong></div>
+                  </>
+                )}
               </div>
             </div>
 
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 min-w-0 max-w-full overflow-hidden space-y-2.5">
+            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-4 min-w-0 max-w-full overflow-hidden space-y-3 h-full">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-[var(--vanta-text)]">File & source</span>
                 <button type="button" onClick={copyUrl} className="text-[11px] text-[var(--vanta-accent)] inline-flex items-center gap-1"><Copy className="w-3 h-3" />{copiedUrl ? 'Copied' : 'Copy URL'}</button>
