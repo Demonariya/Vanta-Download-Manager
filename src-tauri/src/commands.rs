@@ -890,6 +890,63 @@ pub fn clear_all(
 }
 
 
+/// Read plain text from the Windows system clipboard for the opt-in monitor.
+#[tauri::command]
+pub fn read_clipboard_text() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        use std::ptr;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn OpenClipboard(owner: *mut c_void) -> i32;
+            fn GetClipboardData(format: u32) -> *mut c_void;
+            fn CloseClipboard() -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalLock(memory: *mut c_void) -> *mut c_void;
+            fn GlobalUnlock(memory: *mut c_void) -> i32;
+        }
+
+        unsafe {
+            if OpenClipboard(ptr::null_mut()) == 0 {
+                return Err("The system clipboard is temporarily busy.".to_string());
+            }
+
+            let result = (|| {
+                // CF_UNICODETEXT
+                let handle = GetClipboardData(13);
+                if handle.is_null() {
+                    return Ok(String::new());
+                }
+                let wide_ptr = GlobalLock(handle) as *const u16;
+                if wide_ptr.is_null() {
+                    return Err("Could not access clipboard text.".to_string());
+                }
+
+                // Bound the scan so malformed clipboard data cannot cause an
+                // unbounded read. Windows text clipboard data is NUL-terminated.
+                let mut length = 0usize;
+                while length < 1_048_576 && *wide_ptr.add(length) != 0 {
+                    length += 1;
+                }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide_ptr, length));
+                let _ = GlobalUnlock(handle);
+                Ok(text)
+            })();
+
+            let _ = CloseClipboard();
+            result
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Native clipboard monitoring is currently supported on Windows only.".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn get_queues(state: State<'_, AppState>) -> Result<Vec<DownloadQueue>, String> {
     Ok(state.get_queues())
