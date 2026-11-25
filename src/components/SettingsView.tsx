@@ -827,12 +827,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="checkbox"
                 checked={scheduler.enabled}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const enabling = e.target.checked;
+                  // The legacy 01:00–06:00 values were defaults, not an intentional
+                  // user schedule. Enabling the feature for the first time should
+                  // not silently block every manual download for the rest of the day.
+                  const isLegacyDefault = scheduler.start_time === '01:00' && scheduler.stop_time === '06:00';
                   setForm({
                     ...form,
-                    scheduler: { ...scheduler, enabled: e.target.checked },
-                  })
-                }
+                    scheduler: {
+                      ...scheduler,
+                      enabled: enabling,
+                      ...(enabling && isLegacyDefault ? { start_time: '00:00', stop_time: '00:00' } : {}),
+                    },
+                  });
+                }}
                 className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
               />
               <span>Enable Scheduled Download Window (Quiet Hours / Off-Peak)</span>
