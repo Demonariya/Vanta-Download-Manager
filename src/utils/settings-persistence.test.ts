@@ -32,6 +32,18 @@ test('validateSettings enforces directory, bounds, theme (including system), pro
   assert.throws(() => validateSettings({ ...valid, theme: 'neon' as any }), /dark, light, or system/);
   assert.throws(() => validateSettings({ ...valid, max_concurrent_downloads: 0 }), /between 1 and 16/);
   assert.throws(() => validateSettings({ ...valid, max_concurrent_downloads: 32 }), /between 1 and 16/);
+  assert.throws(() => validateSettings({ ...valid, fragment_concurrency: 4 }), /between 1 and 3/);
+  assert.throws(() => validateSettings({ ...valid, global_bandwidth_limit_kbps: -1 }), /bandwidth limit/);
+  assert.throws(() => validateSettings({ ...valid, per_task_bandwidth_limit_kbps: 10_000_001 }), /bandwidth limit/);
+  assert.throws(() => validateSettings({
+    ...valid,
+    scheduler: { ...valid.scheduler!, start_time: '25:00' },
+  }), /valid HH:mm/);
+  assert.throws(() => validateSettings({
+    ...valid,
+    scheduler: { ...valid.scheduler!, days: [0, 7] },
+  }), /valid weekdays/);
+  assert.throws(() => validateSettings({ ...valid, auto_dismiss_seconds: 7 }), /supported values/);
   assert.throws(() => validateSettings({ ...valid, proxy_url: 'ftp://proxy.local:8080' }), /Proxy URL/);
   assert.throws(
     () => validateSettings({ ...valid, cookies_file: '/nonexistent/path/cookies.txt' }),
@@ -47,6 +59,7 @@ test('writeSettingsToStorage & readSettingsFromStorage persist atomically across
     const defaults = buildDefaultSettings();
     assert.equal(defaults.default_audio_sample_rate, 48000);
     assert.equal(defaults.default_audio_bit_depth, 24);
+    assert.equal(defaults.fragment_concurrency, 3);
     assert.equal(defaults.launch_on_startup, false);
     assert.equal(defaults.start_minimized, false);
     const custom = {
