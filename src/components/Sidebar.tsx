@@ -306,13 +306,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
             />
             <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = use the application's global concurrency limit; maximum 32.</p>
-            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Queue bandwidth limit (KB/s)</label>
+            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Queue bandwidth limit for yt-dlp (KB/s)</label>
             <input
               type="number" min="0" max="10000000" step="1" inputMode="numeric"
               value={queueBandwidthLimit} onChange={(event) => setQueueBandwidthLimit(event.target.value)}
               className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
             />
-            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = no queue-specific cap. The limit is shared by active downloads in this queue.</p>
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = no queue-specific cap. Shared across active yt-dlp downloads in this queue; spotDL does not expose a compatible rate-limit option.</p>
             <div className="mt-5 flex justify-end gap-2">
               <button type="button" onClick={() => setQueueLimitsEditor(null)} className="px-3 py-2 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">Cancel</button>
               <button type="submit" className="px-4 py-2 rounded-lg bg-[var(--vanta-accent)] text-white text-xs font-semibold">Save Limits</button>
