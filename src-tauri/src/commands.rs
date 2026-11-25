@@ -1355,12 +1355,12 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
     }
 
     let diagnostics_guard = AtomicFlagGuard(Arc::clone(&state.is_running_diagnostics));
-    tokio::task::spawn_blocking(move || {
+    Ok(tokio::task::spawn_blocking(move || {
         let _guard = diagnostics_guard;
         EngineManager::run_diagnostics()
     })
     .await
-    .map_err(|e| format!("Diagnostics task failed: {}", e))?
+    .map_err(|e| format!("Diagnostics task failed: {}", e))?)
 }
 
 fn invalidate_engine_status_cache(state: &AppState) {
