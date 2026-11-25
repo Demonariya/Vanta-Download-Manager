@@ -203,7 +203,9 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   );
 
   if (videoStreams.length === 0) {
-    return STANDARD_PRESETS;
+    // Do not advertise fixed resolutions when the extractor did not report
+    // any concrete video streams. The adaptive selector remains valid.
+    return [STANDARD_PRESETS[0]];
   }
 
   const byHeight = new Map<number, FormatOption>();
