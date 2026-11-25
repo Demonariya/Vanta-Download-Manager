@@ -171,10 +171,13 @@ describe('Rust <-> TypeScript MediaMetadata & IPC contract consistency', () => {
       modelsRs.includes('#[serde(rename = "taskId", alias = "task_id")]'),
       'models.rs missing NotificationItem taskId serde rename'
     );
-    assert.equal(
-      commandsRs.includes('use sha2::'),
-      false,
-      'commands.rs must not contain unused sha2 import'
+    assert.ok(
+      commandsRs.includes('use sha2::{Digest, Sha256};'),
+      'commands.rs must import SHA-256 for media integrity verification'
+    );
+    assert.ok(
+      commandsRs.includes('sha256_file('),
+      'commands.rs must compute a SHA-256 fingerprint for verified media'
     );
     assert.equal(
       (spotifyRs.match(/entries:\s*None,/g) || []).length,
