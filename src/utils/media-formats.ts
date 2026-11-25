@@ -220,8 +220,14 @@ export function resolveVideoFormatSelector(
     return trimmed;
   }
   const matched = availableFormats.find((f) => f.format_id === trimmed);
-  if (matched && (matched.is_video_only || matched.acodec === 'none')) {
-    return `${trimmed}+bestaudio/best`;
+  if (matched) {
+    const hasVideo = !matched.is_audio_only &&
+      ((Boolean(matched.vcodec) && matched.vcodec !== 'none') || (matched.height || 0) > 0);
+    const hasAudio = !matched.is_video_only &&
+      Boolean(matched.acodec) && matched.acodec !== 'none';
+    if (hasVideo && !hasAudio) {
+      return trimmed + '+bestaudio/best';
+    }
   }
   return trimmed;
 }
