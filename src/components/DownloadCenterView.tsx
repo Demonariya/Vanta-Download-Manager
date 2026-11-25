@@ -163,10 +163,20 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     [queueTasks, scopeFilter, searchQuery, sortField, sortDirection]
   );
 
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useMemo(
-    () => tasks.filter((task) => selectedIds.includes(task.id)),
-    [tasks, selectedIds],
+    () => tasks.filter((task) => selectedIdSet.has(task.id)),
+    [tasks, selectedIdSet],
   );
+
+  // Drop stale selections when a task is removed elsewhere (history cleanup, queue action, etc.).
+  useEffect(() => {
+    const existingIds = new Set(tasks.map((task) => task.id));
+    setSelectedIds((current) => {
+      const nextIds = current.filter((id) => existingIds.has(id));
+      return nextIds.length === current.length ? current : nextIds;
+    });
+  }, [tasks]);
   const pausableSelectedIds = selectedTasks
     .filter((task) => ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status))
     .map((task) => task.id);
@@ -194,9 +204,10 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
   const toggleSelectAll = () => {
     const visibleIds = visibleTasks.map((task) => task.id);
-    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+    const visibleIdSet = new Set(visibleIds);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIdSet.has(id));
     setSelectedIds((previous) => allVisibleSelected
-      ? previous.filter((id) => !visibleIds.includes(id))
+      ? previous.filter((id) => !visibleIdSet.has(id))
       : [...new Set([...previous, ...visibleIds])]);
     if (!allVisibleSelected && visibleIds.length > 0) lastSelectedIdRef.current = visibleIds[visibleIds.length - 1];
   };
@@ -494,7 +505,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             )}
             <button
               type="button"
-              onClick={() => navigator.clipboard.writeText(tasks.filter((task) => selectedIds.includes(task.id)).map((task) => task.url).join('\n')).catch(() => window.alert('Could not copy selected links.'))}
+              onClick={() => navigator.clipboard.writeText(selectedTasks.map((task) => task.url).join('\n')).catch(() => window.alert('Could not copy selected links.'))}
               className="px-2.5 py-1 rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
             >
               <Copy className="w-3.5 h-3.5" /> Copy Links
