@@ -283,12 +283,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <form
             onSubmit={async (event) => {
               event.preventDefault();
+              const queueId = queueLimitsEditor;
+              if (!queueId) return;
               const maxConcurrent = Number.parseInt(queueMaxConcurrent, 10);
               const bandwidth = Number.parseInt(queueBandwidthLimit, 10);
               if (!Number.isInteger(maxConcurrent) || maxConcurrent < 0 || maxConcurrent > 32
                 || !Number.isInteger(bandwidth) || bandwidth < 0 || bandwidth > 10000000) return;
               try {
-                onQueuesChanged(await api.updateQueueLimits(queueLimitsEditor, maxConcurrent, bandwidth));
+                onQueuesChanged(await api.updateQueueLimits(queueId, maxConcurrent, bandwidth));
                 setQueueLimitsEditor(null);
               } catch (error) {
                 window.alert(error instanceof Error ? error.message : 'Could not update queue settings.');
@@ -301,14 +303,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <p className="mt-1 text-xs text-[var(--vanta-muted)]">Set independent limits for this queue. Use 0 to inherit global settings.</p>
             <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Maximum simultaneous downloads</label>
             <input
-              type="number" min="0" max="32" step="1" inputMode="numeric"
+              type="number" min="0" max="32" step="1" required inputMode="numeric"
               value={queueMaxConcurrent} onChange={(event) => setQueueMaxConcurrent(event.target.value)}
               className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
             />
             <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = use the application's global concurrency limit; maximum 32.</p>
             <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Queue bandwidth limit for yt-dlp (KB/s)</label>
             <input
-              type="number" min="0" max="10000000" step="1" inputMode="numeric"
+              type="number" min="0" max="10000000" step="1" required inputMode="numeric"
               value={queueBandwidthLimit} onChange={(event) => setQueueBandwidthLimit(event.target.value)}
               className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
             />
