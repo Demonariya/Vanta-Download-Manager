@@ -1574,6 +1574,32 @@ pub fn scheduler_tick(app: &AppHandle) {
     }
 }
 
+fn effective_task_bandwidth_limit_bytes_per_second(settings: &AppSettings) -> Option<u64> {
+    let global_limit = (settings.global_bandwidth_limit_kbps > 0).then(|| {
+        settings
+            .global_bandwidth_limit_kbps
+            .saturating_mul(1024)
+            / u64::from(settings.max_concurrent_downloads.max(1))
+    });
+    let per_task_limit = (settings.per_task_bandwidth_limit_kbps > 0)
+        .then(|| settings.per_task_bandwidth_limit_kbps.saturating_mul(1024));
+
+    match (global_limit, per_task_limit) {
+        (Some(global), Some(per_task)) => Some(global.min(per_task).max(1)),
+        (Some(global), None) => Some(global.max(1)),
+        (None, Some(per_task)) => Some(per_task.max(1)),
+        (None, None) => None,
+    }
+}
+
+fn effective_fragment_concurrency(requested: u32, retries: u32) -> u32 {
+    if retries > 0 {
+        1
+    } else {
+        requested.clamp(1, 3)
+    }
+}
+
 fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return "application shutdown is in progress".to_string();
@@ -2699,17 +2725,20 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push(settings.proxy_url.trim().to_string());
         }
 
-        if settings.global_bandwidth_limit_kbps > 0 {
+        // Allocate the global cap across the configured maximum number of
+        // concurrent tasks. This prevents each yt-dlp process from independently
+        // consuming the entire "global" allowance. A per-task cap can tighten it.
+        if let Some(limit_bytes_per_second) =
+            effective_task_bandwidth_limit_bytes_per_second(&settings)
+        {
             args.push("--limit-rate".to_string());
-            args.push(format!("{}K", settings.global_bandwidth_limit_kbps));
-        } else if settings.per_task_bandwidth_limit_kbps > 0 {
-            args.push("--limit-rate".to_string());
-            args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
+            args.push(limit_bytes_per_second.to_string());
         }
 
-        // Keep segmented downloads reliable on CDNs that throttle parallel fragment requests.
-        // A low concurrency is slower on paper but avoids frequent 403/timeouts and missing chunks.
-        let safe_fragment_concurrency = settings.fragment_concurrency.clamp(1, 2);
+        // Start conservatively, then fall back to one fragment connection after
+        // any failed attempt. This adapts to CDNs that reject parallel fragment requests.
+        let safe_fragment_concurrency =
+            effective_fragment_concurrency(settings.fragment_concurrency, task.retries);
         if safe_fragment_concurrency > 1 {
             args.push("-N".to_string());
             args.push(safe_fragment_concurrency.to_string());
@@ -3526,6 +3555,41 @@ mod scheduler_window_tests {
         assert!(!should_resume_queue_paused_task(
             "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
         ));
+    }
+
+    #[test]
+    fn global_bandwidth_limit_is_shared_across_max_concurrent_tasks() {
+        let mut settings = AppSettings::default();
+        settings.max_concurrent_downloads = 4;
+        settings.global_bandwidth_limit_kbps = 1000;
+        settings.per_task_bandwidth_limit_kbps = 0;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            Some(256_000)
+        );
+
+        settings.per_task_bandwidth_limit_kbps = 100;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            Some(102_400)
+        );
+
+        settings.global_bandwidth_limit_kbps = 0;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            Some(102_400)
+        );
+
+        settings.per_task_bandwidth_limit_kbps = 0;
+        assert_eq!(effective_task_bandwidth_limit_bytes_per_second(&settings), None);
+    }
+
+    #[test]
+    fn fragment_concurrency_falls_back_after_a_failed_attempt() {
+        assert_eq!(effective_fragment_concurrency(16, 0), 3);
+        assert_eq!(effective_fragment_concurrency(2, 0), 2);
+        assert_eq!(effective_fragment_concurrency(3, 1), 1);
+        assert_eq!(effective_fragment_concurrency(1, 5), 1);
     }
 
     #[test]
