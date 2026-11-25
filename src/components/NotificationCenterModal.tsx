@@ -32,8 +32,8 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs select-none">
-      <div className="relative w-[calc(100vw-1.5rem)] max-w-md bg-[var(--vanta-surface)] border border-[var(--vanta-border-strong)] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+      <div className="relative w-[calc(100vw-1.5rem)] max-w-md bg-[var(--vanta-surface)] border border-[var(--vanta-border-strong)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
           <div className="flex items-center gap-2">
             <Bell className="w-4 h-4 text-[var(--vanta-accent)]" />
             <h2 className="text-xs font-semibold text-[var(--vanta-text)]">Event Notifications</h2>
@@ -60,7 +60,7 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
           </div>
         </div>
 
-        <div className="p-4 overflow-y-auto space-y-2.5">
+        <div className="p-5 overflow-y-auto space-y-3">
           {notifications.length === 0 ? (
             <div className="py-10 text-center text-[var(--vanta-muted)] text-xs">
               No recent notifications
