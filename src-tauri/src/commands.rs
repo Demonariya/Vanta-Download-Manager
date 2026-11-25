@@ -190,6 +190,18 @@ fn parse_lrc_entries(content: &str) -> Vec<(u32, String)> {
     entries
 }
 
+fn append_conflict_strategy_args(args: &mut Vec<String>, strategy: &str) {
+    if strategy == "overwrite" {
+        args.push("--force-overwrites".to_string());
+        // yt-dlp's --force-overwrites also disables resume; restore --continue
+        // afterward so an existing final file is replaced without discarding
+        // a resumable .part download after interruption.
+        args.push("--continue".to_string());
+    } else {
+        args.push("--no-overwrites".to_string());
+    }
+}
+
 fn format_selector_requires_ffmpeg(format_id: Option<&str>) -> bool {
     let selector = format_id.unwrap_or("best").trim();
     selector.is_empty() || selector == "best" || selector.contains('+')
@@ -3092,11 +3104,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push("--no-playlist".to_string());
         }
 
-        if settings.conflict_strategy == "overwrite" {
-            args.push("--force-overwrites".to_string());
-        } else {
-            args.push("--no-overwrites".to_string());
-        }
+        append_conflict_strategy_args(&mut args, &settings.conflict_strategy);
 
         match EngineManager::build_ytdlp_request_args(&task.url, &settings) {
             Ok(req_args) => args.extend(req_args),
@@ -3939,6 +3947,17 @@ mod subtitle_and_lyrics_tests {
             (2440, "Hello".to_string()),
             (3105, "World".to_string()),
         ]);
+    }
+
+    #[test]
+    fn overwrite_strategy_keeps_partial_download_resume_enabled() {
+        let mut args = Vec::new();
+        append_conflict_strategy_args(&mut args, "overwrite");
+        assert_eq!(args, vec!["--force-overwrites", "--continue"]);
+
+        let mut rename_args = Vec::new();
+        append_conflict_strategy_args(&mut rename_args, "rename");
+        assert_eq!(rename_args, vec!["--no-overwrites"]);
     }
 
     #[test]
