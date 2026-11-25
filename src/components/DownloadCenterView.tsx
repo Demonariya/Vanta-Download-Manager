@@ -122,11 +122,8 @@ const DownloadRowIdentity = React.memo<DownloadRowIdentityProps>(({
   if (compact) {
     return (
       <>
-        <MediaThumbnail src={thumbnail} title={title} isAudio={isAudio} ext={ext} size="sm" aspect={isAudio ? 'square' : 'video'} />
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate text-sm font-semibold text-[var(--vanta-text)]">{title}</h3>
-          <p className="mt-0.5 truncate text-[10px] text-[var(--vanta-muted)]">{metadata}</p>
-        </div>
+        <h3 className="truncate text-sm font-semibold text-[var(--vanta-text)]">{title}</h3>
+        <p className="mt-0.5 truncate text-[10px] text-[var(--vanta-muted)]">{metadata}</p>
       </>
     );
   }
@@ -780,6 +777,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                     onClick={(event) => event.stopPropagation()}
                     className="mt-1 h-3.5 w-3.5 shrink-0 rounded accent-[var(--vanta-accent)]"
                   />
+                  <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={task.is_audio_only || task.engine === 'spotdl'} ext={task.ext} size="sm" aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'} />
+                  <div className="min-w-0 flex-1">
                   <DownloadRowIdentity
                     title={task.title}
                     thumbnail={task.thumbnail}
