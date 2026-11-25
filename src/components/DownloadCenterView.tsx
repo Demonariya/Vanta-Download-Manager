@@ -180,7 +180,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [isColumnMenuOpen, setIsColumnMenuOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() => {
-    const defaults = { engine: true, size: true, speed: true, eta: true, status: true };
+    // Engine is intentionally removed from the table to preserve space for titles and progress.
+    const defaults = { engine: false, size: true, speed: true, eta: true, status: true };
     try {
       const saved = localStorage.getItem('vanta.download-columns.v1');
       if (!saved) return defaults;
@@ -188,7 +189,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return defaults;
       const stored = parsed as Record<string, unknown>;
       return {
-        engine: typeof stored.engine === 'boolean' ? stored.engine : defaults.engine,
+        engine: false,
         size: typeof stored.size === 'boolean' ? stored.size : defaults.size,
         speed: typeof stored.speed === 'boolean' ? stored.speed : defaults.speed,
         eta: typeof stored.eta === 'boolean' ? stored.eta : defaults.eta,
@@ -419,7 +420,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   }, [visibleColumns]);
 
   const columnOptions = [
-    { id: 'engine', label: 'Engine' },
     { id: 'size', label: 'Size' },
     { id: 'speed', label: 'Speed' },
     { id: 'eta', label: 'ETA' },
@@ -427,7 +427,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   ] as const;
   const tableGridTemplate = [
     '28px', '32px', 'minmax(210px,2fr)',
-    ...(visibleColumns.engine ? ['72px'] : []),
     'minmax(145px,1.2fr)',
     ...(visibleColumns.size ? ['104px'] : []),
     ...(visibleColumns.speed ? ['92px'] : []),
@@ -496,7 +495,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             <div className="absolute right-0 top-full z-30 mt-2 w-52 rounded-xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] p-2.5 shadow-xl">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-semibold text-[var(--vanta-text)]">Visible columns</p>
-                <button type="button" onClick={() => setVisibleColumns({ engine: true, size: true, speed: true, eta: true, status: true })} className="text-[10px] text-[var(--vanta-accent)] hover:underline">Reset</button>
+                <button type="button" onClick={() => setVisibleColumns({ engine: false, size: true, speed: true, eta: true, status: true })} className="text-[10px] text-[var(--vanta-accent)] hover:underline">Reset</button>
               </div>
               <div className="space-y-1">
                 {columnOptions.map((column) => (
@@ -642,7 +641,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
               <span>#</span>
               <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Name {sortField === 'title' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
-              {visibleColumns.engine && <span>Engine</span>}<span>Progress</span>
+              <span>Progress</span>
               {visibleColumns.size && <button type="button" onClick={() => toggleSort('size')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Size {sortField === 'size' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
               {visibleColumns.speed && <button type="button" onClick={() => toggleSort('speed')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Speed {sortField === 'speed' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
               {visibleColumns.eta && <span>ETA</span>}{visibleColumns.status && <span>Status</span>}<span>Actions</span>
@@ -706,7 +705,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         album={task.album}
                         duration={task.duration_string}
                       />
-                      {visibleColumns.engine && <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>}
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 mb-1">
                           <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(1)}%` : '—'}</span>
