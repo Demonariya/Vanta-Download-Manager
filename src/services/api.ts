@@ -262,6 +262,13 @@ export class ApiService {
     return res.json();
   }
 
+  public async importHistory(tasks: DownloadTask[]): Promise<DownloadTask[]> {
+    if (!this.isTauri()) {
+      throw new Error('History import requires the VANTA desktop app.');
+    }
+    return invoke<DownloadTask[]>('import_history', { importedTasks: tasks });
+  }
+
   public async createTask(taskData: Partial<DownloadTask>): Promise<DownloadTask> {
     if (this.isTauri()) {
       return invoke<DownloadTask>('create_task', { payload: taskData });
