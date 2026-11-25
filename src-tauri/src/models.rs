@@ -808,6 +808,15 @@ mod tests {
     }
 
     #[test]
+    fn legacy_download_queue_json_defaults_new_limits_to_inherit() {
+        let queue: DownloadQueue = serde_json::from_str(
+            r#"{"id":"main","name":"Main Queue","is_default":true,"is_paused":false,"queue_order":0}"#,
+        ).unwrap();
+        assert_eq!(queue.max_concurrent_downloads, 0);
+        assert_eq!(queue.bandwidth_limit_kbps, 0);
+    }
+
+    #[test]
     fn test_scheduler_settings_defaults() {
         let sched = SchedulerSettings::default();
         assert!(!sched.enabled);
