@@ -42,6 +42,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [queueMenu, setQueueMenu] = useState<{ x: number; y: number; queueId: string } | null>(null);
   const [queueEditor, setQueueEditor] = useState<{ mode: 'create' | 'rename'; queueId?: string } | null>(null);
   const [queueName, setQueueName] = useState('');
+  const [queueLimitsEditor, setQueueLimitsEditor] = useState<string | null>(null);
+  const [queueMaxConcurrent, setQueueMaxConcurrent] = useState('0');
+  const [queueBandwidthLimit, setQueueBandwidthLimit] = useState('0');
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -275,6 +278,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
+      {queueLimitsEditor && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4" onClick={() => setQueueLimitsEditor(null)}>
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const maxConcurrent = Number.parseInt(queueMaxConcurrent, 10);
+              const bandwidth = Number.parseInt(queueBandwidthLimit, 10);
+              if (!Number.isInteger(maxConcurrent) || maxConcurrent < 0 || maxConcurrent > 32
+                || !Number.isInteger(bandwidth) || bandwidth < 0 || bandwidth > 10000000) return;
+              try {
+                onQueuesChanged(await api.updateQueueLimits(queueLimitsEditor, maxConcurrent, bandwidth));
+                setQueueLimitsEditor(null);
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : 'Could not update queue settings.');
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] p-5 shadow-2xl"
+          >
+            <h2 className="text-base font-semibold text-[var(--vanta-text)]">Queue Limits</h2>
+            <p className="mt-1 text-xs text-[var(--vanta-muted)]">Set independent limits for this queue. Use 0 to inherit global settings.</p>
+            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Maximum simultaneous downloads</label>
+            <input
+              type="number" min="0" max="32" step="1" inputMode="numeric"
+              value={queueMaxConcurrent} onChange={(event) => setQueueMaxConcurrent(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
+            />
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = use the application's global concurrency limit; maximum 32.</p>
+            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Queue bandwidth limit (KB/s)</label>
+            <input
+              type="number" min="0" max="10000000" step="1" inputMode="numeric"
+              value={queueBandwidthLimit} onChange={(event) => setQueueBandwidthLimit(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
+            />
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = no queue-specific cap. The limit is shared by active downloads in this queue.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setQueueLimitsEditor(null)} className="px-3 py-2 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">Cancel</button>
+              <button type="submit" className="px-4 py-2 rounded-lg bg-[var(--vanta-accent)] text-white text-xs font-semibold">Save Limits</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {queueEditor && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4" onClick={() => setQueueEditor(null)}>
           <form
@@ -351,6 +397,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     }
                   }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] text-[var(--vanta-text)]">
                     {queue.is_paused ? 'Start Queue' : 'Stop Queue'}
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => {
+                    setQueueMaxConcurrent(String(queue.max_concurrent_downloads || 0));
+                    setQueueBandwidthLimit(String(queue.bandwidth_limit_kbps || 0));
+                    setQueueLimitsEditor(queue.id);
+                    setQueueMenu(null);
+                  }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] text-[var(--vanta-text)]">
+                    Queue Limits…
                   </button>
                   {!queue.is_default && (
                     <>
