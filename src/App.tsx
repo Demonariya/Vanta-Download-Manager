@@ -516,6 +516,11 @@ export default function App() {
                   onDeleteTask={(id, deleteFile) => api.deleteTask(id, deleteFile)}
                   onDeleteFile={(id) => api.deleteDownloadedFile(id)}
                   onSelectTask={(t) => setSelectedTaskId(t.id)}
+                  onImportHistory={async (records) => {
+                    const updated = await api.importHistory(records);
+                    setTasks(updated);
+                    return updated;
+                  }}
                 />
               )}
 
