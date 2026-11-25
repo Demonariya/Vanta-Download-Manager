@@ -919,6 +919,20 @@ pub fn delete_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> R
 }
 
 #[tauri::command]
+pub fn update_queue_limits(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    max_concurrent_downloads: u32,
+    bandwidth_limit_kbps: u64,
+) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.update_queue_limits(&id, max_concurrent_downloads, bandwidth_limit_kbps)?;
+    let _ = app.emit("queues_updated", &queues);
+    schedule_next(&app, &state);
+    Ok(queues)
+}
+
+#[tauri::command]
 pub fn stop_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
     state.set_queue_paused(&id, true)?;
     let task_ids: Vec<String> = state.get_tasks().into_iter()
@@ -1763,22 +1777,27 @@ pub fn scheduler_tick(app: &AppHandle) {
     }
 }
 
-fn effective_task_bandwidth_limit_bytes_per_second(settings: &AppSettings) -> Option<u64> {
+fn effective_task_bandwidth_limit_bytes_per_second(
+    settings: &AppSettings,
+    queue_bandwidth_limit_kbps: u64,
+    active_tasks_in_queue: u32,
+) -> Option<u64> {
     let global_limit = (settings.global_bandwidth_limit_kbps > 0).then(|| {
-        settings
-            .global_bandwidth_limit_kbps
-            .saturating_mul(1024)
+        settings.global_bandwidth_limit_kbps.saturating_mul(1024)
             / u64::from(settings.max_concurrent_downloads.max(1))
     });
     let per_task_limit = (settings.per_task_bandwidth_limit_kbps > 0)
         .then(|| settings.per_task_bandwidth_limit_kbps.saturating_mul(1024));
+    let queue_limit = (queue_bandwidth_limit_kbps > 0).then(|| {
+        queue_bandwidth_limit_kbps.saturating_mul(1024)
+            / u64::from(active_tasks_in_queue.max(1))
+    });
 
-    match (global_limit, per_task_limit) {
-        (Some(global), Some(per_task)) => Some(global.min(per_task).max(1)),
-        (Some(global), None) => Some(global.max(1)),
-        (None, Some(per_task)) => Some(per_task.max(1)),
-        (None, None) => None,
-    }
+    [global_limit, per_task_limit, queue_limit]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|limit| limit.max(1))
 }
 
 fn effective_fragment_concurrency(requested: u32, retries: u32) -> u32 {
@@ -1845,10 +1864,18 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
         return;
     }
     let tasks = state.get_tasks();
-    let paused_queues: HashSet<String> = state.get_queues().into_iter()
+    let queues = state.get_queues();
+    let paused_queues: HashSet<String> = queues.iter()
         .filter(|queue| queue.is_paused)
-        .map(|queue| queue.id)
+        .map(|queue| queue.id.clone())
         .collect();
+    let queue_limits: HashMap<String, u32> = queues.iter()
+        .map(|queue| (queue.id.clone(), queue.max_concurrent_downloads))
+        .collect();
+    let mut active_by_queue: HashMap<String, usize> = HashMap::new();
+    for task in tasks.iter().filter(|task| task.status.is_active()) {
+        *active_by_queue.entry(task.queue_id.clone()).or_insert(0) += 1;
+    }
 
     let active_count = tasks.iter().filter(|t| t.status.is_active()).count();
     let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
@@ -1859,7 +1886,14 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
     let mut queued: Vec<DownloadTask> = tasks
         .into_iter()
-        .filter(|t| t.status == TaskStatus::Queued && !paused_queues.contains(&t.queue_id))
+        .filter(|task| {
+            if task.status != TaskStatus::Queued || paused_queues.contains(&task.queue_id) {
+                return false;
+            }
+            let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
+            queue_cap == 0
+                || active_by_queue.get(&task.queue_id).copied().unwrap_or(0) < queue_cap as usize
+        })
         .collect();
 
     queued.sort_by(|a, b| {
@@ -2989,9 +3023,15 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         // Allocate the global cap across the configured maximum number of
         // concurrent tasks. This prevents each yt-dlp process from independently
         // consuming the entire "global" allowance. A per-task cap can tighten it.
-        if let Some(limit_bytes_per_second) =
-            effective_task_bandwidth_limit_bytes_per_second(&settings)
-        {
+        let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
+        let active_in_queue = state.get_tasks().iter()
+            .filter(|candidate| candidate.queue_id == task.queue_id && candidate.status.is_active())
+            .count() as u32;
+        if let Some(limit_bytes_per_second) = effective_task_bandwidth_limit_bytes_per_second(
+            &settings,
+            queue.as_ref().map(|queue| queue.bandwidth_limit_kbps).unwrap_or(0),
+            active_in_queue,
+        ) {
             args.push("--limit-rate".to_string());
             args.push(limit_bytes_per_second.to_string());
         }
@@ -3848,30 +3888,47 @@ mod scheduler_window_tests {
     }
 
     #[test]
+    fn queue_bandwidth_limit_is_shared_by_active_tasks_in_that_queue() {
+        let settings = AppSettings::default();
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 2),
+            Some(409_600)
+        );
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 0),
+            Some(819_200)
+        );
+    }
+
+    #[test]
     fn global_bandwidth_limit_is_shared_across_max_concurrent_tasks() {
         let mut settings = AppSettings::default();
         settings.max_concurrent_downloads = 4;
         settings.global_bandwidth_limit_kbps = 1000;
         settings.per_task_bandwidth_limit_kbps = 0;
         assert_eq!(
-            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
             Some(256_000)
         );
 
         settings.per_task_bandwidth_limit_kbps = 100;
         assert_eq!(
-            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
             Some(102_400)
         );
 
         settings.global_bandwidth_limit_kbps = 0;
         assert_eq!(
-            effective_task_bandwidth_limit_bytes_per_second(&settings),
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
             Some(102_400)
         );
 
         settings.per_task_bandwidth_limit_kbps = 0;
-        assert_eq!(effective_task_bandwidth_limit_bytes_per_second(&settings), None);
+        assert_eq!(effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1), None);
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 400, 2),
+            Some(204_800)
+        );
     }
 
     #[test]
