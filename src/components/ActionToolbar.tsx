@@ -143,7 +143,7 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
   };
 
   return (
-    <div className="relative flex min-h-11 shrink-0 items-center gap-1.5 overflow-visible border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-1.5 sm:px-4">
+    <div className="relative flex min-h-12 shrink-0 items-center gap-2 overflow-visible border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-4 py-2 sm:px-5">
       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
         {actionOrder.filter((id) => visibility[id]).map((id) => {
           const action = actions[id];
