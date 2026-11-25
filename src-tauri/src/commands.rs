@@ -20,9 +20,31 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
+
+struct EngineScanGuard<'a>(&'a AtomicBool);
+
+impl Drop for EngineScanGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod engine_scan_guard_tests {
+    use super::*;
+
+    #[test]
+    fn engine_scan_guard_releases_lock_on_drop() {
+        let scanning = AtomicBool::new(true);
+        {
+            let _guard = EngineScanGuard(&scanning);
+        }
+        assert!(!scanning.load(Ordering::SeqCst));
+    }
+}
 
 struct InspectionDropGuard<'a> {
     state: &'a AppState,
@@ -1266,31 +1288,51 @@ pub async fn get_engine_status(
         }
     }
 
-    if state.is_scanning_engines.swap(true, Ordering::SeqCst) {
-        for _ in 0..60 {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            if !state.is_scanning_engines.load(Ordering::SeqCst) {
-                let cached = state
-                    .cached_engine_status
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Some((_ts, status)) = cached {
+    // Acquire ownership without ever starting a second scan after an arbitrary timeout.
+    // A forced refresh waits for the in-flight scan to finish, then performs its own scan.
+    let mut acquired = false;
+    for _ in 0..120 {
+        if state
+            .is_scanning_engines
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            acquired = true;
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if !force {
+            let cached = state
+                .cached_engine_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some((captured_at, status)) = cached {
+                if captured_at.elapsed() < ENGINE_STATUS_CACHE_TTL {
                     return Ok(status);
                 }
-                break;
             }
         }
-        state.is_scanning_engines.store(true, Ordering::SeqCst);
     }
 
-    let scan_res = tokio::task::spawn_blocking(EngineManager::get_engine_status)
+    if !acquired {
+        return Err("Engine status scan is still running. Try again shortly.".to_string());
+    }
+
+    // RAII resets the flag even if the blocking worker panics or the command exits early.
+    let _scan_guard = EngineScanGuard(&state.is_scanning_engines);
+    let status = tokio::task::spawn_blocking(EngineManager::get_engine_status)
         .await
-        .map_err(|e| format!("Engine scan task failed: {}", e));
+        .map_err(|e| format!("Engine scan task failed: {}", e))??;
 
-    state.is_scanning_engines.store(false, Ordering::SeqCst);
-
-    let status = scan_res?;
+    {
+        let mut cached = state
+            .cached_engine_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *cached = Some((Instant::now(), status.clone()));
+    }
     {
         let mut cache = state
             .cached_engine_status
