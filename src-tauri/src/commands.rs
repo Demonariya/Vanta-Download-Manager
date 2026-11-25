@@ -3302,8 +3302,10 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
     let started_unix = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
-    let output_baseline = snapshot_dir_file_sizes(&out_dir);
-    let spotdl_baseline = output_baseline.clone();
+    // Both output discovery and spotDL growth tracking share the same immutable
+    // baseline; avoid duplicating a potentially large staging-directory map.
+    let output_baseline = Arc::new(snapshot_dir_file_sizes(&out_dir));
+    let spotdl_baseline = Arc::clone(&output_baseline);
 
     let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
         ema_speed: 0.0,
