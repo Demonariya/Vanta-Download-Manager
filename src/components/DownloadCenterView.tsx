@@ -96,6 +96,53 @@ interface DownloadCenterViewProps {
   installProgress?: Record<string, EngineInstallProgress>;
 }
 
+interface DownloadRowIdentityProps {
+  title: string;
+  thumbnail?: string | null;
+  isAudio: boolean;
+  ext?: string;
+  uploader?: string;
+  album?: string;
+  duration?: string;
+  compact?: boolean;
+}
+
+const DownloadRowIdentity = React.memo<DownloadRowIdentityProps>(({
+  title,
+  thumbnail,
+  isAudio,
+  ext,
+  uploader,
+  album,
+  duration,
+  compact = false,
+}) => {
+  const metadata = [uploader, album, duration, ext?.toUpperCase()].filter(Boolean).join(' · ');
+
+  if (compact) {
+    return (
+      <>
+        <MediaThumbnail src={thumbnail} title={title} isAudio={isAudio} ext={ext} size="sm" aspect={isAudio ? 'square' : 'video'} />
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-sm font-semibold text-[var(--vanta-text)]">{title}</h3>
+          <p className="mt-0.5 truncate text-[10px] text-[var(--vanta-muted)]">{metadata}</p>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2.5 min-w-0">
+      <MediaThumbnail src={thumbnail} title={title} isAudio={isAudio} ext={ext} size="md" aspect={isAudio ? 'square' : 'video'} />
+      <div className="min-w-0">
+        <h3 className="text-xs sm:text-sm font-medium text-[var(--vanta-text)] truncate">{title}</h3>
+        <p className="mt-0.5 text-[10px] text-[var(--vanta-muted)] truncate">{metadata}</p>
+      </div>
+    </div>
+  );
+});
+DownloadRowIdentity.displayName = 'DownloadRowIdentity';
+
 export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   tasks,
   queues,
@@ -653,13 +700,15 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
                       <span className="text-xs text-[var(--vanta-muted)] tabular-nums">{index + 1}</span>
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={task.is_audio_only || task.engine === 'spotdl'} ext={task.ext} size="md" aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'} />
-                        <div className="min-w-0">
-                          <h3 className="text-xs sm:text-sm font-medium text-[var(--vanta-text)] truncate">{task.title}</h3>
-                          <p className="mt-0.5 text-[10px] text-[var(--vanta-muted)] truncate">{[task.uploader, task.album, task.duration_string, task.ext?.toUpperCase()].filter(Boolean).join(' · ')}</p>
-                        </div>
-                      </div>
+                      <DownloadRowIdentity
+                        title={task.title}
+                        thumbnail={task.thumbnail}
+                        isAudio={task.is_audio_only || task.engine === 'spotdl'}
+                        ext={task.ext}
+                        uploader={task.uploader}
+                        album={task.album}
+                        duration={task.duration_string}
+                      />
                       {visibleColumns.engine && <span className="text-[11px] text-[var(--vanta-text-secondary)] truncate">{task.engine === 'spotdl' ? 'SpotDL' : 'yt-dlp'}</span>}
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 mb-1">
@@ -731,10 +780,16 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                     onClick={(event) => event.stopPropagation()}
                     className="mt-1 h-3.5 w-3.5 shrink-0 rounded accent-[var(--vanta-accent)]"
                   />
-                  <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={task.is_audio_only || task.engine === 'spotdl'} ext={task.ext} size="sm" aspect={task.is_audio_only || task.engine === 'spotdl' ? 'square' : 'video'} />
-                  <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-sm font-semibold text-[var(--vanta-text)]">{task.title}</h3>
-                    <p className="mt-0.5 truncate text-[10px] text-[var(--vanta-muted)]">{[task.uploader, task.album, task.duration_string, task.ext?.toUpperCase()].filter(Boolean).join(' · ')}</p>
+                  <DownloadRowIdentity
+                    title={task.title}
+                    thumbnail={task.thumbnail}
+                    isAudio={task.is_audio_only || task.engine === 'spotdl'}
+                    ext={task.ext}
+                    uploader={task.uploader}
+                    album={task.album}
+                    duration={task.duration_string}
+                    compact
+                  />
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--vanta-text-secondary)]">
                       <span className={`rounded-md px-2 py-0.5 font-medium ${getStatusColorClass(task.status)} bg-[var(--vanta-surface-2)]`}>{getStatusLabel(task.status)}</span>
                       <span>{sizeText}</span>
