@@ -88,6 +88,18 @@ describe('Unified media kind auto-detection', () => {
       'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     );
     assert.equal(resolveVideoFormatSelector('137', videoMeta.formats), '137+bestaudio/best');
+    assert.equal(
+      resolveVideoFormatSelector('silent-unknown-codec', [
+        { format_id: 'silent-unknown-codec', ext: 'webm', vcodec: 'vp9' },
+      ]),
+      'silent-unknown-codec+bestaudio/best'
+    );
+    assert.equal(
+      resolveVideoFormatSelector('audio-140', [
+        { format_id: 'audio-140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+      ]),
+      'audio-140'
+    );
 
     const codecSummary = summarizeVideoOptionCodecs(videoMeta.formats, '137+bestaudio/best');
     assert.ok(codecSummary);
