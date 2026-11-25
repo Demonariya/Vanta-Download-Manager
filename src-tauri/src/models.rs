@@ -133,8 +133,8 @@ impl Default for SchedulerSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            start_time: "01:00".to_string(),
-            stop_time: "06:00".to_string(),
+            start_time: "00:00".to_string(),
+            stop_time: "00:00".to_string(),
             pause_on_stop: true,
             days: vec![0, 1, 2, 3, 4, 5, 6],
         }
@@ -825,8 +825,8 @@ mod tests {
     fn test_scheduler_settings_defaults() {
         let sched = SchedulerSettings::default();
         assert!(!sched.enabled);
-        assert_eq!(sched.start_time, "01:00");
-        assert_eq!(sched.stop_time, "06:00");
+        assert_eq!(sched.start_time, "00:00");
+        assert_eq!(sched.stop_time, "00:00");
         assert!(sched.pause_on_stop);
         assert_eq!(sched.days, vec![0, 1, 2, 3, 4, 5, 6]);
     }
