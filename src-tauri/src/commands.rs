@@ -3271,6 +3271,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         completed_stream_downloaded: u64,
         last_activity_at: Instant,
         last_emit_at: Instant,
+        last_persist_at: Instant,
         spotdl_prev_bytes: u64,
         spotdl_prev_sample: Instant,
         detected_output_path: Option<String>,
@@ -3289,6 +3290,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         completed_stream_downloaded: 0,
         last_activity_at: Instant::now(),
         last_emit_at: Instant::now(),
+        last_persist_at: Instant::now(),
         spotdl_prev_bytes: 0,
         spotdl_prev_sample: Instant::now(),
         detected_output_path: None,
@@ -3659,7 +3661,15 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
                 if phase_or_status_changed || tel.last_emit_at.elapsed() >= Duration::from_millis(200) {
                     tel.last_emit_at = Instant::now();
-                    state.upsert_task(&current);
+
+                    // Keep the UI responsive at 5 Hz while limiting durable SQLite writes
+                    // to 1 Hz per task. Persist state transitions immediately.
+                    if phase_or_status_changed
+                        || tel.last_persist_at.elapsed() >= Duration::from_secs(1)
+                    {
+                        state.upsert_task(&current);
+                        tel.last_persist_at = Instant::now();
+                    }
                     let _ = app.emit("task_updated", &current);
                 }
             }
@@ -3699,6 +3709,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
 
                 if active_bytes > 0 && tel.last_emit_at.elapsed() >= Duration::from_millis(350) {
                     tel.last_emit_at = Instant::now();
+                    let status_changed = cur.status != TaskStatus::Downloading;
                     cur.status = TaskStatus::Downloading;
                     cur.percentage_known = false;
                     cur.downloaded_bytes = active_bytes;
@@ -3706,7 +3717,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     cur.speed_str = format!("{}/s", format_bytes_rust(tel.ema_speed));
                     cur.elapsed_seconds = started_instant.elapsed().as_secs();
                     cur.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
-                    state.upsert_task(&cur);
+
+                    if status_changed || tel.last_persist_at.elapsed() >= Duration::from_secs(1) {
+                        state.upsert_task(&cur);
+                        tel.last_persist_at = Instant::now();
+                    }
                     let _ = app.emit("task_updated", &cur);
                 }
             } else if tel.last_activity_at.elapsed() >= Duration::from_secs(15)
