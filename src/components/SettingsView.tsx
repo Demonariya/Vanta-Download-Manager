@@ -661,7 +661,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="number"
                 min="0"
-                max="10"
+                max="20"
                 value={form.max_retries}
                 onChange={(e) =>
                   setForm({ ...form, max_retries: parseInt(e.target.value, 10) || 0 })
@@ -677,6 +677,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="number"
                 min="0"
+                max="10000000"
                 value={form.global_bandwidth_limit_kbps}
                 onChange={(e) =>
                   setForm({
@@ -695,6 +696,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="number"
                 min="0"
+                max="10000000"
                 value={form.per_task_bandwidth_limit_kbps}
                 onChange={(e) =>
                   setForm({
@@ -764,9 +766,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="number"
               min="1"
-              max="120"
+              max="300"
               value={form.retry_delay_seconds}
-              onChange={(e) => setForm({ ...form, retry_delay_seconds: Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 1)) })}
+              onChange={(e) => setForm({ ...form, retry_delay_seconds: Math.max(1, Math.min(300, parseInt(e.target.value, 10) || 1)) })}
               className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 font-mono tabular-nums text-[var(--vanta-text)]"
             />
             <p className="text-[10px] text-[var(--vanta-muted)]">Used when automatic retry is enabled.</p>
@@ -785,7 +787,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="range"
                 min="1"
-                max="10"
+                max="16"
                 value={form.max_concurrent_downloads}
                 onChange={(e) =>
                   setForm({ ...form, max_concurrent_downloads: parseInt(e.target.value, 10) })
