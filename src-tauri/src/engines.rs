@@ -2303,7 +2303,10 @@ impl EngineManager {
     }
 
     pub fn build_ytdlp_request_args(url: &str, settings: &AppSettings) -> Result<Vec<String>, String> {
-        let mut args = Vec::new();
+        // Ignore machine/user yt-dlp config files: external defaults such as --simulate,
+        // --skip-download, download-archive, or a conflicting output template must not
+        // silently override VANTA's managed download pipeline.
+        let mut args = vec!["--ignore-config".to_string()];
 
         let ua = settings
             .user_agent
@@ -3372,6 +3375,7 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         )
         .expect("valid YouTube request arguments");
 
+        assert!(args.iter().any(|arg| arg == "--ignore-config"));
         assert!(!args.windows(2).any(|pair| {
             pair[0] == "--extractor-args"
                 && pair[1].starts_with("youtube:player_client=")
