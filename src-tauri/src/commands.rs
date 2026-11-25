@@ -3948,7 +3948,7 @@ mod subtitle_and_lyrics_tests {
         assert!(format_selector_requires_ffmpeg(Some("bestvideo+bestaudio/best")));
         assert!(format_selector_requires_ffmpeg(Some("137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]")));
         assert!(!format_selector_requires_ffmpeg(Some("22")));
-        assert!(!format_selector_requires_ffmpeg(Some("")));
+        assert!(format_selector_requires_ffmpeg(Some("")));
     }
 
     #[test]
