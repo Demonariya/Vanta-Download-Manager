@@ -2456,6 +2456,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let mut last_error = String::new();
             let mut last_output_file: Option<PathBuf> = None;
             let mut accumulated_completed_bytes: u64 = 0;
+            let mut integrity_logs: Vec<TaskLogEntry> = Vec::new();
 
             for (idx, track_url) in ordered_tracks.iter().enumerate() {
                 if state.is_shutting_down.load(Ordering::SeqCst) {
@@ -2470,12 +2471,51 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 let track_started_unix = chrono::Utc::now().timestamp();
                 let dir_baseline = snapshot_dir_file_sizes(&track_dir);
                 if let Some(existing_output) = find_track_audio_output(&track_dir, idx + 1) {
-                    completed_count += 1;
-                    if let Ok(meta) = fs::metadata(&existing_output) {
-                        accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                    let reusable = if settings.verify_media_on_complete {
+                        match verify_media_output(&existing_output, true) {
+                            Ok((_, _, _, _, checksum)) => {
+                                integrity_logs.push(TaskLogEntry {
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    level: "info".to_string(),
+                                    message: format!(
+                                        "Reused verified playlist track '{}'. SHA-256: {}",
+                                        existing_output.file_name().and_then(|name| name.to_str()).unwrap_or("track"),
+                                        checksum
+                                    ),
+                                });
+                                true
+                            }
+                            Err(error) => {
+                                logging::warn(
+                                    "integrity",
+                                    &format!(
+                                        "Discarding incomplete staged playlist track '{}': {}",
+                                        existing_output.display(), error
+                                    ),
+                                );
+                                if let Err(remove_error) = fs::remove_file(&existing_output) {
+                                    failed_count += 1;
+                                    last_error = format!(
+                                        "Could not remove invalid staged track '{}': {}",
+                                        existing_output.display(), remove_error
+                                    );
+                                    continue;
+                                }
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    };
+
+                    if reusable {
+                        completed_count += 1;
+                        if let Ok(meta) = fs::metadata(&existing_output) {
+                            accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                        }
+                        last_output_file = Some(existing_output);
+                        continue;
                     }
-                    last_output_file = Some(existing_output);
-                    continue;
                 }
                 let mut prev_track_bytes: u64 = 0;
                 let mut prev_sample_at = Instant::now();
@@ -2641,6 +2681,30 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                                         .filter(|p| !dir_baseline.contains_key(p)))
                                     .or_else(|| find_track_audio_output(&track_dir, idx + 1));
                                 if let Some(found) = newly_created {
+                                    if settings.verify_media_on_complete {
+                                        match verify_media_output(&found, true) {
+                                            Ok((_, _, _, _, checksum)) => {
+                                                integrity_logs.push(TaskLogEntry {
+                                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                                    level: "info".to_string(),
+                                                    message: format!(
+                                                        "Verified playlist track '{}'. SHA-256: {}",
+                                                        found.file_name().and_then(|name| name.to_str()).unwrap_or("track"),
+                                                        checksum
+                                                    ),
+                                                });
+                                            }
+                                            Err(error) => {
+                                                failed_count += 1;
+                                                last_error = format!(
+                                                    "Track {} failed media integrity verification: {}",
+                                                    idx + 1, error
+                                                );
+                                                let _ = fs::remove_file(&found);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     completed_count += 1;
                                     if let Ok(m) = fs::metadata(&found) {
                                         accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(m.len());
@@ -2675,6 +2739,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             final_t.tracks_requested = Some(total_tracks);
             final_t.tracks_completed = Some(completed_count);
             final_t.tracks_failed = Some(failed_count);
+            final_t.logs.extend(integrity_logs);
+            if final_t.logs.len() > 100 {
+                let excess = final_t.logs.len() - 100;
+                final_t.logs.drain(..excess);
+            }
             final_t.active_connections = 0;
             final_t.speed_bytes_per_sec = 0.0;
             final_t.speed_str = "0 B/s".to_string();
