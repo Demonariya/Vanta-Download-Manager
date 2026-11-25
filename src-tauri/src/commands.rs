@@ -2086,6 +2086,16 @@ async fn run_download_task(app: AppHandle, task_id: String) {
 
     if let Err(join_error) = worker_result {
         let state = app.state::<AppState>();
+        // A panicking blocking worker may bypass its normal process-registry cleanup.
+        // Remove the stale PID under the mutex, then terminate it after releasing the lock.
+        let orphaned_pid = {
+            let mut processes = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+            processes.remove(&task_id)
+        };
+        if let Some(pid) = orphaned_pid {
+            process::kill_process_tree(pid);
+        }
+
         let reason = if join_error.is_panic() {
             format!("Download worker panicked: {}", join_error)
         } else {
