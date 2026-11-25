@@ -478,6 +478,18 @@ pub async fn create_task(
     logging::info("queue", &format!("Created task '{}' ({})", task.id, task.engine));
     schedule_next(&app, &state);
 
+    // Record the exact scheduler gate when a newly-created task remains queued.
+    // This makes "download did not start" diagnosable from the global log.
+    if let Some(persisted) = state.get_task_by_id(&task.id) {
+        if persisted.status == TaskStatus::Queued {
+            let reason = queued_task_block_reason(&state, &persisted);
+            logging::warn(
+                "queue",
+                &format!("Task '{}' remains queued: {}", persisted.id, reason),
+            );
+        }
+    }
+
     Ok(task)
 }
 
@@ -1562,6 +1574,52 @@ pub fn scheduler_tick(app: &AppHandle) {
     }
 }
 
+fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
+    if state.is_shutting_down.load(Ordering::SeqCst) {
+        return "application shutdown is in progress".to_string();
+    }
+
+    let settings = state.get_settings();
+    if !scheduler_window_is_open(&settings) {
+        return "the configured scheduler window is currently closed".to_string();
+    }
+
+    if state
+        .get_queues()
+        .iter()
+        .any(|queue| queue.id == task.queue_id && queue.is_paused)
+    {
+        return format!("queue '{}' is paused", task.queue_id);
+    }
+
+    let active_count = state
+        .get_tasks()
+        .iter()
+        .filter(|candidate| candidate.status.is_active())
+        .count();
+    let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
+    if active_count >= max_concurrent {
+        return format!(
+            "all download slots are occupied ({}/{})",
+            active_count, max_concurrent
+        );
+    }
+
+    "the scheduler did not select this task; inspect queue order and task state".to_string()
+}
+
+fn retry_backoff_seconds(base_delay_seconds: u32, retry_number: u32) -> u64 {
+    if base_delay_seconds == 0 || retry_number == 0 {
+        return 0;
+    }
+
+    let exponent = retry_number.saturating_sub(1).min(6);
+    let multiplier = 2u64.saturating_pow(exponent);
+    u64::from(base_delay_seconds)
+        .saturating_mul(multiplier)
+        .min(300)
+}
+
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
@@ -1651,6 +1709,50 @@ async fn run_download_task(app: AppHandle, task_id: String) {
     }
 
     let state = app.state::<AppState>();
+
+    // Retry attempts use bounded exponential backoff instead of immediately
+    // re-entering the queue and repeatedly hitting a transient server failure.
+    if let Some(mut task) = state.get_task_by_id(&task_id) {
+        let is_retry_queued = task.status == TaskStatus::Queued
+            && (task.current_phase.starts_with("Retrying (")
+                || task.current_phase.starts_with("HTTP 410 detected."));
+        if is_retry_queued {
+            let settings = state.get_settings();
+            let delay_seconds =
+                retry_backoff_seconds(settings.retry_delay_seconds, task.retries);
+            if delay_seconds > 0 {
+                task.status = TaskStatus::Connecting;
+                task.current_phase = format!("Retry wait: next attempt in {}s", delay_seconds);
+                state.upsert_task(&task);
+                let _ = app.emit("task_updated", &task);
+                logging::info(
+                    "queue",
+                    &format!(
+                        "Task '{}' retry {}/{} scheduled after {}s.",
+                        task.id, task.retries, task.max_retries, delay_seconds
+                    ),
+                );
+
+                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+
+                if let Some(mut current) = state.get_task_by_id(&task_id) {
+                    // Respect user pause/cancel actions issued during the backoff.
+                    if current.status == TaskStatus::Connecting
+                        && current.current_phase.starts_with("Retry wait:")
+                    {
+                        current.status = TaskStatus::Queued;
+                        current.current_phase = format!(
+                            "Retrying now ({}/{}).",
+                            current.retries, current.max_retries
+                        );
+                        state.upsert_task(&current);
+                        let _ = app.emit("task_updated", &current);
+                    }
+                }
+            }
+        }
+    }
+
     schedule_next(&app, &state);
 }
 
@@ -3412,6 +3514,18 @@ mod scheduler_window_tests {
         assert!(!should_resume_queue_paused_task(
             "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
         ));
+    }
+
+    #[test]
+    fn retry_backoff_uses_exponential_delay_and_caps_at_five_minutes() {
+        assert_eq!(retry_backoff_seconds(5, 0), 0);
+        assert_eq!(retry_backoff_seconds(0, 3), 0);
+        assert_eq!(retry_backoff_seconds(5, 1), 5);
+        assert_eq!(retry_backoff_seconds(5, 2), 10);
+        assert_eq!(retry_backoff_seconds(5, 3), 20);
+        assert_eq!(retry_backoff_seconds(5, 4), 40);
+        assert_eq!(retry_backoff_seconds(60, 7), 300);
+        assert_eq!(retry_backoff_seconds(u32::MAX, u32::MAX), 300);
     }
 
     #[test]
