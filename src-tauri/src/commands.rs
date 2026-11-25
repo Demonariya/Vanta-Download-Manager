@@ -3295,6 +3295,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         last_persist_at: Instant,
         spotdl_prev_bytes: u64,
         spotdl_prev_sample: Instant,
+        spotdl_last_scan_at: Instant,
+        spotdl_last_bytes: u64,
         detected_output_path: Option<String>,
     }
 
@@ -3314,6 +3316,8 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         last_persist_at: Instant::now(),
         spotdl_prev_bytes: 0,
         spotdl_prev_sample: Instant::now(),
+        spotdl_last_scan_at: Instant::now(),
+        spotdl_last_bytes: 0,
         detected_output_path: None,
     });
 
@@ -3711,22 +3715,30 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let mut tel = loop_telemetry.borrow_mut();
 
             if is_spotdl {
-                let active_bytes = measure_dir_growth_bytes(&out_dir, &spotdl_baseline);
-                let dt = tel.spotdl_prev_sample.elapsed().as_secs_f64();
-                if dt >= 0.35 && active_bytes >= tel.spotdl_prev_bytes {
-                    let delta = active_bytes - tel.spotdl_prev_bytes;
-                    if delta > 0 {
-                        tel.last_activity_at = Instant::now();
+                // Recursive metadata scans can be expensive for large playlists. Sample
+                // the staging tree at 700 ms, while keeping UI progress emissions at 350 ms
+                // by reusing the most recent byte sample between scans.
+                if tel.spotdl_last_scan_at.elapsed() >= Duration::from_millis(700) {
+                    let active_bytes = measure_dir_growth_bytes(&out_dir, &spotdl_baseline);
+                    let dt = tel.spotdl_prev_sample.elapsed().as_secs_f64();
+                    if dt > 0.0 && active_bytes >= tel.spotdl_prev_bytes {
+                        let delta = active_bytes - tel.spotdl_prev_bytes;
+                        if delta > 0 {
+                            tel.last_activity_at = Instant::now();
+                        }
+                        let inst_speed = delta as f64 / dt;
+                        tel.ema_speed = if tel.ema_speed == 0.0 {
+                            inst_speed
+                        } else {
+                            0.35 * inst_speed + 0.65 * tel.ema_speed
+                        };
+                        tel.spotdl_prev_bytes = active_bytes;
+                        tel.spotdl_prev_sample = Instant::now();
                     }
-                    let inst_speed = delta as f64 / dt;
-                    tel.ema_speed = if tel.ema_speed == 0.0 {
-                        inst_speed
-                    } else {
-                        0.35 * inst_speed + 0.65 * tel.ema_speed
-                    };
-                    tel.spotdl_prev_bytes = active_bytes;
-                    tel.spotdl_prev_sample = Instant::now();
+                    tel.spotdl_last_bytes = active_bytes;
+                    tel.spotdl_last_scan_at = Instant::now();
                 }
+                let active_bytes = tel.spotdl_last_bytes;
 
                 if active_bytes > 0 && tel.last_emit_at.elapsed() >= Duration::from_millis(350) {
                     tel.last_emit_at = Instant::now();
