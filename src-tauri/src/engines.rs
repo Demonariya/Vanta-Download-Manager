@@ -2424,6 +2424,7 @@ impl EngineManager {
             || authority.contains('\'')
             || authority.contains(';')
             || authority.contains('|')
+            || authority.contains('@')
         {
             return Err("Malformed URL host. Check the URL and try again.".to_string());
         }
@@ -3389,6 +3390,7 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert!(EngineManager::validate_inspection_url("javascript:alert(1)").is_err());
         assert!(EngineManager::validate_inspection_url("https://example.com/v?a=1 b=2").is_err());
         assert!(EngineManager::validate_inspection_url("https://").is_err());
+        assert!(EngineManager::validate_inspection_url("https://user:pass@youtube.com/watch?v=test").is_err());
 
         for generic in [
             "https://cdn.example.com/release.zip",
