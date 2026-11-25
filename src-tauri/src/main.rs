@@ -134,7 +134,7 @@ fn main() {
             get_tasks, create_task, import_history, pause_task, resume_task, cancel_task, retry_task,
             delete_task, delete_downloaded_file, pause_all, resume_all, clear_completed,
             clear_failed, clear_all, move_task, get_queues, create_queue, rename_queue,
-            delete_queue, start_queue, stop_queue, move_tasks_to_queue, update_task_meta,
+            delete_queue, start_queue, stop_queue, update_queue_limits, move_tasks_to_queue, update_task_meta,
             rename_task_file, bulk_task_action, get_settings, save_settings, reset_settings,
             validate_python_executable, browse_python_executable, get_notifications,
             clear_notifications, get_engine_status, get_managed_engine_info, install_engine,
