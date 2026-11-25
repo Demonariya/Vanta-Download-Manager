@@ -10,6 +10,7 @@ import {
   filterAndSortTasks,
   computeHistoryStats,
   calculateSidebarTaskStats,
+  calculateQueueStatusCounts,
 } from './queue-logic';
 import { DownloadTask } from '../types';
 
@@ -184,4 +185,19 @@ test('calculateSidebarTaskStats aggregates badges and queue counts in one pass',
   assert.equal(stats.queueCounts.get('main'), 2);
   assert.equal(stats.queueCounts.get('music'), 2);
   assert.equal(stats.queueCounts.get('video'), 1);
+});
+
+test('calculateQueueStatusCounts aggregates paused, completed, and failed tasks in one pass', () => {
+  const tasks = [
+    makeTask('1', { status: 'paused' }),
+    makeTask('2', { status: 'completed' }),
+    makeTask('3', { status: 'failed' }),
+    makeTask('4', { status: 'queued' }),
+    makeTask('5', { status: 'completed' }),
+  ];
+  assert.deepEqual(calculateQueueStatusCounts(tasks), {
+    paused: 1,
+    completed: 2,
+    failed: 1,
+  });
 });
