@@ -1333,13 +1333,6 @@ pub async fn get_engine_status(
             .unwrap_or_else(|e| e.into_inner());
         *cached = Some((Instant::now(), status.clone()));
     }
-    {
-        let mut cache = state
-            .cached_engine_status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *cache = Some((Instant::now(), status.clone()));
-    }
     Ok(status)
 }
 
