@@ -1708,51 +1708,63 @@ async fn run_download_task(app: AppHandle, task_id: String) {
         }
     }
 
-    let state = app.state::<AppState>();
-
-    // Retry attempts use bounded exponential backoff instead of immediately
-    // re-entering the queue and repeatedly hitting a transient server failure.
-    if let Some(mut task) = state.get_task_by_id(&task_id) {
-        let is_retry_queued = task.status == TaskStatus::Queued
-            && (task.current_phase.starts_with("Retrying (")
-                || task.current_phase.starts_with("HTTP 410 detected."));
-        if is_retry_queued {
-            let settings = state.get_settings();
-            let delay_seconds =
-                retry_backoff_seconds(settings.retry_delay_seconds, task.retries);
-            if delay_seconds > 0 {
-                task.status = TaskStatus::Connecting;
-                task.current_phase = format!("Retry wait: next attempt in {}s", delay_seconds);
-                state.upsert_task(&task);
-                let _ = app.emit("task_updated", &task);
-                logging::info(
-                    "queue",
-                    &format!(
-                        "Task '{}' retry {}/{} scheduled after {}s.",
-                        task.id, task.retries, task.max_retries, delay_seconds
-                    ),
-                );
-
-                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
-
-                if let Some(mut current) = state.get_task_by_id(&task_id) {
-                    // Respect user pause/cancel actions issued during the backoff.
-                    if current.status == TaskStatus::Connecting
-                        && current.current_phase.starts_with("Retry wait:")
-                    {
-                        current.status = TaskStatus::Queued;
-                        current.current_phase = format!(
-                            "Retrying now ({}/{}).",
-                            current.retries, current.max_retries
-                        );
-                        state.upsert_task(&current);
-                        let _ = app.emit("task_updated", &current);
-                    }
+    // Read and persist the retry gate in a short scope so no borrowed AppState
+    // handle is held across the async backoff sleep.
+    let retry_delay = {
+        let state = app.state::<AppState>();
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            let is_retry_queued = task.status == TaskStatus::Queued
+                && (task.current_phase.starts_with("Retrying (")
+                    || task.current_phase.starts_with("HTTP 410 detected."));
+            if is_retry_queued {
+                let settings = state.get_settings();
+                let delay_seconds =
+                    retry_backoff_seconds(settings.retry_delay_seconds, task.retries);
+                if delay_seconds > 0 {
+                    task.status = TaskStatus::Connecting;
+                    task.current_phase = format!("Retry wait: next attempt in {}s", delay_seconds);
+                    state.upsert_task(&task);
+                    let _ = app.emit("task_updated", &task);
+                    logging::info(
+                        "queue",
+                        &format!(
+                            "Task '{}' retry {}/{} scheduled after {}s.",
+                            task.id, task.retries, task.max_retries, delay_seconds
+                        ),
+                    );
+                    Some(delay_seconds)
+                } else {
+                    None
                 }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(delay_seconds) = retry_delay {
+        tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+
+        let state = app.state::<AppState>();
+        if let Some(mut current) = state.get_task_by_id(&task_id) {
+            // Respect user pause/cancel actions issued during the backoff.
+            if current.status == TaskStatus::Connecting
+                && current.current_phase.starts_with("Retry wait:")
+            {
+                current.status = TaskStatus::Queued;
+                current.current_phase = format!(
+                    "Retrying now ({}/{}).",
+                    current.retries, current.max_retries
+                );
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
             }
         }
     }
 
+    let state = app.state::<AppState>();
     schedule_next(&app, &state);
 }
 
