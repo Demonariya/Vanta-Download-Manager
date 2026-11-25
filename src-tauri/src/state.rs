@@ -36,6 +36,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub db: Mutex<Connection>,
     pub settings_file_lock: Mutex<()>,
+    /// Serializes queue scheduling snapshots and task claims across concurrent commands.
+    pub scheduler_lock: Mutex<()>,
     pub active_processes: Arc<Mutex<HashMap<String, u32>>>,
     pub active_inspections: Arc<Mutex<HashMap<String, TrackedInspection>>>,
     pub cached_engine_status: Mutex<Option<(Instant, EngineStatusMap)>>,
@@ -357,6 +359,7 @@ impl AppState {
             data_dir: db_dir,
             db: Mutex::new(conn),
             settings_file_lock: Mutex::new(()),
+            scheduler_lock: Mutex::new(()),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
             active_inspections: Arc::new(Mutex::new(HashMap::new())),
             cached_engine_status: Mutex::new(None),
