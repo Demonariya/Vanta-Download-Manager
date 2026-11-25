@@ -338,9 +338,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   ];
 
   return (
-    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-4">
+    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-5">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
           <h1 className="text-base font-semibold text-[var(--vanta-text)]">
             Settings &amp; Preferences
