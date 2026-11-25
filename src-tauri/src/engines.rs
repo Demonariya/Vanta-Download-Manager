@@ -3360,6 +3360,33 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
     }
 
     #[test]
+    fn youtube_requests_use_maintained_default_clients_and_available_js_runtime() {
+        let mut settings = AppSettings::default();
+        settings.cookies_browser = Some("none".to_string());
+        settings.cookies_file = None;
+
+        let args = EngineManager::build_ytdlp_request_args(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &settings,
+        )
+        .expect("valid YouTube request arguments");
+
+        assert!(!args.windows(2).any(|pair| {
+            pair[0] == "--extractor-args"
+                && pair[1].starts_with("youtube:player_client=")
+        }));
+
+        let detected_runtime = ["deno", "node", "bun", "quickjs"]
+            .into_iter()
+            .find(|runtime| EngineManager::find_executable(runtime).is_some());
+        if let Some(runtime) = detected_runtime {
+            assert!(args.windows(2).any(|pair| {
+                pair[0] == "--js-runtimes" && pair[1] == runtime
+            }));
+        }
+    }
+
+    #[test]
     fn test_parse_video_dimensions_supports_extractor_variants() {
         assert_eq!(
             parse_video_dimensions(Some("1920x1080"), None),
