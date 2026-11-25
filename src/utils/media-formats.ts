@@ -62,6 +62,36 @@ export function detectInspectedMediaKind(
   return 'video';
 }
 
+export function detectMediaProvider(url: string): string {
+  const trimmed = (url || '').trim();
+  if (isSpotifyUrl(trimmed)) return 'Spotify';
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase().replace(/^www\\./, '').replace(/^m\\./, '');
+    const matches = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (matches('youtube.com') || host === 'youtu.be' || matches('youtube-nocookie.com')) return 'YouTube';
+    if (matches('youtu.be')) return 'YouTube';
+    if (matches('vimeo.com')) return 'Vimeo';
+    if (matches('soundcloud.com') || matches('snd.sc')) return 'SoundCloud';
+    if (matches('dailymotion.com') || host === 'dai.ly') return 'Dailymotion';
+    if (matches('twitch.tv') || matches('twitchcdn.net')) return 'Twitch';
+    if (matches('facebook.com') || matches('fb.watch')) return 'Facebook';
+    if (matches('instagram.com')) return 'Instagram';
+    if (matches('tiktok.com')) return 'TikTok';
+    if (matches('x.com') || matches('twitter.com')) return 'X';
+    if (matches('reddit.com') || matches('redd.it')) return 'Reddit';
+    if (matches('bandcamp.com')) return 'Bandcamp';
+    if (matches('mixcloud.com')) return 'Mixcloud';
+
+    const ext = parsed.pathname.match(/\\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
+    if (ext && AUDIO_EXT_SET.has(ext)) return 'Direct Audio';
+    if (ext && /^(mp4|m4v|mov|mkv|webm|avi|flv|mpeg|mpg|ts|m3u8|mpd)$/.test(ext)) return 'Direct Video';
+    return 'Media Link';
+  } catch {
+    return 'Media Link';
+  }
+}
+
 export function formatMediaRoutingLabel(
   metadata: MediaMetadata | null,
   mediaKind: 'audio' | 'video',
@@ -74,7 +104,9 @@ export function formatMediaRoutingLabel(
       : 'Music';
     return `Spotify ${kind} · spotDL`;
   }
-  return mediaKind === 'audio' ? 'Audio · yt-dlp' : 'Video · yt-dlp';
+  const provider = detectMediaProvider(url);
+  const mode = mediaKind === 'audio' ? 'Audio' : 'Video';
+  return `${provider} · ${mode} · yt-dlp`;
 }
 
 export function summarizeVideoOptionCodecs(
