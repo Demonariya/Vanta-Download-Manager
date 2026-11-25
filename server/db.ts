@@ -125,7 +125,7 @@ export function validateSettings(settings: AppSettings): void {
     }
   }
   const scheduler = settings.scheduler || DEFAULT_SCHEDULER_SETTINGS;
-  const validTime = (value: string) => /^([01]\\d|2[0-3]):[0-5]\\d$/.test(value);
+  const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
   if (!validTime(scheduler.start_time) || !validTime(scheduler.stop_time)) {
     throw new Error('Scheduler start and stop times must use valid HH:mm values.');
   }
