@@ -100,7 +100,7 @@ fn main() {
             let scheduler_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                     scheduler_tick(&scheduler_app);
                 }
             });
