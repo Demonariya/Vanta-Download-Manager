@@ -110,6 +110,35 @@ describe('Unified media kind auto-detection', () => {
   });
 });
 
+describe('Truthful video format selection', () => {
+  it('does not advertise fixed resolutions when extractor reports no video stream', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+    ]);
+    assert.equal(options.length, 1);
+    assert.equal(options[0].id, 'best');
+  });
+
+  it('only advertises heights present in real video formats', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]);
+    assert.deepEqual(options.slice(1).map((option) => option.height), [1080, 360]);
+    assert.equal(options.some((option) => option.height === 2160), false);
+    assert.equal(options[1].formatSelector, 'bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+  });
+});
+
+describe('Media provider recognition', () => {
+  it('recognizes common supported media hosts without matching deceptive suffixes', () => {
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://www.youtube.com/watch?v=abc'), 'YouTube · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://youtu.be/abc'), 'YouTube · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'audio', 'https://soundcloud.com/artist/track'), 'SoundCloud · Audio · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://notyoutube.com/watch?v=abc'), 'Media Link · Video · yt-dlp');
+  });
+});
+
 describe('Unified workflow architectural guarantee', () => {
   it('ensures no separate Music Workflow UI or duplicate TopBar URL form remains', () => {
     const root = process.cwd();
