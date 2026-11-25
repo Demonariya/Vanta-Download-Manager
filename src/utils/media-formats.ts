@@ -119,7 +119,10 @@ export function summarizeVideoOptionCodecs(
   );
   if (videoStreams.length === 0) return null;
 
-  const baseId = (selectedFormatId || '').split('+')[0].trim();
+  // Resolve the primary stream ID from selectors such as "137+bestaudio/best".
+  // Ignore slash fallbacks so the codec summary reflects the pinned quality choice.
+  const primarySelector = (selectedFormatId || '').split('/')[0];
+  const baseId = primarySelector.split('+')[0].trim();
   let matched =
     videoStreams.find((f) => f.format_id === baseId) ||
     [...videoStreams].sort((a, b) => (b.height || 0) - (a.height || 0))[0];
