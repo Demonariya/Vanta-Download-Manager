@@ -175,11 +175,29 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       return nextIds.length === current.length ? current : nextIds;
     });
   }, [tasks]);
-  const pausableSelectedIds = selectedTasks
-    .filter((task) => ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status))
-    .map((task) => task.id);
-  const resumableSelectedIds = selectedTasks.filter((task) => task.status === 'paused').map((task) => task.id);
-  const retryableSelectedIds = selectedTasks.filter((task) => ['failed','cancelled'].includes(task.status)).map((task) => task.id);
+  const {
+    pausableSelectedIds,
+    resumableSelectedIds,
+    retryableSelectedIds,
+  } = useMemo(() => {
+    const pausable: string[] = [];
+    const resumable: string[] = [];
+    const retryable: string[] = [];
+    for (const task of selectedTasks) {
+      if (['connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying', 'queued'].includes(task.status)) {
+        pausable.push(task.id);
+      } else if (task.status === 'paused') {
+        resumable.push(task.id);
+      } else if (task.status === 'failed' || task.status === 'cancelled') {
+        retryable.push(task.id);
+      }
+    }
+    return {
+      pausableSelectedIds: pausable,
+      resumableSelectedIds: resumable,
+      retryableSelectedIds: retryable,
+    };
+  }, [selectedTasks]);
   const cancellableSelectedIds = pausableSelectedIds;
 
   const activeCount = useMemo(() => getActiveDownloadCount(queueTasks), [queueTasks]);
