@@ -691,7 +691,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               </button>
             </div>
           ) : visibleTasks.map((task, index) => {
-            const isRunning = ['downloading','connecting','resuming','inspecting','processing','muxing','verifying'].includes(task.status);
+            const isRunning = RUNNING_TASK_STATUSES.has(task.status);
             const isSelected = selectedIdSet.has(task.id);
             const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress_percentage || 0));
             const percentKnown = task.status === 'completed' || (task.percentage_known !== false && (task.total_bytes > 0 || task.progress_percentage > 0));
@@ -812,7 +812,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             <div className="my-1 border-t border-[var(--vanta-border)]" />
             {contextMenu.targetIds.some((id) => {
               const task = tasks.find((item) => item.id === id);
-              return task && ['connecting','downloading','resuming','inspecting','processing','muxing','verifying','queued'].includes(task.status);
+              return task && PAUSABLE_TASK_STATUSES.has(task.status);
             }) && (
               <button type="button" role="menuitem" onClick={() => {
                 const ids = contextMenu.targetIds.filter((id) => {
