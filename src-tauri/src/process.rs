@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn streamed_child_is_terminated_when_guard_is_dropped() {
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"])
+        command.args(["-c", "exec sleep 30"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = command.spawn().expect("spawn test child");
