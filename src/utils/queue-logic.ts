@@ -14,6 +14,51 @@ const priorityWeight: Record<TaskPriority, number> = {
 export type SortField = 'queue' | 'created_at' | 'title' | 'size' | 'progress' | 'speed';
 export type SortDirection = 'asc' | 'desc';
 
+export interface SidebarTaskStats {
+  downloading: number;
+  queued: number;
+  paused: number;
+  completed: number;
+  unfinished: number;
+  failed: number;
+  music: number;
+  video: number;
+  queueCounts: Map<string, number>;
+}
+
+/** Computes all sidebar badges and queue counts in one linear pass. */
+export function calculateSidebarTaskStats(tasks: DownloadTask[]): SidebarTaskStats {
+  const stats: SidebarTaskStats = {
+    downloading: 0,
+    queued: 0,
+    paused: 0,
+    completed: 0,
+    unfinished: 0,
+    failed: 0,
+    music: 0,
+    video: 0,
+    queueCounts: new Map(),
+  };
+
+  for (const task of tasks) {
+    const queueId = task.queue_id || 'main';
+    stats.queueCounts.set(queueId, (stats.queueCounts.get(queueId) || 0) + 1);
+
+    if (['connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying'].includes(task.status)) {
+      stats.downloading += 1;
+    }
+    if (task.status === 'queued') stats.queued += 1;
+    if (task.status === 'paused') stats.paused += 1;
+    if (task.status === 'completed') stats.completed += 1;
+    if (task.status !== 'completed' && task.status !== 'cancelled') stats.unfinished += 1;
+    if (task.status === 'failed') stats.failed += 1;
+    if (task.is_audio_only || task.engine === 'spotdl') stats.music += 1;
+    else stats.video += 1;
+  }
+
+  return stats;
+}
+
 export interface HistoryStats {
   totalCompleted: number;
   totalFailed: number;
