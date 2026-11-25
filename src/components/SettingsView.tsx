@@ -116,7 +116,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         : storedScheduler;
       setForm({ ...settings, scheduler });
       if (migrateLegacyDefault) {
-        void onSaveSettings({ scheduler }).catch((error: any) => {
+        void Promise.resolve(onSaveSettings({ scheduler })).catch((error: any) => {
           setSaveError(error?.message || 'Could not migrate the default scheduler window.');
         });
       }
