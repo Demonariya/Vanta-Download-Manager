@@ -2327,8 +2327,18 @@ impl EngineManager {
                 || host == "youtube-nocookie.com"
                 || host.ends_with(".youtube-nocookie.com")
             {
-                args.push("--extractor-args".to_string());
-                args.push("youtube:player_client=default,web_embedded".to_string());
+                // Let yt-dlp select its maintained default YouTube player clients.
+                // Hard-coding an old client list can suppress newer clients and
+                // reduce the formats returned by current YouTube responses.
+                // Enable a locally installed JS runtime so modern player challenges
+                // can be solved and higher-resolution formats are not silently absent.
+                let js_runtime = ["deno", "node", "bun", "quickjs"]
+                    .into_iter()
+                    .find(|runtime| Self::find_executable(runtime).is_some());
+                if let Some(runtime) = js_runtime {
+                    args.push("--js-runtimes".to_string());
+                    args.push(runtime.to_string());
+                }
             }
         }
 
