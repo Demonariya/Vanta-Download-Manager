@@ -436,7 +436,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   ].join(' ');
   const tableGridClassName = 'grid items-center gap-2.5 px-3 sm:px-4';
   return (
-    <div className="flex min-h-0 flex-col gap-2.5">
+    <div className="flex min-h-0 flex-col gap-3">
       {/* Missing Engine Inline Alert (only shown when missing) */}
       {missingRequiredEngines.length > 0 && (
         <div className="px-4 py-3 rounded-xl border border-amber-500/35 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -466,7 +466,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       )}
 
       {/* Filter, Sort & Queue Action Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-2.5 px-4 py-2.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div className="flex items-center gap-3 min-w-0">
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Downloads</h2>
