@@ -212,7 +212,7 @@ pub fn import_history(
     let mut imported_count = 0usize;
     for mut task in imported_tasks {
         if !matches!(
-            task.status,
+            &task.status,
             TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
         ) {
             return Err("History import only accepts completed, failed, or cancelled records.".to_string());
@@ -261,8 +261,9 @@ pub fn import_history(
         if task.thumbnail.as_deref().is_some_and(|url| !crate::is_valid_thumbnail_url(url)) {
             task.thumbnail = None;
         }
-        if task.logs.len() > 100 {
-            task.logs.drain(..task.logs.len() - 100);
+        let excess_logs = task.logs.len().saturating_sub(100);
+        if excess_logs > 0 {
+            task.logs.drain(..excess_logs);
         }
         for entry in &mut task.logs {
             entry.message = logging::redact_secrets(&entry.message);
