@@ -16,8 +16,10 @@ use id3::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -31,6 +33,110 @@ impl<'a> Drop for InspectionDropGuard<'a> {
     fn drop(&mut self) {
         self.state.remove_inspection(&self.request_id);
     }
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not open output for SHA-256 verification: {}", error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not read output for SHA-256 verification: {}", error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_media_output(
+    path: &Path,
+    expect_audio: bool,
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>, String), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect downloaded output: {}", error))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("The downloaded output is empty or is not a regular file.".to_string());
+    }
+
+    let (audio_summary, audio_codec, video_codec, resolution) =
+        EngineManager::verify_media_file(path).ok_or_else(|| {
+            "ffprobe could not parse the completed media file. The output may be truncated or corrupt.".to_string()
+        })?;
+
+    let has_expected_stream = if expect_audio {
+        audio_codec.is_some()
+    } else {
+        video_codec.is_some()
+    };
+    if !has_expected_stream {
+        return Err(if expect_audio {
+            "The completed file does not contain a readable audio stream.".to_string()
+        } else {
+            "The completed file does not contain a readable video stream.".to_string()
+        });
+    }
+
+    let checksum = sha256_file(path)?;
+    Ok((audio_summary, audio_codec, video_codec, resolution, checksum))
+}
+
+pub fn recover_interrupted_tasks(app: &AppHandle, state: &AppState) -> usize {
+    let settings = state.get_settings();
+    let auto_resume = settings.auto_resume_on_startup;
+    let mut recovered = 0usize;
+
+    for mut task in state.get_tasks() {
+        if !task.status.is_active() {
+            continue;
+        }
+
+        task.status = if auto_resume {
+            TaskStatus::Queued
+        } else {
+            TaskStatus::Paused
+        };
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.eta_seconds = None;
+        task.eta_str = "--".to_string();
+        task.active_connections = 0;
+        task.current_phase = if auto_resume {
+            "Recovered after unexpected shutdown; queued to resume".to_string()
+        } else {
+            "Recovered after unexpected shutdown; paused by startup setting".to_string()
+        };
+        task.logs.push(TaskLogEntry {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: "warning".to_string(),
+            message: if auto_resume {
+                "Recovered an interrupted download. The engine will resume from its staging data when scheduled.".to_string()
+            } else {
+                "Recovered an interrupted download and left it paused because automatic resume is disabled.".to_string()
+            },
+        });
+        if task.logs.len() > 100 {
+            let excess = task.logs.len() - 100;
+            task.logs.drain(..excess);
+        }
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        recovered += 1;
+    }
+
+    if recovered > 0 {
+        logging::warn(
+            "startup",
+            &format!(
+                "Recovered {} interrupted download(s); auto_resume_on_startup={}.",
+                recovered, auto_resume
+            ),
+        );
+    }
+    recovered
 }
 
 fn parse_lrc_timestamp(value: &str) -> Option<u32> {
@@ -2762,6 +2868,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "60".to_string(),
             "--extractor-retries".to_string(),
             "5".to_string(),
+            // Keep yt-dlp's resumable .part files when a worker is interrupted.
+            "--continue".to_string(),
+            "--part".to_string(),
         ];
 
         // When enabled, yt-dlp must fail rather than silently produce media with missing fragments.
@@ -3439,7 +3548,36 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
 
-            if let Some((audio_sum, acodec, vcodec, res_lbl)) = EngineManager::verify_media_file(&final_path) {
+            if settings.verify_media_on_complete {
+                match verify_media_output(&final_path, t.is_audio_only) {
+                    Ok((audio_sum, acodec, vcodec, res_lbl, checksum)) => {
+                        t.verified_audio_info = audio_sum;
+                        t.audio_codec = acodec;
+                        t.video_codec = vcodec;
+                        t.resolution_label = res_lbl;
+                        t.logs.push(TaskLogEntry {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            level: "info".to_string(),
+                            message: format!("Media integrity verified with ffprobe. SHA-256: {}", checksum),
+                        });
+                    }
+                    Err(error) => {
+                        t.status = TaskStatus::Failed;
+                        t.current_phase = "Media integrity verification failed".to_string();
+                        t.error_message = Some(error.clone());
+                        t.logs.push(TaskLogEntry {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            level: "error".to_string(),
+                            message: error,
+                        });
+                        state.upsert_task(&t);
+                        let _ = app.emit("task_updated", &t);
+                        return;
+                    }
+                }
+            } else if let Some((audio_sum, acodec, vcodec, res_lbl)) =
+                EngineManager::verify_media_file(&final_path)
+            {
                 t.verified_audio_info = audio_sum;
                 t.audio_codec = acodec;
                 t.video_codec = vcodec;
@@ -3673,6 +3811,19 @@ mod scheduler_window_tests {
         assert_eq!(effective_fragment_concurrency(2, 0), 2);
         assert_eq!(effective_fragment_concurrency(3, 1), 1);
         assert_eq!(effective_fragment_concurrency(1, 5), 1);
+    }
+
+    #[test]
+    fn sha256_file_matches_known_empty_file_digest() {
+        let dir = std::env::temp_dir().join(format!("vanta_sha256_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.bin");
+        fs::write(&path, []).unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
