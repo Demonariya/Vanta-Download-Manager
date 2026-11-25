@@ -51,7 +51,7 @@ describe('Unified media kind auto-detection', () => {
     });
     assert.equal(detectInspectedMediaKind(audioMeta, audioMeta.url), 'audio');
     assert.equal(detectInspectedMediaKind(null, 'https://cdn.example.com/tracks/demo.flac?token=1'), 'audio');
-    assert.equal(formatMediaRoutingLabel(audioMeta, 'audio', audioMeta.url), 'Audio · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(audioMeta, 'audio', audioMeta.url), 'Direct Audio · Audio · yt-dlp');
   });
 
   it('detects video streams as video and summarizes video/audio codecs cleanly', () => {
@@ -81,7 +81,7 @@ describe('Unified media kind auto-detection', () => {
     });
 
     assert.equal(detectInspectedMediaKind(videoMeta, videoMeta.url), 'video');
-    assert.equal(formatMediaRoutingLabel(videoMeta, 'video', videoMeta.url), 'Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(videoMeta, 'video', videoMeta.url), 'YouTube · Video · yt-dlp');
 
     const options = buildCuratedVideoOptions(videoMeta.formats);
     assert.equal(
