@@ -67,7 +67,7 @@ export function detectMediaProvider(url: string): string {
   if (isSpotifyUrl(trimmed)) return 'Spotify';
   try {
     const parsed = new URL(trimmed);
-    const host = parsed.hostname.toLowerCase().replace(/^www\\./, '').replace(/^m\\./, '');
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
     const matches = (domain: string) => host === domain || host.endsWith(`.${domain}`);
     if (matches('youtube.com') || host === 'youtu.be' || matches('youtube-nocookie.com')) return 'YouTube';
     if (matches('youtu.be')) return 'YouTube';
@@ -83,7 +83,7 @@ export function detectMediaProvider(url: string): string {
     if (matches('bandcamp.com')) return 'Bandcamp';
     if (matches('mixcloud.com')) return 'Mixcloud';
 
-    const ext = parsed.pathname.match(/\\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
+    const ext = parsed.pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
     if (ext && AUDIO_EXT_SET.has(ext)) return 'Direct Audio';
     if (ext && /^(mp4|m4v|mov|mkv|webm|avi|flv|mpeg|mpg|ts|m3u8|mpd)$/.test(ext)) return 'Direct Video';
     return 'Media Link';
