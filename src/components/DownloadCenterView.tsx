@@ -26,6 +26,7 @@ import {
 } from '../types';
 import {
   calculateAggregateSpeed,
+  calculateQueueStatusCounts,
   filterAndSortTasks,
   getActiveDownloadCount,
   SortDirection,
@@ -186,9 +187,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
 
   const activeCount = useMemo(() => getActiveDownloadCount(queueTasks), [queueTasks]);
   const aggregateSpeed = useMemo(() => calculateAggregateSpeed(queueTasks), [queueTasks]);
-  const pausedCount = queueTasks.filter((t) => t.status === 'paused').length;
-  const completedCount = queueTasks.filter((t) => t.status === 'completed').length;
-  const failedCount = queueTasks.filter((t) => t.status === 'failed').length;
+  const queueStatusCounts = useMemo(() => calculateQueueStatusCounts(queueTasks), [queueTasks]);
+  const { paused: pausedCount, completed: completedCount, failed: failedCount } = queueStatusCounts;
 
   const missingRequiredEngines = useMemo(() => {
     if (!engineStatus) return [];
