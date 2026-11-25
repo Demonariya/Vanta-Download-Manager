@@ -1988,6 +1988,11 @@ fn retry_backoff_seconds(base_delay_seconds: u32, retry_number: u32) -> u64 {
 }
 
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
+    // Multiple UI commands can request scheduling concurrently. Keep the snapshot,
+    // slot calculation, and Queued -> Connecting claims in one critical section so
+    // the same task cannot be launched twice or global/per-queue limits exceeded.
+    let _scheduler_guard = state.scheduler_lock.lock().unwrap_or_else(|e| e.into_inner());
+
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
     }
