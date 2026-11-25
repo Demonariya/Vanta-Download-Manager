@@ -73,7 +73,11 @@ fn parse_video_dimensions(
             let label = label.trim();
             let (digits, suffix) = label.split_once('p')?;
             if digits.is_empty()
-                || !suffix.chars().all(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+                || !suffix
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+                    .unwrap_or(false)
             {
                 return None;
             }
@@ -3357,6 +3361,10 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert_eq!(
             parse_video_dimensions(None, Some("1440p60")),
             (None, Some(1440))
+        );
+        assert_eq!(
+            parse_video_dimensions(None, Some("1080p HDR")),
+            (None, Some(1080))
         );
         assert_eq!(
             parse_video_dimensions(Some("audio only"), Some("audio only")),
