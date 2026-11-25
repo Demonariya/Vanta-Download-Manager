@@ -176,9 +176,9 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   }, []);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {/* Header Controls */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
           <h1 className="text-base font-semibold text-[var(--vanta-text)]">
             Diagnostics &amp; Managed Engines
