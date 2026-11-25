@@ -40,6 +40,7 @@ import {
   buildCuratedVideoOptions,
   detectInspectedMediaKind,
   formatMediaRoutingLabel,
+  getDefaultVideoFormatSelector,
   summarizeVideoOptionCodecs,
 } from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
@@ -151,7 +152,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           patch.metadata.url || lastInspectedUrlRef.current
         );
         setSelectedTab(detectedKind);
-        setSelectedFormatId('bestvideo+bestaudio/best');
+        setSelectedFormatId(getDefaultVideoFormatSelector(patch.metadata.formats || []));
         setDownloadWholeCollection(true);
         const subtitleCodes = new Set([
           ...(patch.metadata.subtitles || []).map((item) => item.code),
