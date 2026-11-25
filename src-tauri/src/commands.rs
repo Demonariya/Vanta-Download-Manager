@@ -1842,6 +1842,10 @@ fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
     "the scheduler did not select this task; inspect queue order and task state".to_string()
 }
 
+fn queue_has_available_slot(queue_cap: u32, active_count: usize) -> bool {
+    queue_cap == 0 || active_count < queue_cap as usize
+}
+
 fn retry_backoff_seconds(base_delay_seconds: u32, retry_number: u32) -> u64 {
     if base_delay_seconds == 0 || retry_number == 0 {
         return 0;
@@ -1891,8 +1895,10 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
                 return false;
             }
             let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
-            queue_cap == 0
-                || active_by_queue.get(&task.queue_id).copied().unwrap_or(0) < queue_cap as usize
+            queue_has_available_slot(
+                queue_cap,
+                active_by_queue.get(&task.queue_id).copied().unwrap_or(0),
+            )
         })
         .collect();
 
@@ -1911,7 +1917,7 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
         }
         let queue_cap = queue_limits.get(&next_task.queue_id).copied().unwrap_or(0);
         let queue_active = active_by_queue.get(&next_task.queue_id).copied().unwrap_or(0);
-        if queue_cap > 0 && queue_active >= queue_cap as usize {
+        if !queue_has_available_slot(queue_cap, queue_active) {
             continue;
         }
         *active_by_queue.entry(next_task.queue_id.clone()).or_insert(0) += 1;
@@ -3900,6 +3906,15 @@ mod scheduler_window_tests {
         assert!(!should_resume_queue_paused_task(
             "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
         ));
+    }
+
+    #[test]
+    fn queue_concurrency_zero_inherits_global_and_positive_caps_are_enforced() {
+        assert!(queue_has_available_slot(0, 100));
+        assert!(queue_has_available_slot(2, 0));
+        assert!(queue_has_available_slot(2, 1));
+        assert!(!queue_has_available_slot(2, 2));
+        assert!(!queue_has_available_slot(1, 1));
     }
 
     #[test]
