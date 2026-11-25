@@ -227,12 +227,17 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       });
       return;
     }
-    if (action === 'cancel' && targetIds.length === 1) {
-      onCancelTask(targetIds[0]);
-    } else {
-      await api.bulkTaskAction(targetIds, action, false);
+    try {
+      if (action === 'cancel' && targetIds.length === 1) {
+        onCancelTask(targetIds[0]);
+      } else {
+        const updatedTasks = await api.bulkTaskAction(targetIds, action, false);
+        if (Array.isArray(updatedTasks)) onTasksChanged(updatedTasks);
+      }
+      if (action === 'cancel') setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'The selected download action failed.');
     }
-    if (action === 'cancel') setSelectedIds((previous) => previous.filter((id) => !targetIds.includes(id)));
   };
 
   const handleRowClick = (event: React.MouseEvent<HTMLElement>, task: DownloadTask, index: number) => {
