@@ -9,6 +9,7 @@ import {
   moveTaskOrder,
   filterAndSortTasks,
   computeHistoryStats,
+  calculateSidebarTaskStats,
 } from './queue-logic';
 import { DownloadTask } from '../types';
 
@@ -162,4 +163,25 @@ test('filterAndSortTasks supports audio/video filters without categories and com
   assert.equal(stats.totalBytesDownloaded, 3000);
   assert.equal(stats.totalElapsedSeconds, 30);
   assert.equal(stats.meanSpeedBytesPerSec, 100);
+});
+
+test('calculateSidebarTaskStats aggregates badges and queue counts in one pass', () => {
+  const tasks = [
+    makeTask('1', { status: 'downloading', queue_id: 'main' }),
+    makeTask('2', { status: 'queued', queue_id: 'main', is_audio_only: true }),
+    makeTask('3', { status: 'completed', queue_id: 'music', engine: 'spotdl' }),
+    makeTask('4', { status: 'failed', queue_id: 'music' }),
+    makeTask('5', { status: 'cancelled', queue_id: 'video' }),
+  ];
+  const stats = calculateSidebarTaskStats(tasks);
+  assert.equal(stats.downloading, 1);
+  assert.equal(stats.queued, 1);
+  assert.equal(stats.completed, 1);
+  assert.equal(stats.failed, 1);
+  assert.equal(stats.unfinished, 3);
+  assert.equal(stats.music, 2);
+  assert.equal(stats.video, 3);
+  assert.equal(stats.queueCounts.get('main'), 2);
+  assert.equal(stats.queueCounts.get('music'), 2);
+  assert.equal(stats.queueCounts.get('video'), 1);
 });
