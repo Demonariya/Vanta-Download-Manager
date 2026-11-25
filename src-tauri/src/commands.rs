@@ -3036,10 +3036,12 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
         // concurrent tasks. This prevents each yt-dlp process from independently
         // consuming the entire "global" allowance. A per-task cap can tighten it.
         let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
+        let global_concurrency = settings.max_concurrent_downloads.max(1);
         let queue_concurrency = queue.as_ref()
             .map(|queue| queue.max_concurrent_downloads)
             .filter(|limit| *limit > 0)
-            .unwrap_or(settings.max_concurrent_downloads.max(1));
+            .map(|limit| limit.min(global_concurrency))
+            .unwrap_or(global_concurrency);
         if let Some(limit_bytes_per_second) = effective_task_bandwidth_limit_bytes_per_second(
             &settings,
             queue.as_ref().map(|queue| queue.bandwidth_limit_kbps).unwrap_or(0),
@@ -3901,7 +3903,7 @@ mod scheduler_window_tests {
     }
 
     #[test]
-    fn queue_bandwidth_limit_is_shared_by_active_tasks_in_that_queue() {
+    fn queue_bandwidth_limit_is_allocated_using_effective_queue_concurrency() {
         let settings = AppSettings::default();
         assert_eq!(
             effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 2),
