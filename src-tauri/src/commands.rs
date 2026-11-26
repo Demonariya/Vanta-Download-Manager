@@ -21,9 +21,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
+
+static SCHEDULER_MANAGED_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn scheduler_managed_tasks() -> &'static Mutex<HashSet<String>> {
+    SCHEDULER_MANAGED_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_scheduler_managed_task(task_id: &str) {
+    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).insert(task_id.to_string());
+}
+
+fn clear_scheduler_managed_task(task_id: &str) {
+    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).remove(task_id);
+}
+
+fn is_scheduler_managed_task(task_id: &str) -> bool {
+    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).contains(task_id)
+}
 
 struct AtomicFlagGuard(Arc<AtomicBool>);
 
@@ -705,7 +723,7 @@ pub async fn create_task(
     }
 
     logging::info("queue", &format!("Created task '{}' ({})", task.id, task.engine));
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &HashSet::from([task.id.clone()]));
 
     // Record the exact scheduler gate when a newly-created task remains queued.
     // This makes "download did not start" diagnosable from the global log.
@@ -735,6 +753,7 @@ pub async fn create_task(
 
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
     // Persist the paused state before terminating the child. The worker checks this
     // state before finalization, preventing a pause/exit race from marking the task complete.
     if let Some(mut task) = state.get_task_by_id(&id) {
@@ -774,13 +793,14 @@ pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
         task.current_phase = "Queued to resume".to_string();
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
-        schedule_next(&app, &state);
+        schedule_next_with_manual_tasks(&app, &state, &HashSet::from([id.clone()]));
     }
     Ok(())
 }
 
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -822,7 +842,7 @@ pub fn retry_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
         t.eta_str = "--".to_string();
         state.upsert_task(&t);
         let _ = app.emit("task_updated", &t);
-        schedule_next(&app, &state);
+        schedule_next_with_manual_tasks(&app, &state, &HashSet::from([id.clone()]));
     }
     Ok(())
 }
@@ -834,6 +854,7 @@ pub fn delete_task(
     id: String,
     delete_file: Option<bool>,
 ) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -895,15 +916,17 @@ pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
 #[tauri::command]
 pub fn resume_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let tasks = state.get_tasks();
+    let mut manual_task_ids = HashSet::new();
     for mut t in tasks {
         if t.status == TaskStatus::Paused {
             t.status = TaskStatus::Queued;
             t.current_phase = "Queued".to_string();
+            manual_task_ids.insert(t.id.clone());
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
         }
     }
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &manual_task_ids);
     Ok(())
 }
 
@@ -1084,6 +1107,7 @@ fn should_resume_queue_paused_task(
 #[tauri::command]
 pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
     state.set_queue_paused(&id, false)?;
+    let mut manual_task_ids = HashSet::new();
     for mut task in state.get_tasks().into_iter().filter(|task| {
         should_resume_queue_paused_task(
             &task.queue_id,
@@ -1094,10 +1118,11 @@ pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
     }) {
         task.status = TaskStatus::Queued;
         task.current_phase = "Queued in active queue".to_string();
+        manual_task_ids.insert(task.id.clone());
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
     }
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &manual_task_ids);
     let queues = state.get_queues();
     let _ = app.emit("queues_updated", &queues);
     Ok(queues)
@@ -1898,7 +1923,7 @@ pub fn scheduler_tick(app: &AppHandle) {
 
     if settings.scheduler.pause_on_stop {
         let active_ids: Vec<String> = state.get_tasks().into_iter()
-            .filter(|task| task.status.is_active())
+            .filter(|task| task.status.is_active() && is_scheduler_managed_task(&task.id))
             .map(|task| task.id)
             .collect();
         for id in active_ids {
@@ -2014,6 +2039,10 @@ fn retry_backoff_seconds(base_delay_seconds: u32, retry_number: u32) -> u64 {
 }
 
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
+    schedule_next_with_manual_tasks(app, state, &HashSet::new());
+}
+
+fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_task_ids: &HashSet<String>) {
     // Multiple UI commands can request scheduling concurrently. Keep the snapshot,
     // slot calculation, and Queued -> Connecting claims in one critical section so
     // the same task cannot be launched twice or global/per-queue limits exceeded.
@@ -2024,7 +2053,8 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
     }
 
     let settings = state.get_settings();
-    if !scheduler_window_is_open(&settings) {
+    let scheduler_open = scheduler_window_is_open(&settings);
+    if !scheduler_open && manual_task_ids.is_empty() {
         return;
     }
     let tasks = state.get_tasks();
@@ -2051,7 +2081,9 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
     let mut queued: Vec<DownloadTask> = tasks
         .into_iter()
         .filter(|task| {
-            if task.status != TaskStatus::Queued || paused_queues.contains(&task.queue_id) {
+            if task.status != TaskStatus::Queued
+                || paused_queues.contains(&task.queue_id)
+                || (!scheduler_open && !manual_task_ids.contains(&task.id)) {
                 return false;
             }
             let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
@@ -2084,7 +2116,12 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
         scheduled += 1;
 
         next_task.status = TaskStatus::Connecting;
-        next_task.current_phase = "Starting engine...".to_string();
+        next_task.current_phase = if manual_task_ids.contains(&next_task.id) { "Starting manually..." } else { "Starting engine..." }.to_string();
+        if manual_task_ids.contains(&next_task.id) {
+            clear_scheduler_managed_task(&next_task.id);
+        } else if settings.scheduler.enabled {
+            mark_scheduler_managed_task(&next_task.id);
+        }
         if next_task.started_at.is_none() {
             next_task.started_at = Some(chrono::Utc::now().to_rfc3339());
         }
@@ -2202,6 +2239,7 @@ async fn run_download_task(app: AppHandle, task_id: String) {
     }
 
     let state = app.state::<AppState>();
+    clear_scheduler_managed_task(&task_id);
     schedule_next(&app, &state);
 }
 
