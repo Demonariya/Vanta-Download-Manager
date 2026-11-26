@@ -557,6 +557,8 @@ pub struct NotificationItem {
     pub timestamp: String,
     #[serde(rename = "taskId", alias = "task_id")]
     pub task_id: Option<String>,
+    #[serde(rename = "isRead", default)]
+    pub is_read: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
