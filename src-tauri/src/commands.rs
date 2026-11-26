@@ -512,6 +512,23 @@ fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn subtitle_language_name(code: &str) -> &str {
+    match code.split(['-', '_']).next().unwrap_or(code).to_ascii_lowercase().as_str() {
+        "en" => "English", "fa" | "per" => "Persian", "ar" | "ara" => "Arabic",
+        "es" | "spa" => "Spanish", "fr" | "fra" | "fre" => "French",
+        "de" | "deu" | "ger" => "German", "it" | "ita" => "Italian",
+        "pt" | "por" => "Portuguese", "ru" | "rus" => "Russian",
+        "ja" | "jpn" => "Japanese", "ko" | "kor" => "Korean",
+        "zh" | "zho" | "chi" => "Chinese", "tr" | "tur" => "Turkish",
+        "hi" | "hin" => "Hindi", "ur" | "urd" => "Urdu",
+        "nl" | "nld" | "dut" => "Dutch", "sv" | "swe" => "Swedish",
+        "pl" | "pol" => "Polish", "uk" | "ukr" => "Ukrainian",
+        "el" | "ell" | "gre" => "Greek", "he" | "heb" => "Hebrew",
+        "th" | "tha" => "Thai", "vi" | "vie" => "Vietnamese",
+        "id" | "ind" => "Indonesian", _ => "Subtitle",
+    }
+}
+
 fn build_subtitle_args(languages: &[String], include_auto: bool) -> Vec<String> {
     if languages.is_empty() { return Vec::new(); }
     let mut args = vec!["--write-subs".to_string()];
@@ -525,6 +542,16 @@ fn build_subtitle_args(languages: &[String], include_auto: bool) -> Vec<String> 
         "--ppa".to_string(),
         "EmbedSubtitle+ffmpeg_o:-disposition:s:0 default".to_string(),
     ]);
+    // Keep every embedded subtitle as an independently selectable stream and
+    // give it a readable track title. yt-dlp/FFmpeg retain the language code.
+    for (index, language) in languages.iter().enumerate() {
+        args.push("--ppa".to_string());
+        args.push(format!(
+            "EmbedSubtitle+ffmpeg_o:-metadata:s:s:{} title={}",
+            index,
+            subtitle_language_name(language)
+        ));
+    }
     args
 }
 
@@ -4551,5 +4578,31 @@ mod scheduler_window_tests {
         assert!(scheduler_window_is_open_at(&settings, 0, 12 * 60));
         assert!(scheduler_window_is_open_at(&settings, 6, 23 * 60 + 59));
         assert!(!scheduler_window_is_open_at(&settings, 1, 12 * 60));
+    }
+}
+
+
+#[cfg(test)]
+mod media_embedding_tests {
+    use super::*;
+
+    #[test]
+    fn lrc_language_is_normalized_to_iso_639_2() {
+        assert_eq!(lrc_language("[la:en]\\n[00:01.00]Hello"), "eng");
+        assert_eq!(lrc_language("[la:fa-IR]\\n[00:01.00]سلام"), "per");
+        assert_eq!(lrc_language("[00:01.00]Hello"), "und");
+    }
+
+    #[test]
+    fn ffmetadata_escaping_preserves_multiline_and_special_characters() {
+        assert_eq!(ffmetadata_escape("a=b;#c\\nd"), "a\\=b\\;\\#c\\nd");
+    }
+
+    #[test]
+    fn subtitle_track_titles_are_human_readable() {
+        assert_eq!(subtitle_language_name("en-US"), "English");
+        assert_eq!(subtitle_language_name("fa"), "Persian");
+        assert_eq!(subtitle_language_name("ja"), "Japanese");
+        assert_eq!(subtitle_language_name("unknown"), "Subtitle");
     }
 }
