@@ -13,11 +13,12 @@ interface DownloadDetailsDrawerProps {
   task: DownloadTask | null;
   onClose: () => void;
   onRetryTask: (id: string) => void;
+  onOpenProgress: () => void;
 }
 
 type InspectorTab = 'details' | 'playlist' | 'subtitles' | 'lyrics' | 'options' | 'logs';
 
-export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ task, onClose, onRetryTask }) => {
+export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ task, onClose, onRetryTask, onOpenProgress }) => {
   const [tab, setTab] = useState<InspectorTab>('details');
   const [renameMode, setRenameMode] = useState(false);
   const [filenameDraft, setFilenameDraft] = useState('');
@@ -133,6 +134,9 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
           ))}
         </nav>
         <div className="flex items-center gap-2 min-w-0">
+          <button type="button" onClick={onOpenProgress} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 text-[11px] font-medium text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]" title="Open independent progress monitor">
+            <Download className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Progress Window</span>
+          </button>
           <span className="hidden md:block text-xs text-[var(--vanta-muted)] truncate max-w-[260px]">{task.title}</span>
           <button type="button" onClick={onClose} aria-label="Close details panel" className="p-2 rounded-lg text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]">
             <X className="w-4 h-4" />
