@@ -81,7 +81,8 @@ function renderCandidates() {
     const row = document.createElement('div'); row.className = 'candidate';
     const kind = document.createElement('div'); kind.className = 'kind';
     kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : '↗';
-    const info = document.createElement('div'); info.className = 'candidate-info';\n    if (item.thumbnail) { const thumb = document.createElement('img'); thumb.className = 'candidate-thumb'; thumb.src = item.thumbnail; thumb.alt = ''; thumb.loading = 'lazy'; thumb.referrerPolicy = 'no-referrer'; row.append(thumb); }
+    const info = document.createElement('div'); info.className = 'candidate-info';
+    if (item.thumbnail) { const thumb = document.createElement('img'); thumb.className = 'candidate-thumb'; thumb.src = item.thumbnail; thumb.alt = ''; thumb.loading = 'lazy'; thumb.referrerPolicy = 'no-referrer'; row.append(thumb); }
     const name = document.createElement('div'); name.className = 'candidate-name'; name.textContent = item.label;
     const meta = document.createElement('div'); meta.className = 'candidate-url';
     try { meta.textContent = item.kind === 'video' ? 'Video · ' + new URL(item.url).hostname : new URL(item.url).hostname; } catch { meta.textContent = item.kind; }
