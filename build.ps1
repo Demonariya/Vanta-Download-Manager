@@ -909,9 +909,8 @@ if (-not (Test-Path $iconSource)) {
 Invoke-NativeStep -Description "Generate Tauri PNG/ICO/ICNS icon set from branding/vanta-mark.svg" -Executable $tauriCliBin -Arguments @('icon', $iconSource, '--output', $iconOutput)
 
 $iconCopies = @(
-    @{ Source = '128x128@2x.png'; Destination = 'icon.png' },
-    @{ Source = '128x128@2x.png'; Destination = '..\\..\\public\\icon.png' },
-    @{ Source = '128x128@2x.png'; Destination = '..\\..\\public\\vanta-icon.png' },
+    @{ Source = 'icon.png'; Destination = '..\\..\\public\\icon.png' },
+    @{ Source = 'icon.png'; Destination = '..\\..\\public\\vanta-icon.png' },
     @{ Source = '128x128.png'; Destination = '..\\..\\browser-extension\\icons\\icon.png' },
     @{ Source = 'icon.ico'; Destination = '..\\..\\public\\favicon.ico' }
 )
