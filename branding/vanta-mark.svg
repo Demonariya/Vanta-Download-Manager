@@ -1,1 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1024" height="1024"><defs><linearGradient id="vanta" x1="72" y1="58" x2="430" y2="450" gradientUnits="userSpaceOnUse"><stop stop-color="#72E5FF"/><stop offset=".48" stop-color="#4D9CFF"/><stop offset="1" stop-color="#7768FF"/></linearGradient><linearGradient id="cut" x1="160" y1="110" x2="360" y2="390" gradientUnits="userSpaceOnUse"><stop stop-color="#E9FBFF"/><stop offset="1" stop-color="#9CB9FF"/></linearGradient></defs><path d="M74 96h91l91 238 91-238h91L286 442h-60L74 96Z" fill="url(#vanta)"/><path d="M190 96h72l-58 152-36-93 22-59Z" fill="url(#cut)" opacity=".94"/><path d="M322 96h72L274 442h-49l34-89L322 96Z" fill="#DCEBFF" opacity=".18"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1024" height="1024">
+  <defs>
+    <linearGradient id="vanta-mark" x1="64" y1="76" x2="448" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#70E6FF"/>
+      <stop offset=".52" stop-color="#438EFF"/>
+      <stop offset="1" stop-color="#7867F5"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 76H164L256 322L348 76H448L286 440H226L64 76Z" fill="url(#vanta-mark)"/>
+</svg>
