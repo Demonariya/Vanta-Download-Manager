@@ -116,7 +116,15 @@ pub fn start(app: AppHandle) {
                     respond(&mut stream, "413 Payload Too Large", r#"{"ok":false,"error":"Invalid request size"}"#, origin).await;
                     return;
                 }
-                let payload: BrowserDownloadRequest = match serde_json::from_str(&body.as_bytes()[..content_length].iter().map(|b| *b as char).collect::<String>()) {
+                let body_bytes = &body.as_bytes()[..content_length];
+                let body_text = match std::str::from_utf8(body_bytes) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        respond(&mut stream, "400 Bad Request", r#"{"ok":false,"error":"Request body must be UTF-8"}"#, origin).await;
+                        return;
+                    }
+                };
+                let payload: BrowserDownloadRequest = match serde_json::from_str(body_text) {
                     Ok(payload) => payload,
                     Err(_) => {
                         respond(&mut stream, "400 Bad Request", r#"{"ok":false,"error":"Invalid JSON payload"}"#, origin).await;
