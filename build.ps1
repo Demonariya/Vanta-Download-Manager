@@ -898,6 +898,37 @@ if ($SkipInstall) {
 $tauriVerRes = Invoke-NativeStep -Description "Verify Tauri CLI" -Executable $npxExe -Arguments @('tauri', '--version') -Quiet
 Write-Ok ("Tauri CLI: {0}" -f (($tauriVerRes.Lines -join ' ').Trim()))
 
+# Regenerate every platform icon from the canonical transparent SVG before packaging.
+# This prevents stale/duplicated raster sizes from shipping in the Windows installer.
+Write-Stage "Generating multi-resolution VANTA brand icons"
+$iconSource = Join-Path $script:RepoRoot 'branding/vanta-mark.svg'
+$iconOutput = Join-Path $script:RepoRoot 'src-tauri/icons'
+if (-not (Test-Path $iconSource)) {
+    Fail-Build -Message "Canonical VANTA SVG icon is missing: $iconSource" -Stage 'Icon Generation'
+}
+Invoke-NativeStep -Description "Generate Tauri PNG/ICO/ICNS icon set from branding/vanta-mark.svg" -Executable $tauriCliBin -Arguments @('icon', $iconSource, '--output', $iconOutput)
+
+$iconCopies = @(
+    @{ Source = '128x128@2x.png'; Destination = 'icon.png' },
+    @{ Source = '128x128@2x.png'; Destination = '..\\..\\public\\icon.png' },
+    @{ Source = '128x128@2x.png'; Destination = '..\\..\\public\\vanta-icon.png' },
+    @{ Source = '128x128.png'; Destination = '..\\..\\browser-extension\\icons\\icon.png' },
+    @{ Source = 'icon.ico'; Destination = '..\\..\\public\\favicon.ico' }
+)
+foreach ($copy in $iconCopies) {
+    $sourcePath = Join-Path $iconOutput $copy.Source
+    $destinationPath = Join-Path $iconOutput $copy.Destination
+    if (-not (Test-Path $sourcePath)) {
+        Fail-Build -Message "Tauri icon generator did not produce required asset '$($copy.Source)'." -Stage 'Icon Generation'
+    }
+    $destinationDirectory = Split-Path $destinationPath -Parent
+    if (-not (Test-Path $destinationDirectory)) {
+        New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+    }
+    Copy-Item -Path $sourcePath -Destination $destinationPath -Force
+}
+Write-Ok "VANTA icon variants regenerated and synchronized across desktop, web and browser extension assets"
+
 # ------------------------------------------------------------------------------
 # Step 4: Frontend TypeScript Verification
 # ------------------------------------------------------------------------------
