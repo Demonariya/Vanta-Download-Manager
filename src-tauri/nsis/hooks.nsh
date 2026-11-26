@@ -1,3 +1,16 @@
+; VANTA dark installer theme. Tauri's bundled NSIS template expands page macros
+; after loading installer hooks, so these definitions theme the stock installer UI.
+!define MUI_BGCOLOR "171A21"
+!define MUI_TEXTCOLOR "E7ECF4"
+!define MUI_DIRECTORYPAGE_BGCOLOR "202631"
+!define MUI_STARTMENUPAGE_BGCOLOR "202631"
+!define MUI_INSTALLCOLORS "42B8E8 171A21"
+!define MUI_INSTFILESPAGE_COLORS "DCE6F2 171A21"
+!define MUI_WELCOMEPAGE_TITLE "Welcome to VANTA"
+!define MUI_WELCOMEPAGE_TEXT "A focused download workspace for video and music. Install VANTA to manage downloads with smart resume, batch queues, media metadata and browser capture."
+!define MUI_FINISHPAGE_TITLE "VANTA is ready"
+!define MUI_FINISHPAGE_TEXT "Installation completed successfully. Launch VANTA Download Manager and start managing your video and music downloads."
+
 !macro NSIS_HOOK_POSTINSTALL
   ; Keep managed engines under the application install directory.
   CreateDirectory "$INSTDIR\Engine"

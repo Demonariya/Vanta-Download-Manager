@@ -52,8 +52,7 @@
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
         "sidebarImage": "nsis/sidebar.bmp",
-        "headerImage": "nsis/header.bmp",
-        "template": "nsis/installer.nsi"
+        "headerImage": "nsis/header.bmp"
       },
       "wix": {
         "upgradeCode": "7f3c8b1e-4a92-4d6e-9c15-2b8a6f04d912"
