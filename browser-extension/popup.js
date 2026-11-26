@@ -65,7 +65,8 @@ async function scanPage() {
               label: label || parsed.pathname.split('/').pop() || 'Media resource',
               kind,
               thumbnail: thumbnail && /^https?:/i.test(thumbnail) ? thumbnail : '',
-              host: parsed.hostname
+              host: parsed.hostname,
+              sourceType: 'media'
             });
           } catch {}
         };
@@ -85,6 +86,8 @@ async function scanPage() {
           if (/\.(mp4|m4v|webm|mov|mp3|m4a|aac|flac|wav|ogg|opus)(?:$|[?#])/i.test(anchor.href)) {
             const kind = /\.(mp3|m4a|aac|flac|wav|ogg|opus)(?:$|[?#])/i.test(anchor.href) ? 'audio' : 'video';
             add(anchor.href, anchor.textContent.trim() || anchor.href.split('/').pop(), kind, '');
+            const item = found.get(new URL(anchor.href, location.href).href);
+            if (item) item.sourceType = 'direct';
           }
         });
         if (!found.size && document.querySelector('video')) {
@@ -104,7 +107,7 @@ async function scanPage() {
 
 function renderCandidates() {
   $('count').textContent = `${candidates.length} found`;
-  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter || (activeFilter === 'links' && item.kind === 'direct link'));
+  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter || (activeFilter === 'links' && item.sourceType === 'direct'));
   const root = $('candidates'); root.replaceChildren();
   if (!visible.length) {
     const empty = document.createElement('div'); empty.className = 'empty';
