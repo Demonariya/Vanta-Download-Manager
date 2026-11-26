@@ -1,6 +1,6 @@
 # VANTA Download Manager
 
-**A high-concurrency Windows desktop video, audio, and music workstation built with Rust, Tauri 2, React 19, yt-dlp, spotDL, FFmpeg, and FFprobe.**
+**A high-concurrency Windows desktop download manager for video and music built with Rust, Tauri 2, React 19, yt-dlp, spotDL, FFmpeg, and FFprobe.**
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4?style=flat-square&logo=windows)](#installation)
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-24C8DB?style=flat-square&logo=tauri)](#architecture--technology-stack)
@@ -13,26 +13,26 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Application Screenshots](#application-screenshots)
-3. [Features](#features)
-4. [Supported Download Engines](#supported-download-engines)
-5. [Architecture & Technology Stack](#architecture--technology-stack)
-6. [Installation](#installation)
-7. [Building from Source](#building-from-source)
-8. [PowerShell Build Instructions](#powershell-build-instructions)
-9. [Build Parameters & Output Layout](#build-parameters--output-layout)
-10. [Project Structure](#project-structure)
-11. [Configuration & Data Locations](#configuration--data-locations)
-12. [Troubleshooting](#troubleshooting)
-13. [Known Limitations](#known-limitations)
-14. [Contributing](#contributing)
-15. [License](#license)
+2. [Application Screenshots](#application-screenshots)\n3. [Adding Screenshots to the README](#adding-screenshots-to-the-readme)
+4. [Features](#features)
+5. [Supported Download Engines](#supported-download-engines)
+6. [Architecture & Technology Stack](#architecture--technology-stack)
+7. [Installation](#installation)
+8. [Building from Source](#building-from-source)
+9. [PowerShell Build Instructions](#powershell-build-instructions)
+10. [Build Parameters & Output Layout](#build-parameters--output-layout)
+11. [Project Structure](#project-structure)
+12. [Configuration & Data Locations](#configuration--data-locations)
+13. [Troubleshooting](#troubleshooting)
+14. [Known Limitations](#known-limitations)
+15. [Contributing](#contributing)
+16. [License](#license)
 
 ---
 
 ## Overview
 
-VANTA Download Manager pairs a native **Rust + Tauri 2** backend with a responsive **React 19 + TypeScript + Tailwind CSS** desktop interface to manage video downloads, audio extractions, playlist ingestion, and Spotify metadata resolution from one workspace.
+VANTA Download Manager pairs a native **Rust + Tauri 2** backend with a responsive **React 19 + TypeScript + Tailwind CSS** desktop interface. Its download library is organized around two media categories — **Video** and **Music** — with queue management, media inspection, transfer monitoring, browser-assisted link detection, and download history.
 
 On Windows, VANTA executes external engine subprocesses (`yt-dlp`, `spotdl`, `ffmpeg`, `ffprobe`) hidden with `CREATE_NO_WINDOW`, tracks child process trees safely on cancellation or exit, persists queue and history state in SQLite, and downloads/SHA-256 verifies missing engine binaries on first run so installers remain compact.
 
@@ -40,14 +40,54 @@ On Windows, VANTA executes external engine subprocesses (`yt-dlp`, `spotdl`, `ff
 
 ## Application Screenshots
 
-> *No static PNG screenshots are bundled in this repository.*
+Screenshots are stored in `docs/images/` and embedded directly from the repository so they render on the GitHub project page.
 
-The desktop workspace provides:
-- **Dashboard & Overview** (`DashboardView`): Live throughput telemetry, queue summary cards, quick URL analysis entry, and active transfer counters.
-- **Download Queue & Floating Progress Dock** (`QueueView`, `FloatingProgressDock`): Priority-ordered transfer cards with live speed, downloaded size, ETA, phase indicator, and pause/resume/cancel/retry controls.
-- **New Download & URL Inspector** (`NewDownloadModal`): Real-time URL metadata inspection, format/resolution selection, audio format targets, and playlist track selection.
-- **Music Library & History** (`MusicLibraryView`, `HistoryView`): Verified audio track metadata (`FLAC`, `MP3`, `M4A`, `OPUS`, `WAV`), album/artist views, and searchable transfer history.
-- **Diagnostics & Settings** (`DiagnosticsView`, `SettingsView`): Engine binary discovery, SHA-256 managed engine installer/updater, Netscape cookie validator/tester, concurrency controls, and safe shutdown prompts.
+> Add your own screenshots by following the **[Add screenshots to the README](#adding-screenshots-to-the-readme)** guide below. Until images are committed, the sections below describe the screens without displaying placeholder artwork.
+
+| Screen | What it shows | Suggested image |
+| :--- | :--- | :--- |
+| Main Download Center | Active transfers, queue filters, progress and task actions | `docs/images/download-center.png` |
+| Download File Info | URL inspection, detected media, format and quality selection | `docs/images/download-file-info.png` |
+| Download Details Inspector | Edge-to-edge Overview, File, Transfer, Media, Playlist and Logs tabs | `docs/images/download-inspector.png` |
+| Progress Window | Live transfer telemetry and task controls | `docs/images/progress-window.png` |
+| Settings | Searchable settings sections and save state | `docs/images/settings.png` |
+| Browser Extension | Browser media detection and video thumbnail previews | `docs/images/browser-extension.png` |
+
+### Adding screenshots to the README
+
+**Recommended method — upload through GitHub:**
+
+1. Open the repository on GitHub and switch to the `ChatGPT` branch (or the branch you intend to update).
+2. Open the `docs` directory. If it does not exist, choose **Add file → Create new file**, enter `docs/images/.gitkeep`, and commit it.
+3. Open `docs/images`, choose **Add file → Upload files**, and drag in your screenshots (PNG or JPG).
+4. Use the filenames from the table above, or update the Markdown image paths below to match your filenames.
+5. Commit the uploaded images to the same branch as this README.
+
+**Alternative — use PowerShell from your local clone:**
+
+```powershell
+# Run from the repository root
+New-Item -ItemType Directory -Force docs\images | Out-Null
+
+# Copy your screenshots into docs\images, then stage and push them
+Copy-Item "$env:USERPROFILE\Pictures\VANTA-Download-Center.png" "docs\images\download-center.png"
+git add README.md docs/images
+git commit -m "Add VANTA application screenshots"
+git push origin ChatGPT
+```
+
+**Display the screenshots:** once the files exist in the repository, add or uncomment the corresponding Markdown image lines. GitHub renders these images directly in the README:
+
+```markdown
+![VANTA Download Center](docs/images/download-center.png)
+![Download File Info](docs/images/download-file-info.png)
+![Download Details Inspector](docs/images/download-inspector.png)
+![Download Progress Window](docs/images/progress-window.png)
+![VANTA Settings](docs/images/settings.png)
+![VANTA Browser Extension](docs/images/browser-extension.png)
+```
+
+For clean results, capture the app at a readable desktop resolution, hide personal URLs/usernames and download paths, crop out unrelated desktop content, and prefer PNG for UI screenshots. Do not commit screenshots containing cookies, access tokens, private download URLs, or other personal information.
 
 ---
 
@@ -58,7 +98,7 @@ The desktop workspace provides:
   - Real Spotify metadata extraction (`src-tauri/src/spotify.rs` & `server/spotify.ts`) supporting tracks, albums, and playlists via Spotify API credentials, web/embed metadata resolution, and oEmbed artwork resolution, paired with `spotDL` audio matching and ID3/artwork tagging.
   - Stream verification and container/codec processing via `FFmpeg` and `FFprobe`.
 
-- **Priority Queue & Process Control**
+- **Download Details Inspector & Transfer Monitoring**\n  - Edge-to-edge task inspector with Overview, File, Transfer, Media, Playlist, and searchable/filterable Logs sections.\n  - Dedicated progress monitor with live task telemetry and controls, plus a detailed Download Properties view.\n  - Browser extension for Chrome and Edge can detect supported page/media links and send them to VANTA for inspection; it does not bypass DRM or protected streams.\n\n- **Priority Queue & Process Control**
   - Priority scheduling (`Highest`, `High`, `Normal`, `Low`) and Finite State Machine lifecycle (`Queued -> Extracting -> Downloading -> Processing -> Completed`).
   - Configurable concurrent task limit, per-task/global rate limiting (`--limit-rate`), fragment concurrency (`yt-dlp -N`), exponential-backoff retries, and full pause/resume/cancel/retry/delete actions.
   - Process-tree tracking (`active_processes` and `active_inspections`), cancellation tokens, and safe window-close confirmation (`SafeCloseDialog`) when transfers are active.
