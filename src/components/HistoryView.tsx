@@ -127,7 +127,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   const handleExportCsv = () => {
     const esc = (v: unknown) => {
       let value = String(v ?? '');
-      if (/^[=+@\\-\\t\\r]/.test(value)) value = `'${value}`;
+      if (/^[=+@-]/.test(value) || value.startsWith('\t') || value.startsWith('\r')) value = `'${value}`;
       return `"${value.replace(/"/g, '""')}"`;
     };
     const rows = [
