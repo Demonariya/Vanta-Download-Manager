@@ -1,0 +1,1554 @@
+VANTA Download Manager — Complete Architecture Refactor, Download Engine Repair & Premium UI Overhaul
+
+You are working directly inside the existing VANTA Download Manager repository.
+
+Your mission is to perform a complete, production-quality audit, refactor, bug-fix, and redesign of the application. This is not a mockup task, not a prototype, and not a UI-only facelift.
+
+You must inspect the existing repository, understand how every feature works, identify redundant or broken components, redesign the architecture where necessary, implement the improvements, run tests, build the application, and fix the problems you discover.
+
+0. Core Rules — Non-Negotiable
+
+- Do not merely provide recommendations, reports, or plans. Actually implement the work.
+- Do not stop after the audit or after Phase 1.
+- Do not replace working functionality with mock data.
+- Never fabricate download progress, speed, ETA, metadata, quality, file sizes, engine status, or completion states.
+- Never show a download as completed until the actual output file exists and has been verified.
+- Do not remove features just to simplify the code or make compilation easier.
+- Do not create multiple implementations of the same download logic.
+- Do not create fake buttons, nonfunctional settings, placeholder actions, or decorative controls pretending to work.
+- Preserve the existing Rust/Tauri architecture and project technologies unless there is a clear technical reason to improve them.
+- Keep existing functionality that is working and integrate it into the improved architecture.
+- Do not ask me to manually inspect files, make decisions, or complete technical work that you can handle autonomously.
+- Do not stop at a successful frontend build. Verify the actual backend functionality.
+- Do not use arbitrary timers to simulate progress.
+- Do not misrepresent media quality or convert file extensions without actually converting the media.
+- Use authorized sources, official metadata interfaces where available, and respect provider access restrictions. Do not bypass DRM, access controls, or provider restrictions.
+- Maintain Windows compatibility and ensure the application works as a real desktop application.
+- Never claim something is fixed unless you verified it.
+
+---
+
+PHASE 1 — COMPLETE REPOSITORY AUDIT
+
+Before changing anything, inspect the entire project.
+
+Examine at minimum:
+
+Rust / Tauri Backend
+
+- "src-tauri/src/main.rs"
+- "src-tauri/src/commands.rs"
+- "src-tauri/src/engines.rs"
+- "src-tauri/src/process.rs"
+- "src-tauri/src/models.rs"
+- All remaining Rust source files
+- Tauri configuration
+- Database/storage layer
+- Child-process handling
+- Engine download and installation logic
+
+Frontend
+
+- All React components
+- All modals
+- Pages
+- Settings
+- Download rows/cards
+- Progress components
+- Hooks
+- Services/API wrappers
+- TypeScript types
+- CSS/Tailwind styling
+- Routing and navigation
+
+Server
+
+- "server/engineManager.ts"
+- Express routes
+- API handlers
+- Engine integrations
+- Process execution
+- File handling
+- Error handling
+
+Build & Dependencies
+
+- "package.json"
+- "package-lock.json"
+- Cargo dependencies
+- Tauri build configuration
+- GitHub Actions workflows
+- PowerShell scripts
+- Installers
+- Release artifacts
+
+Create a temporary internal audit checklist and identify:
+
+- Broken features
+- Duplicate components
+- Duplicate APIs
+- Frontend/backend inconsistencies
+- Unused components
+- Fake or placeholder data
+- Incorrect progress logic
+- Missing error handling
+- Memory leaks
+- Child processes that can hang
+- Incorrect file paths
+- Race conditions
+- Database issues
+- Invalid format/quality selections
+- UI responsiveness problems
+- Accessibility problems
+- Missing functionality
+- Unnecessary complexity
+
+Then immediately begin implementing fixes. The audit must not become the final deliverable.
+
+---
+
+PHASE 2 — REBUILD THE DOWNLOAD ARCHITECTURE
+
+The current download logic is fragmented. Direct downloads, video downloads, audio downloads, queue management, progress handling, and engine downloads must not behave like completely separate applications.
+
+Build a unified download architecture.
+
+2.1 Unified Download Core
+
+Create or refactor a centralized Download Core responsible for:
+
+- Download creation
+- Download task identification
+- Queue management
+- Task state
+- Progress tracking
+- Speed tracking
+- ETA calculations
+- Pause
+- Resume
+- Cancel
+- Retry
+- Remove
+- Concurrency management
+- Duplicate detection
+- Download scheduling
+- Retry policies
+- File verification
+- Error reporting
+- Completion notifications
+- Output file management
+- Persistence
+- Recovery after application restart
+
+Every download type must integrate with this core:
+
+- Direct HTTP/HTTPS downloads
+- Video downloads
+- Audio downloads
+- Playlist downloads
+- Batch downloads
+- Engine-managed tasks
+
+Use specialized providers where necessary, but centralize task state, lifecycle, progress events, queue behavior, persistence, and completion handling.
+
+2.2 Proper Download State Machine
+
+Implement a reliable state model such as:
+
+- Inspecting
+- Ready
+- Queued
+- Connecting
+- Downloading
+- Pausing
+- Paused
+- Resuming
+- Processing
+- Muxing
+- Verifying
+- Completed
+- Failed
+- Cancelled
+
+Transitions must be valid and controlled.
+
+Prevent invalid transitions, such as:
+
+- Completed → Downloading without a retry/reset
+- Cancelled → Completed due to a late progress event
+- Paused → Completed without an actual resumed process
+- Processing → Completed before output verification
+
+Use one centralized state transition system instead of different implementations in every UI component.
+
+2.3 Queue System
+
+Implement a functional queue with:
+
+- Pause all
+- Resume all
+- Cancel all
+- Start next
+- Maximum concurrent downloads
+- Per-download priority
+- Move up/down
+- Retry failed tasks
+- Automatic retry configuration
+- Scheduler
+- Queue persistence
+- Queue recovery
+- Duplicate prevention
+- Clear completed tasks
+
+All queue actions must work with real backend tasks.
+
+Do not allow the frontend to independently fake queue status.
+
+---
+
+PHASE 3 — REBUILD THE PROGRESS SYSTEM FROM ZERO
+
+This is one of the most important parts of this task.
+
+The current progress behavior is unacceptable if it is simulated, inaccurate, jumps randomly, or displays percentages unrelated to actual data.
+
+Completely inspect and replace the current progress implementation.
+
+3.1 Real Progress Data
+
+Progress must be based on actual engine/process/network data.
+
+Every download should report, when available:
+
+- Total bytes
+- Downloaded bytes
+- Remaining bytes
+- Percentage
+- Current download speed
+- Average speed
+- ETA
+- Elapsed time
+- Connection state
+- Number of active connections, if genuinely available
+- Current download stage
+- Last progress update
+
+Example:
+
+Downloaded: 250 MB / 500 MB
+Progress:   50%
+Speed:      8.4 MB/s
+Remaining:   250 MB
+ETA:        30 seconds
+
+The values above are an example of how the UI should display real values, not values to hardcode.
+
+3.2 Correct Percentage Calculation
+
+When the total size is known:
+
+percentage = downloaded_bytes / total_bytes * 100
+
+Clamp it between 0 and 100.
+
+Use actual byte counts, not timer-based increments.
+
+Example:
+
+0 MB / 500 MB = 0%
+250 MB / 500 MB = 50%
+500 MB / 500 MB = 100%
+
+Do not round a task to 100% before its output is actually finished.
+
+The download can reach 100% transfer progress while still being in Processing, Muxing, or Verifying. The UI must distinguish these stages.
+
+3.3 Unknown Total Size
+
+When the total file size is unknown:
+
+- Use an indeterminate progress bar.
+- Show downloaded bytes.
+- Show speed.
+- Do not invent a total.
+- Do not invent a percentage.
+- Switch to determinate progress only when the backend obtains reliable total size.
+
+3.4 Accurate Speed and ETA
+
+Implement real speed calculations based on actual byte changes over time.
+
+Requirements:
+
+- Avoid unstable speed spikes.
+- Use a sensible smoothing algorithm.
+- Reset speed appropriately on pause.
+- Do not show download speed during a paused task.
+- Avoid displaying stale speeds.
+- Calculate ETA only if total size and current speed are reliable.
+- Show unavailable ETA as "--".
+- Ensure units are consistent.
+
+3.5 Progress UI
+
+Create one reusable progress component used across the application.
+
+It should support:
+
+- Determinate progress
+- Indeterminate progress
+- Compact mode
+- Detailed mode
+- Processing state
+- Muxing state
+- Verifying state
+- Paused state
+- Failed state
+- Completed state
+
+The component must never create its own fake progress data.
+
+The backend owns progress values. The UI only renders them.
+
+---
+
+PHASE 4 — REPAIR AUDIO AND MUSIC DOWNLOADS
+
+The audio functionality currently has critical problems, including cases where a task reports success but does not produce a usable file.
+
+Audit and rebuild the audio pipeline.
+
+4.1 Actual Output Files
+
+A successful audio task must produce a real playable file in the selected destination.
+
+Verify:
+
+- Output file exists
+- File size is greater than zero
+- File is readable
+- File is playable or passes media validation
+- Correct extension
+- Correct format
+- Correct output path
+- No orphaned temporary files
+
+Do not report success merely because a process exited.
+
+Do not hide engine errors.
+
+4.2 Audio Formats
+
+Support only formats that the actual source and conversion pipeline can produce:
+
+- MP3
+- M4A / AAC
+- Opus
+- FLAC
+- WAV
+
+Show the actual selected codec and conversion mode.
+
+Do not pretend that renaming ".webm" to ".mp3" converts audio.
+
+Use FFmpeg only when required and correctly configured.
+
+Verify conversions with actual output inspection.
+
+4.3 Real Audio Quality Information
+
+Display real technical metadata whenever available:
+
+- Codec
+- Bitrate
+- Sample rate
+- Bit depth
+- Channels
+- Source format
+- Output format
+- Lossless/lossy status
+
+IMPORTANT:
+
+Do not incorrectly describe FLAC quality using "1000 Hz".
+
+Use accurate terminology:
+
+- Sample rate: Hz or kHz
+- Bitrate: kbps
+- Bit depth: bits
+- Codec: FLAC, MP3, AAC, Opus, etc.
+
+For example, 44.1 kHz means 44,100 samples per second.
+
+Do not advertise a source as 96 kHz, 192 kHz, lossless, Hi-Res, or another premium quality level unless the actual source supports it and the output has been verified.
+
+Converting lossy audio to FLAC does not restore lost audio information.
+
+Do not use fake presets that imply quality beyond the source.
+
+4.4 Real Metadata
+
+Replace fake audio metadata with actual resolved metadata.
+
+Show:
+
+- Track name
+- Artist
+- Album
+- Album artwork
+- Duration
+- Track number
+- Album track count
+- Release year, if available
+- Source
+- Playlist/collection name
+
+Remove hardcoded metadata such as:
+
+- Spotify Music Track
+- Spotify Artist
+- Fake 180-second durations
+- Fake track counts
+- Placeholder artwork presented as real album artwork
+
+If metadata cannot be retrieved, display a clear unavailable state.
+
+4.5 Metadata Resolution
+
+Inspect the current implementation of:
+
+- "EngineManager::inspect_url"
+- "inspectSpotdlUrl"
+- "src/utils/engine-parser.ts"
+- "NewDownloadModal.tsx"
+- "MediaMetadata"
+- All metadata IPC/API endpoints
+
+Remove the fake Spotify inspection paths.
+
+Implement a legitimate metadata-resolution flow using supported and authorized metadata providers or official APIs where available.
+
+The system should:
+
+1. Identify the URL/source.
+2. Resolve the source.
+3. Retrieve actual metadata.
+4. Normalize it into the application's metadata model.
+5. Return actual tracks and artwork.
+6. Handle unavailable metadata without fabricating values.
+
+Spotify detection must not immediately return fake metadata.
+
+Where the source cannot provide a downloadable media file through an authorized method, clearly explain the limitation instead of pretending the download is supported.
+
+4.6 Playlist Toggle — Fully Functional
+
+The playlist option must actually work.
+
+Implement a real toggle:
+
+[✓] Download entire playlist / album
+[ ] Download selected track only
+
+When enabled:
+
+- Retrieve actual playlist or album tracks.
+- Display real track count.
+- Allow selecting/deselecting individual tracks.
+- Select all.
+- Deselect all.
+- Show track order.
+- Show track name and artist.
+- Display duration where available.
+- Display artwork.
+- Allow playlist selection.
+- Add selected tracks to the queue.
+- Show individual task progress.
+- Show overall playlist progress.
+- Handle individual track failures.
+- Retry failed tracks.
+- Preserve playlist order when requested.
+
+When disabled:
+
+- Download only the selected track.
+- Do not silently download the entire playlist.
+- Do not create additional hidden tasks.
+
+The toggle must change backend behavior, not merely its appearance.
+
+4.7 Audio Download Workflow
+
+Create a reliable workflow:
+
+1. User pastes a URL.
+2. URL is validated.
+3. Source type is detected.
+4. Metadata is resolved.
+5. Track/playlist information is displayed.
+6. User chooses single-track or playlist mode.
+7. User selects tracks if applicable.
+8. User chooses output format.
+9. User chooses destination.
+10. User starts or queues the task.
+11. Real progress is reported.
+12. Conversion is performed if necessary.
+13. Output is verified.
+14. Metadata tags and artwork are embedded if supported.
+15. Task is marked completed only after verification.
+
+---
+
+PHASE 5 — FIX VIDEO DOWNLOADS COMPLETELY
+
+Video downloading must no longer behave like a disconnected subsystem.
+
+Integrate it into the unified Download Core while preserving specialized video selection functionality.
+
+5.1 Real Video Metadata
+
+Resolve actual:
+
+- Title
+- Thumbnail
+- Duration
+- Creator/channel
+- Upload information, if available
+- Available formats
+- Actual resolutions
+- Actual codecs
+- Container
+- Audio availability
+- File size where reliable
+
+Remove fake quality options.
+
+5.2 Real Format Selection
+
+The format selector must display formats actually available from the source.
+
+Do not show:
+
+- Fake 4K
+- Fake 1080p
+- Fake 720p
+- Fake bitrate
+- Fake codec
+- Fake file size
+
+Format selection must correspond to actual engine options.
+
+Show clear details:
+
+Resolution
+Video codec
+Audio codec
+Container
+Estimated size
+Frame rate, when available
+
+5.3 Audio/Video Stream Handling
+
+Correctly handle:
+
+- Combined audio/video streams
+- Video-only streams
+- Audio-only streams
+- Separate video and audio streams
+- Different container compatibility requirements
+
+When separate streams are required:
+
+- Download the correct streams.
+- Mux them correctly using FFmpeg when needed.
+- Verify the final output.
+- Handle FFmpeg errors properly.
+- Preserve correct file extension.
+- Remove temporary files after verified success.
+
+Never leave a video with no audio because the wrong stream was selected.
+
+Never mark a muxing task completed before muxing succeeds.
+
+5.4 Unified Video Progress
+
+Video downloads must use the same accurate progress engine.
+
+Support real:
+
+- Downloaded bytes
+- Total bytes
+- Percentage
+- Speed
+- ETA
+- Download stage
+- Muxing stage
+- Processing stage
+- Final verification
+
+Remove duplicate video-only progress systems.
+
+---
+
+PHASE 6 — REDESIGN THE ENTIRE UI/UX
+
+Completely redesign the interface.
+
+Do not simply change colors or rearrange the current cards.
+
+The goal is to create a premium Windows desktop download manager with the usability and functional clarity of IDM and AB Download Manager, but with a more modern, polished, cohesive design.
+
+6.1 Design Direction
+
+Create a professional desktop application UI:
+
+- Premium dark graphite theme
+- Proper light theme
+- Clean typography
+- Consistent spacing
+- Clear hierarchy
+- Compact layout
+- Refined icons
+- Subtle animations
+- Smooth transitions
+- Professional hover states
+- High-quality selected states
+- Excellent alignment
+- Responsive layout
+- Minimal visual noise
+
+Avoid:
+
+- Neon colors
+- Excessive gradients
+- Excessive glow
+- Oversized cards
+- Unnecessary rounded containers everywhere
+- Fake dashboard charts
+- Excessive empty space
+- Generic admin dashboard aesthetics
+- Inconsistent icon styles
+- Decorative components that serve no purpose
+
+The app should look like a native premium Windows utility, not a website placed inside a desktop window.
+
+6.2 Main Navigation
+
+Consolidate redundant sections.
+
+Recommended sidebar:
+
+- Library
+- All Downloads
+- Active
+- Queue
+- Completed
+- Failed
+- Audio
+- Video
+- Categories
+
+Settings and Engine Management should remain accessible without duplicating navigation.
+
+Do not maintain separate pages for Active, Paused, Failed, Completed, and Queue if they can be implemented cleanly as filtered views of the same Download Center.
+
+6.3 Download Center
+
+Create a unified Download Center.
+
+Use compact rows rather than oversized cards.
+
+Each row should contain:
+
+- File icon or thumbnail
+- File name
+- Source/type
+- Status
+- Real progress bar
+- Downloaded/total size
+- Speed
+- ETA
+- Destination where appropriate
+- Pause/resume
+- Cancel
+- Retry where appropriate
+- More actions menu
+
+Rows should be compact, readable, and visually consistent.
+
+Allow:
+
+- Search
+- Filtering
+- Sorting
+- Selecting multiple downloads
+- Bulk actions
+- Context menu
+- Copy URL
+- Open file
+- Open folder
+- Rename
+- Remove from list
+- Delete file with confirmation
+
+Use real backend state.
+
+6.4 Main Toolbar
+
+Implement a useful toolbar containing:
+
+- Search
+- Filter
+- Sort
+- Add Download
+- Pause All
+- Resume All
+- Queue controls
+- Current aggregate speed
+
+Only show actions when they are useful and supported.
+
+6.5 New Download Modal
+
+Redesign the New Download modal into a professional workflow.
+
+Steps:
+
+Step 1 — URL Input
+
+- URL field
+- Paste
+- Optional clipboard detection
+- Multi-URL support
+- Validation
+- Clear input
+
+Step 2 — Inspection
+
+Display real:
+
+- Thumbnail
+- Title
+- Creator
+- Duration
+- Source type
+- Available formats
+
+Step 3 — Selection
+
+Depending on the source:
+
+- Single file
+- Video
+- Audio
+- Playlist
+- Batch URLs
+
+Step 4 — Quality / Format
+
+Display real available formats only.
+
+Step 5 — Destination
+
+- Choose folder
+- Filename
+- Extension
+- Duplicate detection
+- Overwrite confirmation
+- Invalid filename handling
+
+Step 6 — Start
+
+- Download now
+- Add to queue
+
+The modal must be responsive and usable on smaller windows.
+
+6.6 Download Details Panel
+
+Provide a detailed view for an individual download.
+
+Display:
+
+- Filename
+- Source URL
+- Destination
+- Total size
+- Downloaded
+- Remaining
+- Percentage
+- Current speed
+- Average speed
+- ETA
+- Start time
+- Elapsed time
+- Status
+- Engine
+- Source type
+- Format
+- Quality
+- Retry count
+- Last error
+- Download logs
+
+Use real values.
+
+6.7 Playlist UI
+
+Design a real playlist selection interface:
+
+- Playlist header
+- Artwork
+- Title
+- Creator
+- Track count
+- Duration
+- Track list
+- Selection checkboxes
+- Select all
+- Deselect all
+- Playlist toggle
+- Add selected to queue
+
+Do not overload the UI with unnecessary controls.
+
+6.8 Settings Redesign
+
+Consolidate settings into well-organized categories:
+
+- General
+- Downloads
+- Connection
+- Queue
+- Audio
+- Video
+- Engines
+- Cookies
+- Notifications
+- Appearance
+- Storage
+- Advanced
+- About
+
+Remove duplicate settings.
+
+Ensure every setting:
+
+- Has a clear explanation.
+- Has a correct default.
+- Persists after restart.
+- Actually changes application behavior.
+- Has proper validation.
+- Does not conflict with another setting.
+
+Remove fake controls.
+
+6.9 Responsive Behavior
+
+Ensure the UI works at:
+
+- 1280×720
+- 1024×768
+- 900×600
+- Smaller resize states
+
+At smaller widths:
+
+- Sidebar should collapse appropriately.
+- Download rows should adapt.
+- Secondary metadata may move into detail views.
+- Buttons should not overlap.
+- Text should not overflow.
+- Modals should remain usable.
+- No horizontal overflow.
+
+Use a coherent breakpoint system.
+
+---
+
+PHASE 7 — REMOVE DUPLICATION AND MERGE REDUNDANT FEATURES
+
+Identify and consolidate all duplicated systems.
+
+Merge:
+
+- Multiple progress implementations → one shared progress system
+- Active/Paused/Completed/Failed pages → filtered Download Center
+- Multiple task state implementations → centralized state machine
+- Separate retry logic → unified retry system
+- Separate pause/resume logic → unified controls
+- Separate notifications → one notification service
+- Separate history systems → one persistent history
+- Audio Download / Music Download duplication → unified audio workflow
+- Video backend logic → shared Download Core
+- Duplicate settings → central settings
+- Duplicate URL inspection → one inspection service
+- Duplicate engine status → one engine management system
+- Duplicate API error handling → centralized error system
+
+Keep specialized interfaces when they serve a distinct purpose, but connect them to the unified architecture.
+
+---
+
+PHASE 8 — HISTORY AND STATISTICS
+
+Implement actual persistent history.
+
+Include:
+
+- Recent
+- Completed
+- Failed
+- Cancelled
+- Search
+- Filters
+- Sort
+- Remove individual entries
+- Clear history
+- Open downloaded file
+- Open destination folder
+- Retry
+
+Statistics must be calculated from real data:
+
+- Total downloads
+- Completed count
+- Failed count
+- Total downloaded bytes
+- Total time
+- Average speed where accurately measurable
+
+Do not create fake charts or statistics.
+
+Deleting history must not accidentally delete files unless the user explicitly chooses to delete the actual files.
+
+Handle database consistency correctly.
+
+---
+
+PHASE 9 — ENGINE MANAGEMENT
+
+Rebuild the Engine Management interface.
+
+Support actual engine status and operations:
+
+- Installed
+- Not installed
+- Version
+- Update available
+- Install
+- Update
+- Repair
+- Reinstall
+- Remove
+- Installation location
+- Download progress
+- Error details
+- Verification
+
+Verify downloaded engine binaries when possible using official sources and checksums.
+
+Do not display fake installed status.
+
+Prevent multiple conflicting engine installations.
+
+Use centralized engine lifecycle management.
+
+---
+
+PHASE 10 — COOKIES AND AUTHENTICATION
+
+Review and repair cookie support.
+
+Features should include:
+
+- Browser detection
+- Browser selection
+- Import
+- Test
+- Validate
+- Expiration detection when possible
+- Invalid cookie handling
+- Remove cookies
+- File/path information
+- Engine integration
+
+A cookie test must actually test authentication/access against the selected supported source.
+
+Do not declare cookies valid merely because a file exists.
+
+Protect sensitive cookie data:
+
+- Do not log cookie contents.
+- Do not display raw cookie values.
+- Do not expose them to unnecessary frontend components.
+- Do not leak them in error messages.
+
+---
+
+PHASE 11 — ADVANCED FEATURES
+
+Implement and integrate the following where technically appropriate.
+
+11.1 Speed Limiter
+
+- Global speed limit
+- Per-download limit
+- Enable/disable
+- Persistent configuration
+- Correct unit conversion
+
+11.2 Scheduler
+
+- Start downloads at a configured time
+- Stop downloads at a configured time
+- Schedule queue
+- Persist schedules
+- Correct handling when the application is closed
+
+Do not pretend a schedule will execute while the application is not running unless a real background mechanism supports it.
+
+11.3 Clipboard Monitoring
+
+Optional clipboard monitoring:
+
+- Detect supported URLs
+- Show an unobtrusive prompt
+- Avoid duplicate prompts
+- Enable/disable in settings
+- Do not constantly steal focus
+
+11.4 Batch Downloads
+
+Support multiple URLs.
+
+- Validation
+- Duplicate detection
+- Batch inspection
+- Add to queue
+- Bulk actions
+- Error isolation
+
+One invalid URL must not break the entire batch.
+
+11.5 Categories
+
+Implement functional categories.
+
+Allow:
+
+- Automatic categorization
+- User-created categories
+- Category destination folders
+- Filters
+- Persistent configuration
+
+Do not create hardcoded fake categories that cannot be changed.
+
+11.6 Floating Speed Widget
+
+If feasible, add an optional compact floating speed monitor.
+
+- Real aggregate speed
+- Compact window
+- Always-on-top toggle
+- Show/hide
+- Dragging
+- Configurable
+- No fake data
+
+Do not let it interfere with the main application.
+
+11.7 Integrity Verification
+
+Support SHA-256 verification when a valid checksum is available or when the user explicitly requests local integrity verification.
+
+Do not invent remote checksums.
+
+---
+
+PHASE 12 — NOTIFICATIONS AND SYSTEM TRAY
+
+Implement one unified notification system.
+
+Configurable notifications:
+
+- Download started
+- Completed
+- Failed
+- Retry
+- Queue finished
+
+Avoid duplicate notifications.
+
+System tray:
+
+- Open application
+- Pause all
+- Resume all
+- Show aggregate speed if supported
+
+Verify that tray actions affect real downloads.
+
+---
+
+PHASE 13 — BACKEND, FRONTEND, AND IPC CONSISTENCY
+
+Audit the entire communication layer.
+
+Inspect:
+
+- "src/services/api.ts"
+- Tauri commands
+- Server routes
+- Rust command registration
+- Engine interfaces
+- TypeScript types
+- Event listeners
+- Progress event payloads
+
+Ensure:
+
+- No mismatched payload schemas
+- No silent IPC failures
+- No duplicated command definitions
+- No stale frontend state
+- No missing event cleanup
+- No leaking event listeners
+- No invalid serialization
+- No unnecessary polling
+- No race conditions
+
+Create a consistent typed contract between Rust, frontend, and Express development mode.
+
+Ensure native mode and development/server mode produce equivalent behavior.
+
+---
+
+PHASE 14 — CHILD PROCESS MANAGEMENT
+
+Inspect and improve "src-tauri/src/process.rs".
+
+All child processes must be managed properly.
+
+Implement where applicable:
+
+- Cancellation
+- Timeout
+- Graceful shutdown
+- Stderr/stdout handling
+- Exit-code validation
+- Process cleanup
+- No orphan processes
+- Windows "CREATE_NO_WINDOW"
+- Error propagation
+- Resource cleanup
+
+Prevent commands from hanging indefinitely.
+
+Ensure cancellation works for real engine processes, not only the UI.
+
+Do not kill unrelated system processes.
+
+---
+
+PHASE 15 — ERROR HANDLING
+
+Create centralized, understandable error handling.
+
+Errors should:
+
+- Have meaningful codes
+- Have readable descriptions
+- Include actionable suggestions
+- Preserve technical details in logs
+- Avoid leaking sensitive data
+- Be shown at the appropriate UI level
+
+Handle:
+
+- Network errors
+- Invalid URLs
+- Unsupported sources
+- Authentication errors
+- Missing engines
+- Missing FFmpeg
+- Disk space
+- Permission errors
+- Filename conflicts
+- Process failures
+- Conversion failures
+- Mux failures
+- Corrupt output
+- Unknown file size
+- Timeouts
+- Cancelled tasks
+
+Do not swallow exceptions.
+
+Do not show generic “Something went wrong” when the underlying error can be identified.
+
+---
+
+PHASE 16 — PERFORMANCE AND MEMORY
+
+Review the application for performance problems.
+
+Improve:
+
+- Large download lists
+- Event handling
+- UI rendering
+- React state updates
+- Polling
+- Database queries
+- File scanning
+- Metadata inspection
+- Memory usage
+- Child-process cleanup
+
+Prevent:
+
+- UI freezing
+- Unnecessary rerenders
+- Memory leaks
+- Unbounded logs
+- Repeated metadata requests
+- Excessive disk scans
+
+Use virtualization if download lists can become large.
+
+---
+
+PHASE 17 — PROJECT CLEANUP
+
+Inspect and clean up the repository carefully.
+
+Remove only genuinely unnecessary:
+
+- Dead code
+- Unused components
+- Unused dependencies
+- Duplicate styles
+- Old test files that are truly obsolete
+- Build artifacts
+- Temporary files
+- Stale documentation
+
+Do not delete important project files.
+
+Do not remove functionality merely because its implementation is inconvenient.
+
+Organize source code logically.
+
+Maintain consistent naming.
+
+Avoid creating unnecessary abstractions and excessive files.
+
+---
+
+PHASE 18 — TESTING
+
+Create and run tests for the critical functionality.
+
+Download Core Tests
+
+- State transitions
+- Queue ordering
+- Pause/resume
+- Cancel
+- Retry
+- Duplicate detection
+- Persistence
+- Recovery
+
+Progress Tests
+
+- 0 bytes
+- Unknown size
+- Partial download
+- 50%
+- 100%
+- Zero-speed state
+- Paused
+- Completed
+- Failed
+- Processing/muxing
+- ETA unavailable
+
+Audio Tests
+
+- Metadata inspection
+- Single-track mode
+- Playlist mode
+- Track selection
+- Format conversion
+- File creation
+- File validation
+- Tagging
+- Failure handling
+
+Video Tests
+
+- Metadata inspection
+- Format selection
+- Audio/video stream selection
+- Muxing
+- File extension
+- Output validation
+- Progress
+- Failure handling
+
+UI Tests
+
+- Modal workflow
+- Responsive layout
+- Queue controls
+- Download actions
+- Settings persistence
+- Playlist toggle
+- Progress display
+
+Integration Tests
+
+Test the complete workflow:
+
+URL
+  ↓
+Inspect
+  ↓
+Metadata
+  ↓
+Format Selection
+  ↓
+Queue
+  ↓
+Download
+  ↓
+Processing / Muxing
+  ↓
+Verification
+  ↓
+Real Output File
+  ↓
+Completed
+
+Use legal, freely available test assets and sources.
+
+If a live integration test cannot run because of network/provider restrictions, document the exact limitation and run the remaining available tests. Do not mark an untested feature as verified.
+
+---
+
+PHASE 19 — BUILD AND CI
+
+After implementation:
+
+1. Check formatting.
+2. Run TypeScript checks.
+3. Run frontend build.
+4. Run Rust formatting.
+5. Run Rust tests.
+6. Run Rust compilation.
+7. Run application tests.
+8. Run integration tests where feasible.
+9. Build the Windows installer.
+10. Inspect the generated artifacts.
+11. Fix errors.
+12. Repeat the checks until the project is clean.
+
+Inspect GitHub Actions and repair any existing workflow problems.
+
+Do not bypass failures using:
+
+- "--force"
+- Fake lockfiles
+- Disabling tests
+- Removing optional dependencies
+- Skipping important compilation stages
+- Ignoring errors
+- Replacing real builds with dummy artifacts
+
+Preserve dependency integrity.
+
+Ensure the project can be built on a clean Windows runner.
+
+---
+
+PHASE 20 — FINAL QA
+
+Perform a final audit of the complete application.
+
+Verify every major feature:
+
+Download Center
+
+- [ ] Real download list
+- [ ] Real statuses
+- [ ] Search
+- [ ] Filters
+- [ ] Sorting
+- [ ] Bulk actions
+- [ ] Context menu
+
+Download Core
+
+- [ ] Unified task system
+- [ ] Queue
+- [ ] Pause
+- [ ] Resume
+- [ ] Cancel
+- [ ] Retry
+- [ ] Persistence
+- [ ] Recovery
+
+Progress
+
+- [ ] Actual bytes
+- [ ] Accurate percentage
+- [ ] Real speed
+- [ ] ETA
+- [ ] Unknown-size behavior
+- [ ] Correct completion behavior
+
+Audio
+
+- [ ] Real metadata
+- [ ] Actual artwork
+- [ ] Track selection
+- [ ] Playlist toggle
+- [ ] Real output
+- [ ] Correct formats
+- [ ] Verified file
+- [ ] Correct tags
+
+Video
+
+- [ ] Real quality options
+- [ ] Correct codecs
+- [ ] Correct audio
+- [ ] Correct muxing
+- [ ] Correct extension
+- [ ] Verified output
+
+Settings
+
+- [ ] Persistent
+- [ ] No duplicates
+- [ ] Functional
+- [ ] Correct defaults
+
+Engines
+
+- [ ] Accurate status
+- [ ] Install
+- [ ] Update
+- [ ] Repair
+- [ ] Verification
+
+UI
+
+- [ ] Professional
+- [ ] Consistent
+- [ ] Responsive
+- [ ] Dark theme
+- [ ] Light theme
+- [ ] No fake components
+- [ ] No overflow
+- [ ] No broken controls
+
+Build
+
+- [ ] TypeScript clean
+- [ ] Rust clean
+- [ ] Tests pass
+- [ ] Windows build succeeds
+- [ ] Installer verified
+
+---
+
+EXECUTION STRATEGY
+
+Execute this task in the following order:
+
+1. Repository audit
+2. Architecture mapping
+3. Data model redesign
+4. Unified Download Core
+5. Real progress system
+6. Queue and task state
+7. Direct download repair
+8. Audio pipeline repair
+9. Playlist support
+10. Video pipeline repair
+11. FFmpeg and output verification
+12. Backend/API unification
+13. UI redesign
+14. Settings consolidation
+15. Engine management
+16. History/statistics
+17. Advanced features
+18. Repository cleanup
+19. Tests
+20. Windows build
+21. Final verification
+
+You may adjust this order if a technical dependency requires it, but do not skip phases.
+
+---
+
+FINAL REQUIREMENTS
+
+The finished VANTA Download Manager must be a real, functional, reliable desktop download manager.
+
+The most important outcomes are:
+
+1. A genuinely unified download architecture.
+2. A progress bar that reflects actual downloaded bytes and displays accurate values from 0% to 100%.
+3. Reliable music/audio downloads that actually produce valid output files.
+4. A functional playlist toggle with track selection and real playlist behavior.
+5. Accurate media metadata.
+6. Real video qualities, formats, and codecs — not fabricated options.
+7. Correct audio/video stream handling and FFmpeg muxing.
+8. A completely redesigned professional UI.
+9. Consolidation of redundant components and features.
+10. Working queue, pause, resume, cancel, retry, history, and settings.
+11. Stable Windows builds.
+12. Tests and verification of actual functionality.
+
+How to work
+
+Work autonomously.
+
+Inspect the repository before making assumptions.
+
+Make the changes directly in the codebase.
+
+Keep track of completed and remaining work.
+
+When you encounter a bug, trace it to its root cause and fix the underlying problem instead of hiding the symptom.
+
+If a feature cannot be implemented because a provider, API, or technical restriction prevents it, implement the best legitimate fallback, make the limitation clear in the UI, and document it.
+
+Do not stop after producing the plan.
+
+Do not stop after redesigning the UI.
+
+Do not stop after the first successful build.
+
+Continue until the application has been fully audited, refactored, tested, and verified to the extent technically possible.
+
+At the end, provide a concise but detailed report containing:
+
+- Major architectural changes
+- Features implemented
+- Components merged or removed
+- Bugs fixed
+- UI redesign summary
+- Tests actually executed and their results
+- Build results
+- Remaining limitations
+- Files changed
+- Any unresolved issues
+
+Start by auditing the repository, then execute the entire task. Do not wait for further instructions.

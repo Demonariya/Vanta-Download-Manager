@@ -1,11 +1,4 @@
 !macro NSIS_HOOK_POSTINSTALL
-  ; Install the unpacked browser extension beside the application uninstaller.
-  CreateDirectory "$INSTDIR\Extension"
-  IfFileExists "$INSTDIR\resources\extension\manifest.json" 0 +4
-    CopyFiles /SILENT "$INSTDIR\resources\extension\*.*" "$INSTDIR\Extension"
-    CreateDirectory "$INSTDIR\Extension\icons"
-    CopyFiles /SILENT "$INSTDIR\resources\extension\icons\*.*" "$INSTDIR\Extension\icons"
-
   ; Ensure managed Engine directory layout exists under C:\Program Files\VANTA Download Manager\Engine
   CreateDirectory "$INSTDIR\Engine"
   CreateDirectory "$INSTDIR\Engine\yt-dlp"
@@ -23,10 +16,6 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  ; Remove the browser extension shipped with this installation.
-  IfFileExists "$INSTDIR\Extension\*.*" 0 +2
-    RMDir /r "$INSTDIR\Extension"
-
   ; Cleanly remove app-managed engines installed under $INSTDIR\Engine
   ; Never remove per-user %APPDATA%\VANTA Download Manager history/settings or external Python installations.
   IfFileExists "$INSTDIR\Engine\*.*" 0 +2

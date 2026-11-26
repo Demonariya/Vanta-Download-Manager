@@ -31,33 +31,26 @@ async function scanPage() {
       target: { tabId: tab.id },
       func: () => {
         const found = new Map();
-        const add = (raw, label, kind, thumbnail = '') => {
+        const add = (raw, label, kind) => {
           if (!raw) return;
           try {
             const url = new URL(raw, location.href).href;
             if (!/^https?:/i.test(url) || found.has(url)) return;
-            found.set(url, { url, label: label || url.split('/').pop() || 'Media resource', kind, thumbnail });
+            found.set(url, { url, label: label || url.split('/').pop() || 'Media resource', kind });
           } catch {}
         };
         document.querySelectorAll('video,audio').forEach((el) => {
           const kind = el.tagName.toLowerCase();
-          add(el.currentSrc || el.src, el.getAttribute('aria-label') || el.getAttribute('title') || document.title || kind, kind, el.poster || document.querySelector('meta[property=\"og:image\"]')?.content || '');
+          add(el.currentSrc || el.src, el.getAttribute('aria-label') || el.getAttribute('title') || kind, kind);
           el.querySelectorAll('source').forEach((s) => add(s.src, s.type || 'Media source', kind));
         });
-        document.querySelectorAll('meta[property="og:video"],meta[property="og:audio"],meta[name="twitter:player:stream"]').forEach((el) => add(el.content, el.getAttribute('property') || 'Page media', el.getAttribute('property')?.includes('video') ? 'video' : 'audio'));
+        document.querySelectorAll('meta[property="og:video"],meta[property="og:audio"],meta[name="twitter:player:stream"]').forEach((el) => add(el.content, el.getAttribute('property') || 'Page media', 'media'));
         document.querySelectorAll('a[href]').forEach((a) => {
           if (/\.(mp4|m4v|webm|mov|mp3|m4a|aac|flac|wav|ogg|opus)(?:$|[?#])/i.test(a.href)) add(a.href, a.textContent.trim() || a.href.split('/').pop(), 'direct link');
         });
-        const youtubeId = location.hostname.endsWith('youtube.com') ? new URL(location.href).searchParams.get('v') : location.hostname === 'youtu.be' ? location.pathname.slice(1) : null;
-        if (youtubeId && /^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {
-          const thumbnail = document.querySelector('meta[property="og:image"]')?.content || `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`;
-          const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
-          add(location.href, title, 'video', thumbnail);
-        }
-        if (!found.size) {
-          const video = document.querySelector('video');
-          if (video) add(location.href, document.title, 'video', video.poster || document.querySelector('meta[property="og:image"]')?.content || '');
-        }
+        document.querySelectorAll('img[src]').forEach((img) => {
+          if (img.naturalWidth >= 320 && img.naturalHeight >= 180) add(img.currentSrc || img.src, img.alt || 'Image', 'image');
+        });
         return Array.from(found.values()).slice(0, 50);
       }
     });
@@ -70,7 +63,7 @@ async function scanPage() {
 }
 function renderCandidates() {
   $('count').textContent = `${candidates.length} found`;
-  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter || (activeFilter === 'direct link' && item.kind === 'direct link'));
+  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter);
   const root = $('candidates'); root.replaceChildren();
   if (!visible.length) {
     const empty = document.createElement('div'); empty.className = 'empty';
@@ -80,13 +73,11 @@ function renderCandidates() {
   for (const item of visible) {
     const row = document.createElement('div'); row.className = 'candidate';
     const kind = document.createElement('div'); kind.className = 'kind';
-    kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : '↗';
+    kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : item.kind === 'image' ? '▧' : '↗';
     const info = document.createElement('div'); info.className = 'candidate-info';
-    if (item.thumbnail) { const thumb = document.createElement('img'); thumb.className = 'candidate-thumb'; thumb.src = item.thumbnail; thumb.alt = ''; thumb.loading = 'lazy'; thumb.referrerPolicy = 'no-referrer'; row.append(thumb); }
     const name = document.createElement('div'); name.className = 'candidate-name'; name.textContent = item.label;
-    const meta = document.createElement('div'); meta.className = 'candidate-url';
-    try { meta.textContent = item.kind === 'video' ? 'Video · ' + new URL(item.url).hostname : new URL(item.url).hostname; } catch { meta.textContent = item.kind; }
-    info.append(name, meta);
+    const url = document.createElement('div'); url.className = 'candidate-url'; url.textContent = item.url;
+    info.append(name, url);
     const button = document.createElement('button'); button.textContent = 'Add';
     button.addEventListener('click', () => send(item.url, item.label));
     row.append(kind, info, button); root.append(row);

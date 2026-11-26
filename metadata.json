@@ -1,0 +1,6 @@
+{
+  "name": "VANTA Download Manager",
+  "description": "Premium desktop and workstation video and music download manager powered by yt-dlp, spotDL, FFmpeg, and high-concurrency queue engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
