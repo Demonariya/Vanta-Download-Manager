@@ -44,13 +44,20 @@ async function scanPage() {
           add(el.currentSrc || el.src, el.getAttribute('aria-label') || el.getAttribute('title') || document.title || kind, kind, el.poster || document.querySelector('meta[property=\"og:image\"]')?.content || '');
           el.querySelectorAll('source').forEach((s) => add(s.src, s.type || 'Media source', kind));
         });
-        document.querySelectorAll('meta[property="og:video"],meta[property="og:audio"],meta[name="twitter:player:stream"]').forEach((el) => add(el.content, el.getAttribute('property') || 'Page media', 'media'));
+        document.querySelectorAll('meta[property="og:video"],meta[property="og:audio"],meta[name="twitter:player:stream"]').forEach((el) => add(el.content, el.getAttribute('property') || 'Page media', el.getAttribute('property')?.includes('video') ? 'video' : 'audio'));
         document.querySelectorAll('a[href]').forEach((a) => {
           if (/\.(mp4|m4v|webm|mov|mp3|m4a|aac|flac|wav|ogg|opus)(?:$|[?#])/i.test(a.href)) add(a.href, a.textContent.trim() || a.href.split('/').pop(), 'direct link');
         });
-        document.querySelectorAll('img[src]').forEach((img) => {
-          if (img.naturalWidth >= 320 && img.naturalHeight >= 180) add(img.currentSrc || img.src, img.alt || 'Image', 'image');
-        });
+        const youtubeId = location.hostname.endsWith('youtube.com') ? new URL(location.href).searchParams.get('v') : location.hostname === 'youtu.be' ? location.pathname.slice(1) : null;
+        if (youtubeId && /^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {
+          const thumbnail = document.querySelector('meta[property="og:image"]')?.content || `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`;
+          const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+          add(location.href, title, 'video', thumbnail);
+        }
+        if (!found.size) {
+          const video = document.querySelector('video');
+          if (video) add(location.href, document.title, 'video', video.poster || document.querySelector('meta[property="og:image"]')?.content || '');
+        }
         return Array.from(found.values()).slice(0, 50);
       }
     });
@@ -76,8 +83,9 @@ function renderCandidates() {
     kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : '↗';
     const info = document.createElement('div'); info.className = 'candidate-info';\n    if (item.thumbnail) { const thumb = document.createElement('img'); thumb.className = 'candidate-thumb'; thumb.src = item.thumbnail; thumb.alt = ''; thumb.loading = 'lazy'; thumb.referrerPolicy = 'no-referrer'; row.append(thumb); }
     const name = document.createElement('div'); name.className = 'candidate-name'; name.textContent = item.label;
-    const url = document.createElement('div'); url.className = 'candidate-url'; url.textContent = item.url;
-    info.append(name, url);
+    const meta = document.createElement('div'); meta.className = 'candidate-url';
+    try { meta.textContent = item.kind === 'video' ? 'Video · ' + new URL(item.url).hostname : new URL(item.url).hostname; } catch { meta.textContent = item.kind; }
+    info.append(name, meta);
     const button = document.createElement('button'); button.textContent = 'Add';
     button.addEventListener('click', () => send(item.url, item.label));
     row.append(kind, info, button); root.append(row);

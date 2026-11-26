@@ -1,7 +1,9 @@
 const BRIDGE = 'http://127.0.0.1:47831/download';
 
 async function sendToVanta(url, title = '', source = 'context-menu') {
-  if (!/^https?:\/\//i.test(url || '')) throw new Error('Only HTTP(S) links can be sent to VANTA.');
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('This item is not a downloadable web URL.'); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) throw new Error('Only HTTP(S) links can be sent to VANTA.');
   const response = await fetch(BRIDGE, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -29,7 +31,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   const url = info.linkUrl || (info.menuItemId === 'vanta-media' ? info.srcUrl : '') || (info.menuItemId === 'vanta-page' ? tab?.url : '');
-  if (!url || !/^https?:\\/\\//i.test(url)) { console.info('[VANTA] Ignored non-web or protected media URL.'); return; }
+  if (!url || !/^https?:\/\//i.test(url)) { console.info('[VANTA] Ignored non-web or protected media URL.'); return; }
   try {
     await sendToVanta(url, tab?.title || '', 'context-menu');
     if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'VANTA_SENT' }).catch(() => {});

@@ -16,6 +16,10 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; Remove the browser extension shipped with this installation.
+  IfFileExists "$INSTDIR\Extension\*.*" 0 +2
+    RMDir /r "$INSTDIR\Extension"
+
   ; Cleanly remove app-managed engines installed under $INSTDIR\Engine
   ; Never remove per-user %APPDATA%\VANTA Download Manager history/settings or external Python installations.
   IfFileExists "$INSTDIR\Engine\*.*" 0 +2
