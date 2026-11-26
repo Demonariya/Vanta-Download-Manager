@@ -96,6 +96,14 @@ pub fn start(app: AppHandle) {
                 };
                 let origin = extension_origin(headers);
                 let request_line = headers.lines().next().unwrap_or("");
+                if request_line.starts_with("GET /health ") {
+                    if let Some(origin) = origin {
+                        respond(&mut stream, "200 OK", r#"{"ok":true,"service":"VANTA Browser Bridge"}"#, Some(origin)).await;
+                    } else {
+                        respond(&mut stream, "403 Forbidden", r#"{"ok":false,"error":"Extension origin required"}"#, None).await;
+                    }
+                    return;
+                }
                 if request_line.starts_with("OPTIONS ") {
                     if let Some(origin) = origin {
                         respond(&mut stream, "204 No Content", "", Some(origin)).await;
