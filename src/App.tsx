@@ -129,7 +129,7 @@ export default function App() {
     let cancelled = false;
     void listen<{ url: string; title?: string; source?: string }>('browser-download-request', async (event) => {
       const request = event.payload;
-      if (!request?.url || !/^https?:\/\/i.test(request.url)) return;
+      if (!request?.url || !/^https?:\/\//i.test(request.url)) return;
       setInitialInspectUrl(request.url);
       setIsNewDownloadOpen(true);
       try {
