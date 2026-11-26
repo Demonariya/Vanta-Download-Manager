@@ -37,22 +37,38 @@ fn scheduler_managed_tasks() -> &'static Mutex<HashSet<String>> {
 }
 
 fn mark_scheduler_managed_task(task_id: &str) {
-    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).insert(task_id.to_string());
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_id.to_string());
 }
 
 fn clear_scheduler_managed_task(task_id: &str) {
-    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).remove(task_id);
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(task_id);
 }
 
 fn is_scheduler_managed_task(task_id: &str) -> bool {
-    scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).contains(task_id)
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(task_id)
 }
 
 fn clear_manual_pending_task(task_id: &str) {
-    manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner()).remove(task_id);
+    manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(task_id);
 }
 
-fn should_schedule_outside_window(scheduler_open: bool, task_id: &str, manual_ids: &HashSet<String>) -> bool {
+fn should_schedule_outside_window(
+    scheduler_open: bool,
+    task_id: &str,
+    manual_ids: &HashSet<String>,
+) -> bool {
     scheduler_open || manual_ids.contains(task_id)
 }
 
@@ -868,7 +884,7 @@ pub fn delete_task(
     state: State<'_, AppState>,
     id: String,
     delete_file: Option<bool>,
- ) -> Result<(), String> {
+) -> Result<(), String> {
     clear_scheduler_managed_task(&id);
     clear_manual_pending_task(&id);
     let removed_pid = {
@@ -2053,12 +2069,19 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
     schedule_next_with_manual_tasks(app, state, &HashSet::new());
 }
 
-fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_task_ids: &HashSet<String>) {
+fn schedule_next_with_manual_tasks(
+    app: &AppHandle,
+    state: &AppState,
+    manual_task_ids: &HashSet<String>,
+) {
     {
         let mut pending = manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner());
         pending.extend(manual_task_ids.iter().cloned());
     }
-    let pending_manual_ids = manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let pending_manual_ids = manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     // Multiple UI commands can request scheduling concurrently. Keep the snapshot,
     // slot calculation, and Queued -> Connecting claims in one critical section so
     // the same task cannot be launched twice or global/per-queue limits exceeded.
@@ -2132,7 +2155,12 @@ fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_tas
         scheduled += 1;
 
         next_task.status = TaskStatus::Connecting;
-        next_task.current_phase = if pending_manual_ids.contains(&next_task.id) { "Starting manually..." } else { "Starting engine..." }.to_string();
+        next_task.current_phase = if pending_manual_ids.contains(&next_task.id) {
+            "Starting manually..."
+        } else {
+            "Starting engine..."
+        }
+        .to_string();
         if pending_manual_ids.contains(&next_task.id) {
             clear_scheduler_managed_task(&next_task.id);
             clear_manual_pending_task(&next_task.id);
