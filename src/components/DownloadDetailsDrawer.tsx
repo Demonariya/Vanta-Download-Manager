@@ -8,6 +8,7 @@ import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { ProgressDisplay, getStatusLabel, getStatusColorClass } from './ProgressDisplay';
 import { MediaThumbnail } from './MediaThumbnail';
 import { api } from '../services/api';
+import { DownloadPropertiesModal } from './DownloadPropertiesModal';
 
 interface DownloadDetailsDrawerProps {
   task: DownloadTask | null;
@@ -28,6 +29,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [logFilter, setLogFilter] = useState<'all' | 'info' | 'warn' | 'error'>('all');
   const [logsNotice, setLogsNotice] = useState<string | null>(null);
+  const [showProperties, setShowProperties] = useState(false);
 
   useEffect(() => {
     if (!task) return;
@@ -134,6 +136,9 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
           ))}
         </nav>
         <div className="flex items-center gap-2 min-w-0">
+          <button type="button" onClick={() => setShowProperties(true)} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] px-2.5 text-[11px] font-medium text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]" title="Open detailed download properties">
+            <Info className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Properties</span>
+          </button>
           <button type="button" onClick={onOpenProgress} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 text-[11px] font-medium text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)]" title="Open independent progress monitor">
             <Download className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Progress Window</span>
           </button>
@@ -285,5 +290,6 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
         )}
       </div>
     </aside>
+    {showProperties && <DownloadPropertiesModal task={task} onClose={() => setShowProperties(false)} />}
   );
 };
