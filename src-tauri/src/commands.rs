@@ -513,7 +513,7 @@ fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
 }
 
 fn subtitle_language_name(code: &str) -> &str {
-    match code.split(['-', '_']).next().unwrap_or(code).to_ascii_lowercase().as_str() {
+    match code.split(|ch| ch == '-' || ch == '_').next().unwrap_or(code).to_ascii_lowercase().as_str() {
         "en" => "English", "fa" | "per" => "Persian", "ar" | "ara" => "Arabic",
         "es" | "spa" => "Spanish", "fr" | "fra" | "fre" => "French",
         "de" | "deu" | "ger" => "German", "it" | "ita" => "Italian",
@@ -4248,7 +4248,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             if let Some(content) = t.lyrics_lrc_content.take() {
                 if let Err(error) = write_lrc_assets(&final_path, &content) {
                     t.status = TaskStatus::Failed;
-                    t.current_phase = "Could not write LRC sidecar".to_string();
+                    t.current_phase = "Could not embed synchronized Lyrics".to_string();
                     t.error_message = Some(error);
                     state.upsert_task(&t);
                     let _ = app.emit("task_updated", &t);
