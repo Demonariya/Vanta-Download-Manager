@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VANTA Browser Integration</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header><div class="brand-mark">V</div><div><strong>VANTA</strong><span>Browser Integration</span></div><span id="status" class="status checking">Checking</span></header>
+    <section class="current">
+      <div class="eyebrow">CURRENT PAGE</div>
+      <div id="page-title" class="page-title">Loading page…</div>
+      <div id="page-url" class="page-url"></div>
+      <button id="send-page" class="primary" disabled>Send page to VANTA</button>
+    </section>
+    <section class="media-section">
+      <div class="section-head"><span>Detected media & links</span><span id="count" class="count">0</span></div>
+      <div id="candidates" class="candidates"><div class="empty">Scanning current page…</div></div>
+    </section>
+    <footer><span>VANTA must be running</span><button id="rescan" class="text-button">Rescan page</button></footer>
+    <div id="notice" class="notice" role="status"></div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
