@@ -503,15 +503,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     key={id}
                     type="button"
-                    onClick={async () => {
-                      const nextTheme = id as ThemeMode;
-                      setForm({ ...form, theme: nextTheme });
+                    onClick={() => {
+                      // Keep theme changes in the same draft as every other preference.
+                      // Applying this immediately would trigger the settings sync effect
+                      // and could discard unrelated unsaved edits in the current form.
+                      setForm({ ...form, theme: id as ThemeMode });
                       setSaveError(null);
-                      try {
-                        await onSaveSettings({ theme: nextTheme });
-                      } catch (err: any) {
-                        setSaveError(err?.message || 'Failed saving theme preference.');
-                      }
                     }}
                     className={`p-3 rounded-lg border flex items-center justify-center gap-2 font-medium transition-colors ${
                       selected
@@ -871,19 +868,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
 
-            <div className="space-y-2 pt-1">
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.auto_resume_on_startup}
-                  onChange={(e) => setForm({ ...form, auto_resume_on_startup: e.target.checked })}
-                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
-                />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Resume unfinished queue items on startup
-                </span>
-              </label>
-            </div>
           </div>
 
           <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
@@ -1001,6 +985,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onChange={(e) => setForm({ ...form, default_video_format: e.target.value })}
               className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
             >
+              <option value="best">Best Available (source)</option>
               <option value="mp4">MP4</option>
               <option value="mkv">MKV</option>
               <option value="webm">WebM</option>
