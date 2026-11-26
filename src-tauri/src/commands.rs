@@ -298,55 +298,217 @@ fn validate_lrc_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
-    if !audio_path.extension().and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("mp3")).unwrap_or(false) {
-        return Ok(false);
+fn lrc_header_value(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("[{}:", key);
+    content.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(&prefix)?.strip_suffix(']')?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn lrc_language(content: &str) -> String {
+    let raw = lrc_header_value(content, "la").unwrap_or_else(|| "und".to_string());
+    let normalized = raw.to_ascii_lowercase().replace('_', "-");
+    let primary = normalized.split('-').next().unwrap_or("und");
+    let iso639_2 = match primary {
+        "en" => "eng", "fa" => "per", "ar" => "ara", "es" => "spa",
+        "fr" => "fra", "de" => "deu", "it" => "ita", "pt" => "por",
+        "ru" => "rus", "ja" => "jpn", "ko" => "kor", "zh" => "zho",
+        "tr" => "tur", "hi" => "hin", "ur" => "urd", "nl" => "nld",
+        "sv" => "swe", "pl" => "pol", "uk" => "ukr", "el" => "ell",
+        "he" => "heb", "th" => "tha", "vi" => "vie", "id" => "ind",
+        "und" => "und",
+        value if value.len() == 3 && value.chars().all(|c| c.is_ascii_alphabetic()) => value,
+        _ => "und",
+    };
+    iso639_2.to_string()
+}
+
+fn ffmetadata_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '=' => escaped.push_str("\\="),
+            ';' => escaped.push_str("\\;"),
+            '#' => escaped.push_str("\\#"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => {}
+            _ => escaped.push(ch),
+        }
     }
+    escaped
+}
+
+fn probe_format_tags(path: &Path) -> Result<HashMap<String, String>, String> {
+    let ffprobe = EngineManager::find_executable("ffprobe")
+        .ok_or_else(|| "FFprobe is required to preserve and verify embedded media tags.".to_string())?;
+    let output = Command::new(ffprobe)
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "json"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Could not inspect existing media tags: {}", error))?;
+    if !output.status.success() {
+        return Err(format!("FFprobe could not read existing metadata: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("FFprobe returned invalid metadata JSON: {}", error))?;
+    let mut tags = HashMap::new();
+    if let Some(object) = value.get("format").and_then(|v| v.get("tags")).and_then(|v| v.as_object()) {
+        for (key, value) in object {
+            if let Some(value) = value.as_str() {
+                tags.insert(key.clone(), value.to_string());
+            }
+        }
+    }
+    Ok(tags)
+}
+
+fn embed_lrc_with_ffmpeg(audio_path: &Path, content: &str) -> Result<(), String> {
+    let ffmpeg = EngineManager::find_executable("ffmpeg")
+        .ok_or_else(|| "FFmpeg is required to embed Lyrics in this audio container.".to_string())?;
+    let tags = probe_format_tags(audio_path)?;
     let entries = parse_lrc_entries(content);
     if entries.is_empty() {
         return Err("No valid timestamped lyric lines were found to embed.".to_string());
     }
-    let mut tag = match Id3Tag::read_from_path(audio_path) {
-        Ok(tag) => tag,
-        Err(Id3Error { kind: Id3ErrorKind::NoTag, .. }) => Id3Tag::new(),
-        Err(error) => return Err(format!("Could not read existing MP3 ID3 tags: {}", error)),
-    };
+
+    let language = lrc_header_value(content, "la").unwrap_or_else(|| "und".to_string());
+    let title = lrc_header_value(content, "ti")
+        .or_else(|| tags.get("title").cloned())
+        .unwrap_or_else(|| audio_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Lyrics").to_string());
+    let artist = lrc_header_value(content, "ar").or_else(|| tags.get("artist").cloned());
     let plain_text = entries.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
-    tag.remove_all_synchronised_lyrics();
-    tag.remove_all_lyrics();
-    tag.add_frame(SynchronisedLyrics {
-        lang: "und".to_string(),
-        timestamp_format: TimestampFormat::Ms,
-        content_type: SynchronisedLyricsType::Lyrics,
-        content: entries,
-        description: "VANTA synchronized lyrics".to_string(),
+
+    let mut metadata = String::from(";FFMETADATA1\n");
+    for (key, value) in &tags {
+        if !matches!(key.to_ascii_lowercase().as_str(), "lyrics" | "syncedlyrics" | "lyrics_language" | "lyrics_title") {
+            metadata.push_str(&format!("{}={}\n", ffmetadata_escape(key), ffmetadata_escape(value)));
+        }
+    }
+    metadata.push_str(&format!("lyrics={}\n", ffmetadata_escape(&plain_text)));
+    metadata.push_str(&format!("syncedlyrics={}\n", ffmetadata_escape(content)));
+    metadata.push_str(&format!("lyrics_language={}\n", ffmetadata_escape(&language)));
+    metadata.push_str(&format!("lyrics_title={}\n", ffmetadata_escape(&title)));
+    if let Some(artist) = artist {
+        metadata.push_str(&format!("lyrics_artist={}\n", ffmetadata_escape(&artist)));
+    }
+
+    let parent = audio_path.parent().unwrap_or_else(|| Path::new("."));
+    let extension = audio_path.extension().and_then(|s| s.to_str()).unwrap_or("media");
+    let stem = audio_path.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+    let token = uuid::Uuid::new_v4();
+    let metadata_path = parent.join(format!(".{}.{}.ffmeta", stem, token));
+    let temp_path = parent.join(format!(".{}.{}.embedded.{}", stem, token, extension));
+    fs::write(&metadata_path, metadata.as_bytes())
+        .map_err(|error| format!("Could not prepare embedded Lyrics metadata: {}", error))?;
+
+    let result = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(audio_path)
+        .args(["-f", "ffmetadata", "-i"])
+        .arg(&metadata_path)
+        .args(["-map", "0", "-map_metadata", "1", "-map_metadata:s", "0:s", "-c", "copy"])
+        .arg(&temp_path)
+        .output();
+
+    let _ = fs::remove_file(&metadata_path);
+    let output = result.map_err(|error| format!("Could not start FFmpeg Lyrics embedding: {}", error))?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("FFmpeg could not embed Lyrics: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+
+    let embedded_tags = match probe_format_tags(&temp_path) {
+        Ok(tags) => tags,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
+    let has_lyrics = embedded_tags.keys().any(|key| {
+        matches!(key.to_ascii_lowercase().as_str(), "lyrics" | "syncedlyrics")
     });
-    tag.add_frame(Id3Lyrics {
-        lang: "und".to_string(),
-        description: "VANTA lyrics".to_string(),
-        text: plain_text,
-    });
-    tag.write_to_path(audio_path, Id3Version::Id3v24)
-        .map_err(|error| format!("Could not embed synchronized lyrics into MP3: {}", error))?;
-    Ok(true)
+    if !has_lyrics {
+        let _ = fs::remove_file(&temp_path);
+        return Err("FFmpeg completed but FFprobe could not confirm embedded Lyrics metadata.".to_string());
+    }
+
+    let backup_path = parent.join(format!(".{}.{}.original.{}", stem, token, extension));
+    fs::rename(audio_path, &backup_path)
+        .map_err(|error| {
+            let _ = fs::remove_file(&temp_path);
+            format!("Could not stage original audio before replacing it: {}", error)
+        })?;
+    if let Err(error) = fs::rename(&temp_path, audio_path) {
+        let restore = fs::rename(&backup_path, audio_path);
+        let _ = fs::remove_file(&temp_path);
+        return Err(match restore {
+            Ok(()) => format!("Could not finalize embedded audio; original file was restored: {}", error),
+            Err(restore_error) => format!("Could not finalize embedded audio ({}) and could not restore the original ({})", error, restore_error),
+        });
+    }
+    fs::remove_file(&backup_path)
+        .map_err(|error| format!("Lyrics were embedded, but the temporary original could not be removed: {}", error))?;
+    Ok(())
+}
+
+fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
+    let extension = audio_path.extension().and_then(|extension| extension.to_str())
+        .unwrap_or("").to_ascii_lowercase();
+    let language = lrc_language(content);
+    let entries = parse_lrc_entries(content);
+    if entries.is_empty() {
+        return Err("No valid timestamped lyric lines were found to embed.".to_string());
+    }
+    if extension == "mp3" {
+        let mut tag = match Id3Tag::read_from_path(audio_path) {
+            Ok(tag) => tag,
+            Err(Id3Error { kind: Id3ErrorKind::NoTag, .. }) => Id3Tag::new(),
+            Err(error) => return Err(format!("Could not read existing MP3 ID3 tags: {}", error)),
+        };
+        let plain_text = entries.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
+        let title = lrc_header_value(content, "ti").unwrap_or_else(|| "VANTA synchronized lyrics".to_string());
+        tag.remove_all_synchronised_lyrics();
+        tag.remove_all_lyrics();
+        tag.add_frame(SynchronisedLyrics {
+            lang: language.clone(),
+            timestamp_format: TimestampFormat::Ms,
+            content_type: SynchronisedLyricsType::Lyrics,
+            content: entries,
+            description: title.clone(),
+        });
+        tag.add_frame(Id3Lyrics {
+            lang: language,
+            description: title,
+            text: plain_text,
+        });
+        tag.write_to_path(audio_path, Id3Version::Id3v24)
+            .map_err(|error| format!("Could not embed synchronized lyrics into MP3: {}", error))?;
+        return Ok(true);
+    }
+
+    match extension.as_str() {
+        "flac" | "ogg" | "opus" | "m4a" | "mp4" | "mp4a" | "wav" | "aiff" | "aif" => {
+            embed_lrc_with_ffmpeg(audio_path, content)?;
+            Ok(true)
+        }
+        _ => Err(format!(
+            "Synchronized Lyrics embedding is not supported for .{} files. The original file was preserved and the task will not be marked complete.",
+            if extension.is_empty() { "unknown" } else { &extension }
+        )),
+    }
 }
 
 fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
     validate_lrc_content(content)?;
-    match embed_lrc_lyrics(audio_path, content)? {
-        true => logging::info(
-            "lyrics",
-            &format!("Embedded synchronized lyrics into '{}'. No sidecar was created.", audio_path.display()),
-        ),
-        false => logging::warn(
-            "lyrics",
-            &format!(
-                "Synchronized lyrics were not embedded into '{}': this audio container is not currently supported for native synchronized-lyrics tags. No .lrc sidecar was created.",
-                audio_path.display()
-            ),
-        ),
+    if !embed_lrc_lyrics(audio_path, content)? {
+        return Err("The media container did not accept embedded synchronized Lyrics.".to_string());
     }
+    logging::info(
+        "lyrics",
+        &format!("Embedded synchronized Lyrics (language: {}) into '{}'.", lrc_language(content), audio_path.display()),
+    );
     Ok(())
 }
 
