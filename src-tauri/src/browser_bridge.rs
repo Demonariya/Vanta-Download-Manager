@@ -43,7 +43,7 @@ fn extension_origin(headers: &str) -> Option<&str> {
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str, origin: Option<&str>) {
     let cors = origin.map(|value| format!(
-        "Access-Control-Allow-Origin: {}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 600\r\n",
+        "Access-Control-Allow-Origin: {}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: 600\r\n",
         value
     )).unwrap_or_default();
     let response = format!(
