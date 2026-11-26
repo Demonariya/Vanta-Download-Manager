@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Minus, Square, Copy, X, Download } from 'lucide-react';
 
 interface TitleBarProps {
@@ -19,7 +20,6 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     const checkTauri = async () => {
       try {
         if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-          const { getCurrentWindow } = await import('@tauri-apps/api/window');
           const win = getCurrentWindow();
           if (!mounted) return;
           setIsTauri(true);
@@ -43,7 +43,6 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     e.stopPropagation();
     if (isTauri) {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().minimize();
       } catch (err) {
         console.error('Failed to minimize window:', err);
@@ -55,7 +54,6 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     if (e) e.stopPropagation();
     if (isTauri) {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
         await win.toggleMaximize();
         setIsMaximized(await win.isMaximized());
