@@ -1955,8 +1955,7 @@ pub fn scheduler_tick(app: &AppHandle) {
             }
         }
     }
-        schedule_next(app, &state);
-    }
+    schedule_next(app, &state);
 }
 
 fn effective_task_bandwidth_limit_bytes_per_second(
@@ -2133,7 +2132,7 @@ fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_tas
         scheduled += 1;
 
         next_task.status = TaskStatus::Connecting;
-        next_task.current_phase = if manual_task_ids.contains(&next_task.id) { "Starting manually..." } else { "Starting engine..." }.to_string();
+        next_task.current_phase = if pending_manual_ids.contains(&next_task.id) { "Starting manually..." } else { "Starting engine..." }.to_string();
         if pending_manual_ids.contains(&next_task.id) {
             clear_scheduler_managed_task(&next_task.id);
             clear_manual_pending_task(&next_task.id);
@@ -4288,6 +4287,23 @@ mod scheduler_window_tests {
         assert_eq!(retry_backoff_seconds(5, 4), 40);
         assert_eq!(retry_backoff_seconds(60, 7), 300);
         assert_eq!(retry_backoff_seconds(u32::MAX, u32::MAX), 300);
+    }
+
+    #[test]
+    fn explicit_manual_tasks_bypass_a_closed_scheduler_window_but_automatic_tasks_do_not() {
+        let manual_ids = HashSet::from(["manual-task".to_string()]);
+        assert!(should_schedule_outside_window(false, "manual-task", &manual_ids));
+        assert!(!should_schedule_outside_window(false, "automatic-task", &manual_ids));
+        assert!(should_schedule_outside_window(true, "automatic-task", &manual_ids));
+    }
+
+    #[test]
+    fn manual_pending_tasks_are_removed_after_pause_or_cancel() {
+        let id = format!("manual-pending-{}", uuid::Uuid::new_v4());
+        manual_pending_tasks().lock().unwrap().insert(id.clone());
+        assert!(manual_pending_tasks().lock().unwrap().contains(&id));
+        clear_manual_pending_task(&id);
+        assert!(!manual_pending_tasks().lock().unwrap().contains(&id));
     }
 
     #[test]
