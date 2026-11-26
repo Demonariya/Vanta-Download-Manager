@@ -4127,6 +4127,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     ),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     task_id: Some(t.id.clone()),
+                    is_read: false,
                 };
                 state.add_notification(&notif);
                 let _ = app.emit("notification", &notif);
