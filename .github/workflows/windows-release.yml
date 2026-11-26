@@ -261,7 +261,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/icons public/icon.png public/vanta-icon.png public/favicon.ico browser-extension/icons/icon.png
+          # Include every generated Tauri platform asset, not only selected desktop files.
+          git add -A -- src-tauri/icons public/icon.png public/vanta-icon.png public/favicon.ico browser-extension/icons/icon.png
           if (-not (git diff --cached --quiet)) {
             git commit -m "build(icons): sync generated repository icon assets"
             git push origin HEAD:main
