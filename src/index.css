@@ -199,6 +199,50 @@
   }
 }
 
+/* Consistent native select controls and dropdown options (Chromium/WebView). */
+select,
+select.vanta-select {
+  color: var(--vanta-text);
+  background-color: var(--vanta-surface-2);
+  border-color: var(--vanta-border);
+  color-scheme: light;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23778194' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.55rem center;
+  background-size: 0.8rem;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+.dark select,
+.dark select.vanta-select {
+  color-scheme: dark;
+  background-color: var(--vanta-surface-2);
+}
+select:hover:not(:disabled) {
+  border-color: var(--vanta-border-strong);
+}
+select:focus-visible {
+  border-color: var(--vanta-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vanta-accent) 18%, transparent);
+}
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+select option,
+select optgroup {
+  color: var(--vanta-text);
+  background-color: var(--vanta-surface);
+}
+.dark select option,
+.dark select optgroup {
+  color: var(--vanta-text);
+  background-color: #191d26;
+}
+
 @layer components {
   /* Card-like surfaces share one restrained visual language. */
   div[class~="rounded-xl"][class*="border"][class*="bg-[var(--vanta-surface)]"],

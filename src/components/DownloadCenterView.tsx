@@ -180,7 +180,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [isColumnMenuOpen, setIsColumnMenuOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() => {
-    // Engine is intentionally removed from the table to preserve space for titles and progress.
+    // Engine and progress are intentionally omitted from the desktop table.
     const defaults = { engine: false, size: true, speed: true, eta: true, status: true };
     try {
       const saved = localStorage.getItem('vanta.download-columns.v1');
@@ -427,7 +427,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
   ] as const;
   const tableGridTemplate = [
     '28px', '32px', 'minmax(190px,2fr)',
-    'minmax(130px,1.2fr)',
     ...(visibleColumns.size ? ['104px'] : []),
     ...(visibleColumns.speed ? ['92px'] : []),
     ...(visibleColumns.eta ? ['76px'] : []),
@@ -510,7 +509,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                   </label>
                 ))}
               </div>
-              <p className="mt-2 border-t border-[var(--vanta-border)] pt-2 text-[10px] text-[var(--vanta-muted)]">Name, Progress and Actions stay visible.</p>
+              <p className="mt-2 border-t border-[var(--vanta-border)] pt-2 text-[10px] text-[var(--vanta-muted)]">Name and Actions stay visible.</p>
             </div>
           )}
           <select
@@ -521,7 +520,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               setSortField(f);
               setSortDirection(d);
             }}
-            className="bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--vanta-text)] focus:outline-none focus:border-[var(--vanta-accent)]"
+            className="vanta-select min-w-[148px] bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg px-2.5 py-1.5 pr-8 text-xs text-[var(--vanta-text)] focus:outline-none focus:border-[var(--vanta-accent)]"
           >
             <option value="queue:asc">Queue Order</option>
             <option value="created_at:desc">Newest First</option>
@@ -640,7 +639,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
             </button>
             {queues.length > 1 && (
               <div className="flex items-center gap-1.5">
-                <select value={moveTargetQueueId} onChange={(event) => setMoveTargetQueueId(event.target.value)} className="max-w-[150px] rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] px-2 py-1 text-xs text-[var(--vanta-text)]">
+                <select value={moveTargetQueueId} onChange={(event) => setMoveTargetQueueId(event.target.value)} className="vanta-select max-w-[150px] rounded bg-[var(--vanta-surface)] border border-[var(--vanta-border)] px-2 py-1 pr-7 text-xs text-[var(--vanta-text)]">
                   <option value="">Move to queue…</option>
                   {queues.filter((queue) => queue.id !== selectedQueueId).map((queue) => <option key={queue.id} value={queue.id}>{queue.name}</option>)}
                 </select>
@@ -678,7 +677,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
               <span>#</span>
               <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Name {sortField === 'title' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>
-              <span>Progress</span>
               {visibleColumns.size && <button type="button" onClick={() => toggleSort('size')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Size {sortField === 'size' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
               {visibleColumns.speed && <button type="button" onClick={() => toggleSort('speed')} className="inline-flex items-center gap-1 text-left hover:text-[var(--vanta-text)]">Speed {sortField === 'speed' ? sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3 opacity-50" />}</button>}
               {visibleColumns.eta && <span>ETA</span>}{visibleColumns.status && <span>Status</span>}<span>Actions</span>
@@ -742,15 +740,6 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         album={task.album}
                         duration={task.duration_string}
                       />
-                      <div className="min-w-0">
-                        <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className="text-[10px] text-[var(--vanta-muted)]">{percentKnown ? `${progress.toFixed(1)}%` : '—'}</span>
-                          {task.status === 'downloading' && <span className="text-[10px] text-[var(--vanta-muted)] truncate">{task.current_phase || ''}</span>}
-                        </div>
-                        <div className="h-2.5 w-full rounded-full bg-[var(--vanta-surface-2)] overflow-hidden border border-[var(--vanta-border)]">
-                          <div className={`h-full rounded-full transition-[width] duration-200 ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-[var(--vanta-accent)]'}`} style={{ width: `${percentKnown ? progress : 0}%` }} />
-                        </div>
-                      </div>
                       {visibleColumns.size && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap" title={task.status === 'completed' ? 'Verified final output file size' : 'Estimated total size may change after merging or media processing'}>{sizeText}</span>}
                       {visibleColumns.speed && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.speed_str || '—' : '—'}</span>}
                       {visibleColumns.eta && <span className="text-[11px] text-[var(--vanta-text-secondary)] tabular-nums whitespace-nowrap">{task.status === 'downloading' ? task.eta_str || '—' : '—'}</span>}
