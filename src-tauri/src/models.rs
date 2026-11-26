@@ -792,9 +792,11 @@ mod tests {
             message: "Saved".to_string(),
             timestamp: "2026-11-20T00:00:00Z".to_string(),
             task_id: Some("task_123".to_string()),
+            is_read: false,
         };
         let notif_json = serde_json::to_value(&notif).unwrap();
         assert_eq!(notif_json["taskId"], "task_123");
+        assert_eq!(notif_json["isRead"], false);
         assert!(notif_json.get("task_id").is_none());
 
         let from_legacy: NotificationItem = serde_json::from_str(
@@ -802,6 +804,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_legacy.task_id.as_deref(), Some("t2"));
+        assert!(!from_legacy.is_read, "legacy notifications default to unread");
 
         let update = EngineUpdateInfo {
             current_version: "2026.01.01".to_string(),
