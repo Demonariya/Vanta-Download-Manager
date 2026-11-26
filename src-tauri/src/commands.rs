@@ -1344,6 +1344,11 @@ pub fn clear_notifications(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn mark_all_notifications_read(state: State<'_, AppState>) -> Result<(), String> {
+    state.mark_all_notifications_read()
+}
+
 const ENGINE_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
 #[tauri::command]
@@ -4070,6 +4075,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 message: format!("'{}' downloaded successfully.", t.title),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 task_id: Some(t.id.clone()),
+                is_read: false,
             };
             state.add_notification(&notif);
             let _ = app.emit("notification", &notif);
