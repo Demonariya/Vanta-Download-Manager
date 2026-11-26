@@ -75,6 +75,7 @@ export default function App() {
   const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isProgressMonitorOpen, setIsProgressMonitorOpen] = useState(false);
+  const [progressMonitorTaskId, setProgressMonitorTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
     createInitialCheckingEngineStatus
@@ -588,7 +589,7 @@ export default function App() {
                 task={selectedTask}
                 onClose={() => setSelectedTaskId(null)}
                 onRetryTask={(id) => api.retryTask(id)}
-                onOpenProgress={() => setIsProgressMonitorOpen(true)}
+                onOpenProgress={() => { setProgressMonitorTaskId(selectedTask?.id || null); setIsProgressMonitorOpen(true); }}
               />
             )}
           </div>
@@ -598,8 +599,8 @@ export default function App() {
       <StatusBar tasks={tasks} />
 
       <DownloadProgressWindow
-        task={isProgressMonitorOpen ? selectedTask : null}
-        onClose={() => setIsProgressMonitorOpen(false)}
+        task={isProgressMonitorOpen ? tasks.find((item) => item.id === progressMonitorTaskId) || null : null}
+        onClose={() => { setIsProgressMonitorOpen(false); setProgressMonitorTaskId(null); }}
         onPause={(id) => api.pauseTask(id)}
         onResume={(id) => api.resumeTask(id)}
         onCancel={(id) => api.cancelTask(id)}
