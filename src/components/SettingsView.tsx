@@ -39,6 +39,7 @@ import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
 import { DEFAULT_SCHEDULER_SETTINGS } from '../utils/scheduler';
 import { ConfirmDialog } from './ConfirmDialog';
+import { validateSettingsForm } from '../utils/settings-validation';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
@@ -276,6 +277,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     e.preventDefault();
     setSaveError(null);
     setIsSaved(false);
+    const validationErrors = validateSettingsForm(form);
+    if (validationErrors.length > 0) {
+      setSaveError(validationErrors.join(' '));
+      return;
+    }
     setIsSaving(true);
     try {
       const saved = await onSaveSettings({
