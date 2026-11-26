@@ -160,7 +160,8 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-[var(--vanta-text)] sm:text-base" title={task.title}>{task.title}</h2>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--vanta-muted)]">
-                <span className="truncate">{task.uploader || task.album || (() => { try { return new URL(task.url).hostname; } catch { return task.engine; } })()}</span>
+                <span className="truncate">{task.uploader || (() => { try { return new URL(task.url).hostname; } catch { return task.engine; } })()}</span>
+                {task.album && <><span>·</span><span className="truncate">Album: {task.album}</span></>}
                 {task.duration_string && <><span>·</span><span>{task.duration_string}</span></>}
                 <span className={`font-semibold ${statusClass}`}>· {getStatusLabel(task.status)}</span>
               </div>
