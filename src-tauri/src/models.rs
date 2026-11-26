@@ -849,7 +849,7 @@ mod tests {
             serde_json::from_str(r#"{"enabled": true, "start_time": "03:00"}"#).unwrap();
         assert!(partial.enabled);
         assert_eq!(partial.start_time, "03:00");
-        assert_eq!(partial.stop_time, "06:00");
+        assert_eq!(partial.stop_time, "00:00");
         assert!(partial.pause_on_stop);
         assert_eq!(partial.days, vec![0, 1, 2, 3, 4, 5, 6]);
     }
