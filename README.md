@@ -13,7 +13,8 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Application Screenshots](#application-screenshots)\n3. [Adding Screenshots to the README](#adding-screenshots-to-the-readme)
+2. [Application Screenshots](#application-screenshots)
+3. [Adding Screenshots to the README](#adding-screenshots-to-the-readme)
 4. [Features](#features)
 5. [Supported Download Engines](#supported-download-engines)
 6. [Architecture & Technology Stack](#architecture--technology-stack)
