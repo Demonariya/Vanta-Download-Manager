@@ -38,6 +38,8 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
 }) => {
   const [isRunning, setIsRunning] = useState(false);
   const [results, setResults] = useState<DiagnosticResult[] | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
+  const [logSearch, setLogSearch] = useState('');
 
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [updatesInfo, setUpdatesInfo] = useState<
@@ -62,7 +64,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   const loadDiagnosticLogs = async () => {
     setIsLoadingLogs(true);
     try {
-      const info = await api.getDiagnosticLogInfo(100);
+      const info = await api.getDiagnosticLogInfo(500);
       setLogInfo(info);
     } catch (err) {
       console.error('Failed to load application logs:', err);
@@ -73,12 +75,14 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
 
   const handleRunDiagnostics = async () => {
     setIsRunning(true);
+    setDiagnosticError(null);
     try {
       const res = await api.runDiagnostics();
       setResults(res.results);
       await onRefresh();
-    } catch {
-      // ignore
+      await loadDiagnosticLogs();
+    } catch (err) {
+      setDiagnosticError(err instanceof Error ? err.message : 'Diagnostics could not be completed.');
     } finally {
       setIsRunning(false);
     }
@@ -169,6 +173,22 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
     }
   };
 
+  const visibleLogLines = (logInfo?.recentLines || []).filter((line) =>
+    line.toLocaleLowerCase().includes(logSearch.trim().toLocaleLowerCase())
+  );
+
+  const exportSanitizedLogs = () => {
+    const blob = new Blob([visibleLogLines.join('\\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `vanta-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   useEffect(() => {
     handleCheckUpdates();
     loadDiagnosticLogs();
@@ -220,6 +240,12 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {diagnosticError && (
+        <div role="alert" className="p-3 rounded-lg border border-red-500/30 bg-red-500/10 text-xs text-red-600 dark:text-[#f85149] break-words">
+          {diagnosticError}
+        </div>
+      )}
 
       {/* Update Action Results */}
       {updateResults && updateResults.length > 0 && (
@@ -505,7 +531,16 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={exportSanitizedLogs}
+              disabled={!visibleLogLines.length}
+              className="px-2.5 py-1.5 bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] disabled:opacity-50 border border-[var(--vanta-border)] text-[var(--vanta-text-secondary)] rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition-colors"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Export Redacted Log</span>
+            </button>
             <button
               type="button"
               onClick={loadDiagnosticLogs}
@@ -526,11 +561,24 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
           </div>
         </div>
 
-        <div className="p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] font-mono text-[11px] text-[var(--vanta-text-secondary)] max-h-64 overflow-auto whitespace-pre-wrap break-words leading-relaxed">
-          {logInfo && logInfo.recentLines.length > 0
-            ? logInfo.recentLines.join('\n')
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
+          <input
+            type="search"
+            value={logSearch}
+            onChange={(event) => setLogSearch(event.target.value)}
+            placeholder="Search sanitized log messages..."
+            aria-label="Search diagnostic logs"
+            className="w-full sm:max-w-sm rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-2 text-xs text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:border-[var(--vanta-accent)] focus:outline-none"
+          />
+          <span className="text-[10px] font-mono text-[var(--vanta-muted)]">{visibleLogLines.length} matching lines · max 500 loaded</span>
+        </div>
+        <div className="p-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] font-mono text-[11px] text-[var(--vanta-text-secondary)] max-h-72 overflow-auto whitespace-pre-wrap break-words leading-relaxed">
+          {visibleLogLines.length > 0
+            ? visibleLogLines.join('\n')
             : isLoadingLogs
             ? 'Loading sanitized diagnostic log...'
+            : logInfo?.recentLines.length
+            ? 'No log lines match this search.'
             : 'No application log entries recorded yet.'}
         </div>
       </div>
