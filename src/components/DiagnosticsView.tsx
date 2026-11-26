@@ -178,7 +178,7 @@ export const DiagnosticsView: React.FC<DiagnosticsViewProps> = ({
   );
 
   const exportSanitizedLogs = () => {
-    const blob = new Blob([visibleLogLines.join('\\n')], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([visibleLogLines.join('\n')], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
