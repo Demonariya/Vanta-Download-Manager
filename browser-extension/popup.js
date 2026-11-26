@@ -31,17 +31,17 @@ async function scanPage() {
       target: { tabId: tab.id },
       func: () => {
         const found = new Map();
-        const add = (raw, label, kind) => {
+        const add = (raw, label, kind, thumbnail = '') => {
           if (!raw) return;
           try {
             const url = new URL(raw, location.href).href;
             if (!/^https?:/i.test(url) || found.has(url)) return;
-            found.set(url, { url, label: label || url.split('/').pop() || 'Media resource', kind });
+            found.set(url, { url, label: label || url.split('/').pop() || 'Media resource', kind, thumbnail });
           } catch {}
         };
         document.querySelectorAll('video,audio').forEach((el) => {
           const kind = el.tagName.toLowerCase();
-          add(el.currentSrc || el.src, el.getAttribute('aria-label') || el.getAttribute('title') || kind, kind);
+          add(el.currentSrc || el.src, el.getAttribute('aria-label') || el.getAttribute('title') || document.title || kind, kind, el.poster || document.querySelector('meta[property=\"og:image\"]')?.content || '');
           el.querySelectorAll('source').forEach((s) => add(s.src, s.type || 'Media source', kind));
         });
         document.querySelectorAll('meta[property="og:video"],meta[property="og:audio"],meta[name="twitter:player:stream"]').forEach((el) => add(el.content, el.getAttribute('property') || 'Page media', 'media'));
@@ -63,7 +63,7 @@ async function scanPage() {
 }
 function renderCandidates() {
   $('count').textContent = `${candidates.length} found`;
-  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter);
+  const visible = candidates.filter((item) => activeFilter === 'all' || item.kind === activeFilter || (activeFilter === 'direct link' && item.kind === 'direct link'));
   const root = $('candidates'); root.replaceChildren();
   if (!visible.length) {
     const empty = document.createElement('div'); empty.className = 'empty';
@@ -73,8 +73,8 @@ function renderCandidates() {
   for (const item of visible) {
     const row = document.createElement('div'); row.className = 'candidate';
     const kind = document.createElement('div'); kind.className = 'kind';
-    kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : item.kind === 'image' ? '▧' : '↗';
-    const info = document.createElement('div'); info.className = 'candidate-info';
+    kind.textContent = item.kind === 'video' ? '▶' : item.kind === 'audio' ? '♫' : '↗';
+    const info = document.createElement('div'); info.className = 'candidate-info';\n    if (item.thumbnail) { const thumb = document.createElement('img'); thumb.className = 'candidate-thumb'; thumb.src = item.thumbnail; thumb.alt = ''; thumb.loading = 'lazy'; thumb.referrerPolicy = 'no-referrer'; row.append(thumb); }
     const name = document.createElement('div'); name.className = 'candidate-name'; name.textContent = item.label;
     const url = document.createElement('div'); url.className = 'candidate-url'; url.textContent = item.url;
     info.append(name, url);

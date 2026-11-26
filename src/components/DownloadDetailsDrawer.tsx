@@ -152,8 +152,8 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
 
       <div className="flex-1 min-h-0 min-w-0 w-full max-w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4">
         {tab === 'details' && (
-          <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,220px)_minmax(0,1.2fr)_minmax(0,1fr)] gap-3 xl:gap-4">
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 flex items-center gap-3 min-w-0 h-full">
+          <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,220px)_minmax(0,1.2fr)_minmax(0,1fr)] gap-0">
+            <div className="border-r border-[var(--vanta-border)]/70 pr-3 flex items-center gap-3 min-w-0 h-full">
               <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-[var(--vanta-text)] line-clamp-2">{task.title}</h3>
@@ -162,7 +162,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               </div>
             </div>
 
-            <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-4 min-w-0 max-w-full overflow-hidden space-y-3 h-full">
+            <div className="border-r border-[var(--vanta-border)]/70 pr-4 min-w-0 max-w-full overflow-hidden space-y-3 h-full">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-[var(--vanta-text)]">Transfer progress</span>
                 <span className="text-sm font-semibold tabular-nums text-[var(--vanta-text)]">{task.status === 'completed' ? '100%' : task.percentage_known === false ? '—' : `${Math.min(100, Math.max(0, task.progress_percentage || 0)).toFixed(1)}%`}</span>
@@ -245,11 +245,11 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
               ))}
               {logsNotice && <span role="status" className="ml-auto text-[10px] text-[var(--vanta-muted)]">{logsNotice}</span>}
             </div>
-            <div className="min-h-0 min-w-0 w-full max-w-full flex-1 overflow-auto rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+            <div className="min-h-0 min-w-0 w-full max-w-full flex-1 overflow-auto border-y border-[var(--vanta-border)] bg-[var(--vanta-bg)]">
               {filteredLogs.length ? (
                 <div className="min-w-0 max-w-full divide-y divide-[var(--vanta-border)]">
                   {[...filteredLogs].reverse().map((entry, index) => (
-                    <div key={entry.timestamp + '-' + index} className="grid min-w-0 grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-3 px-3 py-2.5 text-[11px]">
+                    <div key={entry.timestamp + '-' + index} className="grid min-w-0 grid-cols-[minmax(150px,190px)_minmax(0,1fr)] gap-3 px-3 py-2.5 text-[11px] hover:bg-[var(--vanta-surface-hover)]/50">
                       <div className="flex flex-col items-start gap-1">
                         <span className="max-w-full font-mono text-[10px] text-[var(--vanta-muted)] break-all">{entry.timestamp}</span>
                         <span className={"rounded px-1.5 py-0.5 text-[9px] font-bold uppercase " + (entry.level === 'error' ? 'bg-red-500/10 text-red-500' : entry.level === 'warn' ? 'bg-amber-500/10 text-amber-500' : 'bg-[var(--vanta-surface)] text-[var(--vanta-muted)]')}>{entry.level}</span>
