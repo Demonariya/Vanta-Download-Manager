@@ -125,6 +125,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
   ];
 
   return (
+    <>
     <aside className="w-full h-[clamp(240px,32vh,360px)] shrink-0 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface)] flex flex-col min-h-0 shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details panel">
       <div className="min-h-12 px-3 sm:px-5 border-b border-[var(--vanta-border)] flex items-center justify-between gap-2 shrink-0">
         <nav className="flex flex-1 items-center gap-1 min-w-0 overflow-x-auto scrollbar-thin" aria-label="Download detail sections">
@@ -291,5 +292,6 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
       </div>
     </aside>
     {showProperties && <DownloadPropertiesModal task={task} onClose={() => setShowProperties(false)} />}
+    </>
   );
 };
