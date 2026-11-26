@@ -426,15 +426,15 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
     { id: 'status', label: 'Status' },
   ] as const;
   const tableGridTemplate = [
-    '28px', '32px', 'minmax(210px,2fr)',
-    'minmax(145px,1.2fr)',
+    '28px', '32px', 'minmax(190px,2fr)',
+    'minmax(130px,1.2fr)',
     ...(visibleColumns.size ? ['104px'] : []),
     ...(visibleColumns.speed ? ['92px'] : []),
     ...(visibleColumns.eta ? ['76px'] : []),
     ...(visibleColumns.status ? ['92px'] : []),
     '64px',
   ].join(' ');
-  const tableGridClassName = 'grid items-center gap-2.5 px-3 sm:px-4';
+  const tableGridClassName = 'grid min-w-0 items-center gap-2 px-3 sm:gap-2.5 sm:px-4';
   return (
     <div className="flex min-h-0 flex-col gap-3">
       {/* Missing Engine Inline Alert (only shown when missing) */}
@@ -466,11 +466,11 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       )}
 
       {/* Filter, Sort & Queue Action Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 px-4 py-2.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3.5 py-3 sm:px-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">Downloads</h2>
-            <p className="text-[10px] text-[var(--vanta-muted)]">{visibleTasks.length} items in this view · {aggregateSpeed.formattedSpeed} total</p>
+            <h2 className="text-[13px] font-semibold tracking-tight text-[var(--vanta-text)]">Downloads</h2>
+            <p className="mt-0.5 text-[10px] text-[var(--vanta-muted)]">{visibleTasks.length} items · {aggregateSpeed.formattedSpeed} total speed</p>
           </div>
           {selectedIds.length > 0 && (
             <span className="hidden sm:inline-flex px-2 py-1 rounded-md bg-[var(--vanta-accent)]/10 text-[var(--vanta-accent)] text-[10px] font-semibold tabular-nums">
@@ -564,6 +564,43 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
         </div>
       </div>
 
+      {setScopeFilter && (
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 px-1" role="group" aria-label="Filter downloads by status">
+          {([
+            ['all', 'All'],
+            ['active', 'Active'],
+            ['queued', 'Queued'],
+            ['paused', 'Paused'],
+            ['completed', 'Completed'],
+            ['failed', 'Failed'],
+          ] as const).map(([value, label]) => {
+            const active = scopeFilter === value;
+            const count = value === 'all' ? queueTasks.length
+              : value === 'active' ? activeCount
+              : value === 'paused' ? pausedCount
+              : value === 'completed' ? completedCount
+              : value === 'failed' ? failedCount
+              : queueStatusCounts.queued;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setScopeFilter(value)}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                  active
+                    ? 'border-[var(--vanta-accent)]/40 bg-[var(--vanta-accent)]/10 text-[var(--vanta-accent)]'
+                    : 'border-transparent bg-[var(--vanta-surface-2)] text-[var(--vanta-muted)] hover:border-[var(--vanta-border)] hover:text-[var(--vanta-text)]'
+                }`}
+              >
+                {label}
+                <span className={`font-mono text-[10px] tabular-nums ${active ? 'opacity-90' : 'opacity-65'}`}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
         <div className="px-4 py-2 rounded-xl border border-[var(--vanta-accent)]/40 bg-[var(--vanta-accent)]/10 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -634,8 +671,8 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
       {/* Main Transfer List */}
       <div className="min-w-0 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] overflow-hidden">
         {isDesktopLayout && <div className="overflow-x-auto">
-          <div className="min-w-[1060px]">
-            <div className={`${tableGridClassName} py-3 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
+          <div className="min-w-[980px]">
+            <div className={`${tableGridClassName} py-2.5 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] text-[11px] font-semibold text-[var(--vanta-muted)]`} style={{ gridTemplateColumns: tableGridTemplate }}>
               <input type="checkbox" aria-label="Select all visible downloads"
                 checked={visibleTasks.length > 0 && visibleTasks.every((task) => selectedIdSet.has(task.id))}
                 onChange={toggleSelectAll} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
@@ -691,7 +728,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                         } else onSelectTask(task);
                       }}
                       onContextMenu={(event) => openTaskContextMenu(event, task)}
-                      className={`relative ${tableGridClassName} py-3 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`} style={{ gridTemplateColumns: tableGridTemplate }}>
+                      className={`relative ${tableGridClassName} py-2.5 cursor-pointer transition-colors ${isSelectedRow ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/60'}`} style={{ gridTemplateColumns: tableGridTemplate }}>
                       <div onClick={(event) => event.stopPropagation()}>
                         <input type="checkbox" aria-label={`Select ${task.title}`} checked={isChecked} onChange={() => { toggleRowSelected(task.id); onSelectTask(task); }} className="w-3.5 h-3.5 rounded accent-[var(--vanta-accent)]" />
                       </div>
@@ -762,7 +799,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
                   ? api.openTaskFile(task).catch((error) => window.alert(error instanceof Error ? error.message : 'Could not open file.'))
                   : onSelectTask(task)}
                 onContextMenu={(event) => openTaskContextMenu(event, task)}
-                className={`select-none px-3 py-3.5 transition-colors ${
+                className={`select-none px-3 py-3 transition-colors ${
                   isSelected ? 'bg-[var(--vanta-accent)]/10' : 'hover:bg-[var(--vanta-surface-hover)]/50'
                 }`}
               >
