@@ -40,6 +40,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .setup(move |app| {
+            vanta_lib::browser_bridge::start(app.handle().clone());
             let show_item = MenuItem::with_id(app, "show", "Open VANTA", true, None::<&str>)?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit VANTA", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
