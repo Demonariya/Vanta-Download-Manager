@@ -490,6 +490,10 @@ export default function App() {
 
           {activeTab === 'downloads' && (
             <ActionToolbar
+              onNewDownload={() => {
+                setInitialInspectUrl('');
+                setIsNewDownloadOpen(true);
+              }}
               selectedTask={selectedTask}
               activeCount={activeCount}
               pausedCount={pausedCount}
