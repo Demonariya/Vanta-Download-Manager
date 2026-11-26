@@ -256,17 +256,17 @@ jobs:
           }
 
       - name: Commit regenerated repository icon assets
-        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/icons
+          git add src-tauri/icons public/icon.png public/vanta-icon.png public/favicon.ico browser-extension/icons/icon.png
           if (-not (git diff --cached --quiet)) {
-            git commit -m "build(icons): sync generated desktop icon assets"
+            git commit -m "build(icons): sync generated repository icon assets"
             git push origin HEAD:main
           } else {
-            Write-Host "Generated desktop icon assets are already up to date."
+            Write-Host "Generated repository icon assets are already up to date."
           }
 
       - name: Verify Produced Deliverables, Archive Readability & Checksums
