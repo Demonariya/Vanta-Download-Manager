@@ -1,4 +1,5 @@
 const BRIDGE = 'http://127.0.0.1:47831/download';
+const MENU_IDS = ['vanta-link', 'vanta-media', 'vanta-image', 'vanta-page', 'vanta-all-links'];
 
 async function sendToVanta(url, title = '', source = 'context-menu') {
   if (!/^https?:\/\//i.test(url || '')) throw new Error('Only HTTP(S) links can be sent to VANTA.');
@@ -12,15 +13,23 @@ async function sendToVanta(url, title = '', source = 'context-menu') {
   return true;
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+function createMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: 'vanta-link', title: 'Download link with VANTA', contexts: ['link'] });
     chrome.contextMenus.create({ id: 'vanta-media', title: 'Download media with VANTA', contexts: ['video', 'audio'] });
-    chrome.contextMenus.create({ id: 'vanta-page', title: 'Send page to VANTA', contexts: ['page'] });
+    chrome.contextMenus.create({ id: 'vanta-image', title: 'Download image with VANTA', contexts: ['image'] });
+    chrome.contextMenus.create({ id: 'vanta-page', title: 'Send current page to VANTA', contexts: ['page'] });
+    chrome.contextMenus.create({ id: 'vanta-all-links', title: 'Scan page for downloadable media', contexts: ['page'] });
   });
-});
+}
+chrome.runtime.onInstalled.addListener(createMenus);
+chrome.runtime.onStartup.addListener(createMenus);
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === 'vanta-all-links') {
+    if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'VANTA_SCAN_AND_OPEN' }).catch(() => {});
+    return;
+  }
   const url = info.linkUrl || info.srcUrl || (info.menuItemId === 'vanta-page' ? tab?.url : '');
   if (!url) return;
   try {
@@ -33,7 +42,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'VANTA_SEND') return;
-  sendToVanta(message.url, message.title, 'extension-popup')
+  sendToVanta(message.url, message.title, message.source || 'extension-popup')
     .then(() => sendResponse({ ok: true }))
     .catch((error) => sendResponse({ ok: false, error: error.message }));
   return true;

@@ -3,23 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>VANTA Browser Integration</title>
+  <title>VANTA Download Manager</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <main class="app">
-    <header><div class="brand-mark">V</div><div><strong>VANTA</strong><span>Browser Integration</span></div><span id="status" class="status checking">Checking</span></header>
-    <section class="current">
-      <div class="eyebrow">CURRENT PAGE</div>
+    <header class="topbar">
+      <div class="brand"><img src="icons/icon.png" alt="VANTA"><div><strong>VANTA</strong><span>DOWNLOAD MANAGER</span></div></div>
+      <span id="status" class="status checking"><i></i> Checking</span>
+    </header>
+    <section class="page-card">
+      <div class="eyebrow">CURRENT TAB</div>
       <div id="page-title" class="page-title">Loading page…</div>
       <div id="page-url" class="page-url"></div>
-      <button id="send-page" class="primary" disabled>Send page to VANTA</button>
+      <div class="actions">
+        <button id="send-page" class="primary" disabled>Send page to VANTA</button>
+        <button id="rescan" class="icon-button" title="Rescan page" aria-label="Rescan page">↻</button>
+      </div>
     </section>
     <section class="media-section">
-      <div class="section-head"><span>Detected media & links</span><span id="count" class="count">0</span></div>
+      <div class="section-head"><div><strong>Media Radar</strong><span id="count">0 found</span></div><span class="live"><i></i> SCAN</span></div>
+      <nav class="filters" aria-label="Media filters">
+        <button class="filter active" data-filter="all">All</button>
+        <button class="filter" data-filter="video">Video</button>
+        <button class="filter" data-filter="audio">Audio</button>
+        <button class="filter" data-filter="direct link">Links</button>
+      </nav>
       <div id="candidates" class="candidates"><div class="empty">Scanning current page…</div></div>
     </section>
-    <footer><span>VANTA must be running</span><button id="rescan" class="text-button">Rescan page</button></footer>
+    <footer><span>Chrome & Edge · Manifest V3</span><span id="version">VANTA 0.2.0</span></footer>
     <div id="notice" class="notice" role="status"></div>
   </main>
   <script src="popup.js"></script>
