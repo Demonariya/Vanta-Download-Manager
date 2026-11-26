@@ -88,7 +88,7 @@ export const DownloadProgressWindow: React.FC<DownloadProgressWindowProps> = ({
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono tabular-nums text-[var(--vanta-muted)]">
               <span>{formatBytes(downloaded)} downloaded</span>
               <span>{total} total</span>
-              <span>{task.remaining_bytes > 0 ? `${formatBytes(task.remaining_bytes)} remaining` : 'Remaining: —'}</span>
+              <span>{(task.remaining_bytes ?? 0) > 0 ? `${formatBytes(task.remaining_bytes ?? 0)} remaining` : 'Remaining: —'}</span>
             </div>
           </section>
 
