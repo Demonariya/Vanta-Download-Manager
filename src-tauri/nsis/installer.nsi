@@ -1,6 +1,6 @@
 ; Explicit Unicode NSIS target; avoid an empty Tauri template variable.
 Target x86-unicode
-Unicode {{unicode}}
+Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
 ; Currently undocumented on NSIS's website but is in the Docs folder of source tree, see
