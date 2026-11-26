@@ -392,4 +392,5 @@ export interface NotificationItem {
   message: string;
   timestamp: string;
   taskId?: string;
+  isRead?: boolean;
 }
