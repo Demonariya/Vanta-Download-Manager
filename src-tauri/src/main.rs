@@ -138,7 +138,7 @@ fn main() {
             delete_queue, start_queue, stop_queue, update_queue_limits, move_tasks_to_queue, update_task_meta,
             rename_task_file, bulk_task_action, get_settings, save_settings, reset_settings,
             validate_python_executable, browse_python_executable, get_notifications,
-            clear_notifications, get_engine_status, get_managed_engine_info, install_engine,
+            clear_notifications, mark_all_notifications_read, get_engine_status, get_managed_engine_info, install_engine,
             install_all_engines, remove_managed_engine, run_diagnostics, check_engine_updates,
             update_engine, update_all_engines, inspect_url, cancel_inspection, get_cookie_status,
             validate_cookies_text, save_cookies, remove_cookies, detect_browsers,
