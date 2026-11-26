@@ -268,7 +268,8 @@ impl AppState {
                 title TEXT NOT NULL,
                 message TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                task_id TEXT
+                task_id TEXT,
+                is_read INTEGER NOT NULL DEFAULT 0
             );
             ",
         )
@@ -331,6 +332,7 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
             "ALTER TABLE download_queues ADD COLUMN max_concurrent_downloads INTEGER DEFAULT 0",
             "ALTER TABLE download_queues ADD COLUMN bandwidth_limit_kbps INTEGER DEFAULT 0",
+            "ALTER TABLE notifications ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -1249,7 +1251,7 @@ impl AppState {
     pub fn get_notifications(&self) -> Vec<NotificationItem> {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, type, title, message, timestamp, task_id FROM notifications ORDER BY timestamp DESC LIMIT 50",
+            "SELECT id, type, title, message, timestamp, task_id, is_read FROM notifications ORDER BY timestamp DESC LIMIT 100",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1263,6 +1265,7 @@ impl AppState {
                 message: row.get(3)?,
                 timestamp: row.get(4)?,
                 task_id: row.get(5)?,
+                is_read: row.get::<_, i64>(6)? != 0,
             })
         }) {
             Ok(r) => r,
@@ -1275,9 +1278,16 @@ impl AppState {
     pub fn add_notification(&self, item: &NotificationItem) {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO notifications (id, type, title, message, timestamp, task_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![item.id, item.r#type, item.title, item.message, item.timestamp, item.task_id],
+            "INSERT OR REPLACE INTO notifications (id, type, title, message, timestamp, task_id, is_read) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![item.id, item.r#type, item.title, item.message, item.timestamp, item.task_id, item.is_read as i64],
         );
+    }
+
+    pub fn mark_all_notifications_read(&self) -> Result<(), String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("UPDATE notifications SET is_read = 1 WHERE is_read = 0", [])
+            .map(|_| ())
+            .map_err(|e| format!("Failed marking notifications as read: {}", e))
     }
 
     pub fn clear_notifications(&self) {
