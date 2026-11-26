@@ -298,14 +298,6 @@ fn validate_lrc_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_lrc_sidecar(audio_path: &Path, content: &str) -> Result<PathBuf, String> {
-    validate_lrc_content(content)?;
-    let sidecar = audio_path.with_extension("lrc");
-    fs::write(&sidecar, content)
-        .map_err(|e| format!("Could not write LRC sidecar '{}': {}", sidecar.display(), e))?;
-    Ok(sidecar)
-}
-
 fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
     if !audio_path.extension().and_then(|extension| extension.to_str())
         .map(|extension| extension.eq_ignore_ascii_case("mp3")).unwrap_or(false) {
@@ -341,13 +333,20 @@ fn embed_lrc_lyrics(audio_path: &Path, content: &str) -> Result<bool, String> {
 }
 
 fn write_lrc_assets(audio_path: &Path, content: &str) -> Result<(), String> {
-    if let Err(error) = embed_lrc_lyrics(audio_path, content) {
-        logging::warn("lyrics", &format!(
-            "Could not embed synchronized lyrics into '{}'; preserving the LRC sidecar: {}",
-            audio_path.display(), error
-        ));
+    validate_lrc_content(content)?;
+    match embed_lrc_lyrics(audio_path, content)? {
+        true => logging::info(
+            "lyrics",
+            &format!("Embedded synchronized lyrics into '{}'. No sidecar was created.", audio_path.display()),
+        ),
+        false => logging::warn(
+            "lyrics",
+            &format!(
+                "Synchronized lyrics were not embedded into '{}': this audio container is not currently supported for native synchronized-lyrics tags. No .lrc sidecar was created.",
+                audio_path.display()
+            ),
+        ),
     }
-    write_lrc_sidecar(audio_path, content)?;
     Ok(())
 }
 
@@ -3124,7 +3123,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     if let Some(promoted_audio) = moved_files.get(source_audio) {
                         if let Err(error) = write_lrc_assets(promoted_audio, content) {
                             final_t.status = TaskStatus::Failed;
-                            final_t.current_phase = "Could not write LRC sidecar".to_string();
+                            final_t.current_phase = "Could not embed synchronized lyrics".to_string();
                             final_t.error_message = Some(error);
                             state.upsert_task(&final_t);
                             let _ = app.emit("task_updated", &final_t);
