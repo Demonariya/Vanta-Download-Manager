@@ -22,6 +22,8 @@ import {
   Music2,
   Network,
   Info,
+  Search,
+  X,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -72,6 +74,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onResetSettings,
 }) => {
   const [section, setSection] = useState<SettingsSection>('general');
+  const [sectionSearch, setSectionSearch] = useState('');
   const [form, setForm] = useState<AppSettings | null>(settings);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
@@ -336,6 +339,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     { id: 'cookies', label: 'Cookies & Auth', description: 'Browser sessions', icon: Cookie },
     { id: 'about', label: 'About', description: 'Version and shortcuts', icon: Info },
   ];
+  const sectionSearchTerms: Record<SettingsSection, string> = {
+    general: 'theme appearance startup windows tray clipboard notifications launch',
+    downloads: 'folder path filename conflict overwrite rename skip thumbnail artwork metadata',
+    connection: 'bandwidth speed retries fragments connections verify network',
+    proxy: 'proxy socks http https route',
+    scheduler: 'queue schedule time window weekdays concurrent pause resume',
+    media: 'video audio format bitrate sample rate bit depth flac wav mp3',
+    python: 'python spotdl interpreter executable runtime virtual environment',
+    cookies: 'cookies authentication browser profile user agent login netscape',
+    about: 'version shortcuts application information',
+  };
+  const normalizedSearch = sectionSearch.trim().toLowerCase();
+  const filteredSectionTabs = sectionTabs.filter((tab) =>
+    `${tab.label} ${tab.description} ${sectionSearchTerms[tab.id]}`.toLowerCase().includes(normalizedSearch)
+  );
+  const normalizedSavedSettings = settings
+    ? { ...settings, scheduler: settings.scheduler || DEFAULT_SCHEDULER_SETTINGS }
+    : null;
+  const hasUnsavedChanges = Boolean(
+    form && normalizedSavedSettings && JSON.stringify(form) !== JSON.stringify(normalizedSavedSettings)
+  );
 
   return (
     <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-5">
@@ -346,8 +370,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             Settings &amp; Preferences
           </h1>
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
-            Appearance, storage, connection limits, scheduler windows, Python runtime, and authentication
+            Configure downloads, connections, scheduling, media engines, authentication, and application behavior.
           </p>
+          <div className="relative mt-3 w-full max-w-md">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vanta-muted)]" />
+            <input
+              type="search"
+              value={sectionSearch}
+              onChange={(e) => {
+                const query = e.target.value;
+                setSectionSearch(query);
+                const normalized = query.trim().toLowerCase();
+                if (normalized) {
+                  const match = sectionTabs.find((tab) =>
+                    `${tab.label} ${tab.description} ${sectionSearchTerms[tab.id]}`.toLowerCase().includes(normalized)
+                  );
+                  if (match) setSection(match.id);
+                }
+              }}
+              placeholder="Find a setting… (e.g. speed, proxy, cookies)"
+              aria-label="Search settings"
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] py-2 pl-9 pr-9 text-xs text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:border-[var(--vanta-accent)] focus:outline-none"
+            />
+            {sectionSearch && (
+              <button
+                type="button"
+                onClick={() => setSectionSearch('')}
+                aria-label="Clear settings search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -362,9 +417,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <span>Reset to Defaults</span>
             </button>
           )}
-          <button
+          <div className="flex items-center gap-2">
+            <span className={`hidden sm:inline-flex items-center gap-1.5 text-[11px] ${hasUnsavedChanges ? 'text-amber-600 dark:text-amber-400' : 'text-[var(--vanta-muted)]'}`} aria-live="polite">
+              <span className={`h-1.5 w-1.5 rounded-full ${hasUnsavedChanges ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+              {hasUnsavedChanges ? 'Unsaved changes' : 'All changes saved'}
+            </span>
+            <button
             type="submit"
-            disabled={isSaving}
+            disabled={isSaving || !hasUnsavedChanges}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
           >
             {isSaving ? (
@@ -375,7 +435,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <Save className="w-3.5 h-3.5" />
             )}
             <span>{isSaving ? 'Saving...' : isSaved ? 'Saved' : 'Save Changes'}</span>
-          </button>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -392,7 +453,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Responsive settings navigation: compact grid on small windows, vertical rail on desktop. */}
       <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start lg:gap-4">
         <nav aria-label="Settings sections" role="tablist" className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2 sm:grid-cols-4 lg:sticky lg:top-3 lg:grid-cols-1 lg:max-h-[calc(100dvh-190px)] lg:overflow-y-auto">
-          {sectionTabs.map((tab) => {
+          {filteredSectionTabs.map((tab) => {
             const active = section === tab.id;
             const Icon = tab.icon;
             return (
@@ -416,6 +477,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             );
           })}
+          {filteredSectionTabs.length === 0 && (
+            <p className="col-span-full px-2 py-4 text-center text-[11px] text-[var(--vanta-muted)]">No matching settings sections.</p>
+          )}
         </nav>
         <div className="settings-content min-w-0 space-y-4">
       {/* Section 1: General & Theme */}
@@ -808,17 +872,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             <div className="space-y-2 pt-1">
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.auto_retry_failed}
-                  onChange={(e) => setForm({ ...form, auto_retry_failed: e.target.checked })}
-                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
-                />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Auto-retry transient network failures
-                </span>
-              </label>
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input
                   type="checkbox"
