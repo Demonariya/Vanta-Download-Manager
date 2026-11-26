@@ -145,7 +145,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         ].join(',')
       ),
     ].join('\n');
-    downloadTextFile(`\\uFEFF${rows}`, 'text/csv;charset=utf-8', 'csv');
+    downloadTextFile(`\uFEFF${rows}`, 'text/csv;charset=utf-8', 'csv');
   };
 
   return (
