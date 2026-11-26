@@ -156,7 +156,7 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
       <aside className="flex h-[clamp(310px,44vh,520px)] w-full shrink-0 flex-col overflow-hidden border-t-2 border-[var(--vanta-accent)]/60 bg-[var(--vanta-surface)] shadow-[0_-12px_32px_rgba(0,0,0,0.12)]" aria-label="Download details inspector">
         <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-[var(--vanta-border)] px-3 py-3 sm:px-5">
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size="lg" aspect={audioTask ? 'square' : 'video'} />
+            <MediaThumbnail src={task.thumbnail} title={task.title} isAudio={audioTask} ext={task.ext} size={audioTask ? 'lg' : 'md'} aspect={audioTask ? 'square' : 'video'} />
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-[var(--vanta-text)] sm:text-base" title={task.title}>{task.title}</h2>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--vanta-muted)]">
