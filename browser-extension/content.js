@@ -56,7 +56,7 @@
           media.removeEventListener('mouseleave', cleanup);
         }
       };
-      media.addEventListener('mouseleave', cleanup);
+      parent.addEventListener('mouseleave', cleanup, { once: true });
     });
   }
 
