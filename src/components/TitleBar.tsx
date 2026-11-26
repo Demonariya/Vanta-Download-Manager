@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Minus, Square, Copy, X, Download } from 'lucide-react';
+import { Minus, Square, Copy, X } from 'lucide-react';
 
 interface TitleBarProps {
   onRequestClose: () => void;
@@ -72,9 +72,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
       className="h-8 bg-[var(--vanta-surface-2)] border-b border-[var(--vanta-border)] flex items-center justify-between px-3 select-none text-[var(--vanta-muted)] text-xs z-50 shrink-0"
     >
       <div className="flex items-center gap-2 pointer-events-none">
-        <div className="w-3.5 h-3.5 rounded bg-[var(--vanta-accent)] flex items-center justify-center text-white shrink-0">
-          <Download className="w-2.5 h-2.5" />
-        </div>
+        <img src="/vanta-icon.png" alt="" className="h-5 w-5 rounded-md object-cover shrink-0" />
         <span className="font-semibold text-[var(--vanta-text)] tracking-tight text-[11px]">
           VANTA Download Manager
         </span>

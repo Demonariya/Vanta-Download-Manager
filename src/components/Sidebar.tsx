@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Download, Layers, PlusCircle, History, Terminal, Settings,
+  Download, PlusCircle, History, Terminal, Settings,
   ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2, Music2, Video,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
@@ -115,11 +115,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 onClick={compact ? () => setIsCollapsed(false) : undefined}
-                className="flex items-center justify-center w-9 h-9 rounded-xl bg-[var(--vanta-accent)] text-white shrink-0"
+                className="flex items-center justify-center w-9 h-9 rounded-xl overflow-hidden shrink-0"
                 title={compact ? 'Expand sidebar' : undefined}
                 aria-label="VANTA Download Manager"
               >
-                <Layers className="w-5 h-5" />
+                <img src="/vanta-icon.png" alt="" className="h-9 w-9 rounded-xl object-cover shrink-0" />
               </button>
               {(!compact || drawer) && (
                 <div className="truncate">
