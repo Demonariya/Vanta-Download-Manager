@@ -3,7 +3,8 @@
 !define MUI_BGCOLOR "171A21"
 !define MUI_TEXTCOLOR "E7ECF4"
 !define MUI_DIRECTORYPAGE_BGCOLOR "202631"
-!define MUI_STARTMENUPAGE_BGCOLOR "202631"
+; Avoid MUI_STARTMENUPAGE_BGCOLOR: upstream NSIS MUI2 references a misspelled
+; control variable (mui.StartMenuMenu.FolderList), which triggers warning 6000.
 !define MUI_INSTALLCOLORS "42B8E8 171A21"
 !define MUI_INSTFILESPAGE_COLORS "DCE6F2 171A21"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to VANTA"
