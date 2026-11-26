@@ -679,6 +679,14 @@ export class ApiService {
     await fetch('/api/notifications', { method: 'DELETE' });
   }
 
+  public async markAllNotificationsRead(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('mark_all_notifications_read');
+    }
+    const res = await fetch('/api/notifications/read', { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to mark notifications as read');
+  }
+
   public async openFileOrFolder(path: string): Promise<void> {
     if (this.isTauri()) {
       return invoke('open_file_or_folder', { path });
