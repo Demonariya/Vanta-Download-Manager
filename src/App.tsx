@@ -4,6 +4,8 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   DownloadQueue,
   DownloadTask,
@@ -121,6 +123,32 @@ export default function App() {
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
   }, [theme]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{ url: string; title?: string; source?: string }>('browser-download-request', async (event) => {
+      const request = event.payload;
+      if (!request?.url || !/^https?:\\/\\//i.test(request.url)) return;
+      setInitialInspectUrl(request.url);
+      setIsNewDownloadOpen(true);
+      try {
+        const current = getCurrentWindow();
+        await current.show();
+        await current.unminimize();
+        await current.setFocus();
+      } catch {
+        // The request still opens in the app when the main window is already visible.
+      }
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     const syncLayout = () => setIsSidebarCollapsed(window.innerWidth < 1024);
