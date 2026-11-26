@@ -20,6 +20,7 @@ import { Sidebar, ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { DownloadCenterView, QueueScopeFilter } from './components/DownloadCenterView';
 import { DownloadDetailsDrawer } from './components/DownloadDetailsDrawer';
+import { DownloadProgressWindow } from './components/DownloadProgressWindow';
 import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
 import { HistoryView } from './components/HistoryView';
 import { DiagnosticsView } from './components/DiagnosticsView';
@@ -73,6 +74,7 @@ export default function App() {
   const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0, max_concurrent_downloads: 0, bandwidth_limit_kbps: 0 }]);
   const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isProgressMonitorOpen, setIsProgressMonitorOpen] = useState(false);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
     createInitialCheckingEngineStatus
@@ -586,6 +588,7 @@ export default function App() {
                 task={selectedTask}
                 onClose={() => setSelectedTaskId(null)}
                 onRetryTask={(id) => api.retryTask(id)}
+                onOpenProgress={() => setIsProgressMonitorOpen(true)}
               />
             )}
           </div>
@@ -593,6 +596,16 @@ export default function App() {
       </div>
 
       <StatusBar tasks={tasks} />
+
+      <DownloadProgressWindow
+        task={isProgressMonitorOpen ? selectedTask : null}
+        onClose={() => setIsProgressMonitorOpen(false)}
+        onPause={(id) => api.pauseTask(id)}
+        onResume={(id) => api.resumeTask(id)}
+        onCancel={(id) => api.cancelTask(id)}
+        onRetry={(id) => api.retryTask(id)}
+        onOpenFolder={(task) => api.openTaskFolder(task)}
+      />
 
       {/* New Download Modal */}
       <NewDownloadModal
