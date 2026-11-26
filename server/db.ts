@@ -57,7 +57,7 @@ export function buildDefaultSettings(): AppSettings {
     schema_version: SETTINGS_SCHEMA_VERSION,
     download_dir: path.join(os.homedir() || process.cwd(), 'Downloads', 'VANTA'),
     max_concurrent_downloads: 3,
-    fragment_concurrency: 4,
+    fragment_concurrency: 3,
     global_bandwidth_limit_kbps: 0,
     per_task_bandwidth_limit_kbps: 0,
     max_retries: 3,
@@ -98,14 +98,45 @@ export function validateSettings(settings: AppSettings): void {
   if (!Number.isFinite(settings.max_concurrent_downloads) || settings.max_concurrent_downloads < 1 || settings.max_concurrent_downloads > 16) {
     throw new Error('Max concurrent downloads must be between 1 and 16.');
   }
-  if (!Number.isFinite(settings.fragment_concurrency) || settings.fragment_concurrency < 1 || settings.fragment_concurrency > 32) {
-    throw new Error('Fragment concurrency must be between 1 and 32.');
+  if (!Number.isInteger(settings.fragment_concurrency) || settings.fragment_concurrency < 1 || settings.fragment_concurrency > 3) {
+    throw new Error('Fragment concurrency must be between 1 and 3.');
   }
   if (!Number.isFinite(settings.max_retries) || settings.max_retries < 0 || settings.max_retries > 20) {
     throw new Error('Max retries must be between 0 and 20.');
   }
   if (!Number.isFinite(settings.retry_delay_seconds) || settings.retry_delay_seconds < 1 || settings.retry_delay_seconds > 300) {
     throw new Error('Retry delay must be between 1 and 300 seconds.');
+  }
+  if (!Number.isInteger(settings.max_concurrent_downloads)) {
+    throw new Error('Max concurrent downloads must be a whole number.');
+  }
+  if (!Number.isInteger(settings.max_retries)) {
+    throw new Error('Max retries must be a whole number.');
+  }
+  if (!Number.isInteger(settings.retry_delay_seconds)) {
+    throw new Error('Retry delay must be a whole number.');
+  }
+  for (const [label, value] of [
+    ['Global bandwidth limit', settings.global_bandwidth_limit_kbps],
+    ['Per-task bandwidth limit', settings.per_task_bandwidth_limit_kbps],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 0 || value > 10_000_000) {
+      throw new Error(`${label} must be a whole number between 0 and 10,000,000 KB/s.`);
+    }
+  }
+  const scheduler = settings.scheduler || DEFAULT_SCHEDULER_SETTINGS;
+  const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+  if (!validTime(scheduler.start_time) || !validTime(scheduler.stop_time)) {
+    throw new Error('Scheduler start and stop times must use valid HH:mm values.');
+  }
+  if (!Array.isArray(scheduler.days) || scheduler.days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
+    throw new Error('Scheduler days must contain valid weekdays (0–6).');
+  }
+  if (typeof scheduler.enabled !== 'boolean' || typeof scheduler.pause_on_stop !== 'boolean') {
+    throw new Error('Scheduler enabled and pause settings must be boolean values.');
+  }
+  if (![3, 5, 8, 10, 15, 30].includes(settings.auto_dismiss_seconds)) {
+    throw new Error('Notification duration must be one of the supported values.');
   }
   if (!['rename', 'overwrite', 'skip'].includes(settings.conflict_strategy || 'rename')) {
     throw new Error('Conflict strategy must be rename, overwrite, or skip.');
@@ -260,6 +291,12 @@ function hydrateSettingsObject(rawObj: Record<string, any>, dataRoot: string): A
   if (!merged.scheduler || typeof merged.scheduler !== 'object') {
     merged.scheduler = { ...DEFAULT_SCHEDULER_SETTINGS };
   }
+  // The download engine intentionally caps fragment parallelism at three.
+  // Normalize legacy values (the old default was four) so the UI and engine agree.
+  const requestedFragments = Number(merged.fragment_concurrency);
+  merged.fragment_concurrency = Number.isFinite(requestedFragments)
+    ? Math.min(3, Math.max(1, Math.floor(requestedFragments)))
+    : defaults.fragment_concurrency;
   merged.python_path = typeof merged.python_path === 'string' ? merged.python_path : '';
   return merged as AppSettings;
 }

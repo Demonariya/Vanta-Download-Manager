@@ -62,6 +62,37 @@ export function detectInspectedMediaKind(
   return 'video';
 }
 
+export function detectMediaProvider(url: string): string {
+  const trimmed = (url || '').trim();
+  if (isSpotifyUrl(trimmed)) return 'Spotify';
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'Media Link';
+    if (!parsed.hostname || parsed.username || parsed.password) return 'Media Link';
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
+    const matches = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (matches('youtube.com') || host === 'youtu.be' || matches('youtube-nocookie.com')) return 'YouTube';
+    if (matches('vimeo.com')) return 'Vimeo';
+    if (matches('soundcloud.com') || matches('snd.sc')) return 'SoundCloud';
+    if (matches('dailymotion.com') || host === 'dai.ly') return 'Dailymotion';
+    if (matches('twitch.tv') || matches('twitchcdn.net')) return 'Twitch';
+    if (matches('facebook.com') || matches('fb.watch')) return 'Facebook';
+    if (matches('instagram.com')) return 'Instagram';
+    if (matches('tiktok.com')) return 'TikTok';
+    if (matches('x.com') || matches('twitter.com')) return 'X';
+    if (matches('reddit.com') || matches('redd.it')) return 'Reddit';
+    if (matches('bandcamp.com')) return 'Bandcamp';
+    if (matches('mixcloud.com')) return 'Mixcloud';
+
+    const ext = parsed.pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
+    if (ext && AUDIO_EXT_SET.has(ext)) return 'Direct Audio';
+    if (ext && /^(mp4|m4v|mov|mkv|webm|avi|flv|mpeg|mpg|ts|m3u8|mpd)$/.test(ext)) return 'Direct Video';
+    return 'Media Link';
+  } catch {
+    return 'Media Link';
+  }
+}
+
 export function formatMediaRoutingLabel(
   metadata: MediaMetadata | null,
   mediaKind: 'audio' | 'video',
@@ -74,7 +105,9 @@ export function formatMediaRoutingLabel(
       : 'Music';
     return `Spotify ${kind} · spotDL`;
   }
-  return mediaKind === 'audio' ? 'Audio · yt-dlp' : 'Video · yt-dlp';
+  const provider = detectMediaProvider(url);
+  const mode = mediaKind === 'audio' ? 'Audio' : 'Video';
+  return `${provider} · ${mode} · yt-dlp`;
 }
 
 export function summarizeVideoOptionCodecs(
@@ -86,7 +119,10 @@ export function summarizeVideoOptionCodecs(
   );
   if (videoStreams.length === 0) return null;
 
-  const baseId = (selectedFormatId || '').split('+')[0].trim();
+  // Resolve the primary stream ID from selectors such as "137+bestaudio/best".
+  // Ignore slash fallbacks so the codec summary reflects the pinned quality choice.
+  const primarySelector = (selectedFormatId || '').split('/')[0];
+  const baseId = primarySelector.split('+')[0].trim();
   let matched =
     videoStreams.find((f) => f.format_id === baseId) ||
     [...videoStreams].sort((a, b) => (b.height || 0) - (a.height || 0))[0];
@@ -173,6 +209,17 @@ const STANDARD_PRESETS: CuratedVideoOption[] = [
 ];
 
 /**
+ * Selects the highest concrete inspected resolution by default.
+ * When the extractor has no concrete video formats, retain the adaptive preset.
+ */
+export function getDefaultVideoFormatSelector(formats: FormatOption[] = []): string {
+  const options = buildCuratedVideoOptions(formats);
+  return options.find((option) => option.height < 9999)?.formatSelector
+    || options[0]?.formatSelector
+    || 'bestvideo+bestaudio/best';
+}
+
+/**
  * Ensures any selected video-only stream automatically pairs with bestaudio so
  * video downloads never accidentally output silent files unless explicitly requested.
  */
@@ -188,8 +235,14 @@ export function resolveVideoFormatSelector(
     return trimmed;
   }
   const matched = availableFormats.find((f) => f.format_id === trimmed);
-  if (matched && (matched.is_video_only || matched.acodec === 'none')) {
-    return `${trimmed}+bestaudio/best`;
+  if (matched) {
+    const hasVideo = !matched.is_audio_only &&
+      ((Boolean(matched.vcodec) && matched.vcodec !== 'none') || (matched.height || 0) > 0);
+    const hasAudio = !matched.is_video_only &&
+      Boolean(matched.acodec) && matched.acodec !== 'none';
+    if (hasVideo && !hasAudio) {
+      return trimmed + '+bestaudio/best';
+    }
   }
   return trimmed;
 }
@@ -203,23 +256,40 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   );
 
   if (videoStreams.length === 0) {
-    return STANDARD_PRESETS;
+    // Do not advertise fixed resolutions when the extractor did not report
+    // any concrete video streams. The adaptive selector remains valid.
+    return [STANDARD_PRESETS[0]];
   }
 
   const byHeight = new Map<number, FormatOption>();
   for (const fmt of videoStreams) {
     const h = fmt.height || 0;
     const existing = byHeight.get(h);
-    const fmtScore =
-      (fmt.acodec && fmt.acodec !== 'none' ? 10 : 0) +
-      (fmt.ext === 'mp4' ? 5 : 0) +
-      ((fmt.fps || 0) >= 50 ? 2 : 0);
+    // Prefer the highest-bitrate stream at each resolution. The previous
+    // codec/container-only score could select a low-bitrate muxed rendition
+    // over a substantially better video-only stream at the same height.
+    const fmtScore = [
+      fmt.tbr || 0,
+      fmt.fps || 0,
+      fmt.acodec && fmt.acodec !== 'none' ? 1 : 0,
+      fmt.ext === 'mp4' ? 1 : 0,
+    ];
     const existingScore = existing
-      ? (existing.acodec && existing.acodec !== 'none' ? 10 : 0) +
-        (existing.ext === 'mp4' ? 5 : 0) +
-        ((existing.fps || 0) >= 50 ? 2 : 0)
-      : -1;
-    if (!existing || fmtScore > existingScore) {
+      ? [
+          existing.tbr || 0,
+          existing.fps || 0,
+          existing.acodec && existing.acodec !== 'none' ? 1 : 0,
+          existing.ext === 'mp4' ? 1 : 0,
+        ]
+      : [];
+    const isBetter = !existing || fmtScore.some(
+      (value, index) => value !== existingScore[index] &&
+        value > existingScore[index] &&
+        fmtScore.slice(0, index).every((previous, previousIndex) =>
+          previous === existingScore[previousIndex]
+        )
+    );
+    if (isBetter) {
       byHeight.set(h, fmt);
     }
   }
@@ -230,18 +300,31 @@ export function buildCuratedVideoOptions(formats: FormatOption[] = []): CuratedV
   for (const h of sortedHeights) {
     const fmt = byHeight.get(h)!;
     const isVideoOnly = fmt.is_video_only || !fmt.acodec || fmt.acodec === 'none';
-    const selector = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+    const hasMuxedAudio = Boolean(fmt.acodec && fmt.acodec !== 'none' && !fmt.is_video_only);
+    // Pin the choice to the exact stream discovered during inspection instead
+    // of asking yt-dlp to re-rank every format at download time. Video-only
+    // streams are paired with the best available audio stream.
+    // If the inspected format ID is unavailable during the actual download
+    // (YouTube can expose different format sets between extraction requests),
+    // fall back to the best video-only stream at or below the selected height.
+    // Falling back to "best[height<=h]" alone can silently drop to a low-res
+    // muxed rendition such as 240p even when higher video-only streams exist.
+    const fallback = `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`;
+    const selector = hasMuxedAudio
+      ? `${fmt.format_id}/${fallback}`
+      : `${fmt.format_id}+bestaudio/${fallback}`;
     const size = fmt.filesize || fmt.filesize_approx;
     const vcodecShort = (fmt.vcodec || '').split('.')[0].toUpperCase();
+    const containerLabel = (fmt.ext || 'unknown').toUpperCase();
     const fpsPart = fmt.fps && fmt.fps > 30 ? ` ${Math.round(fmt.fps)}fps` : '';
     const sizePart = size ? ` · ~${formatBytes(size)}` : '';
     const audioPart = isVideoOnly ? '+Audio Mux' : '+Audio';
 
     realOptions.push({
       id: selector,
-      label: `Up to ${h}p${fpsPart} (${vcodecShort || fmt.ext.toUpperCase()} ${audioPart})${sizePart}`,
+      label: `Up to ${h}p${fpsPart} (${vcodecShort || containerLabel} ${audioPart})${sizePart}`,
       formatSelector: selector,
-      detail: `${fmt.resolution || `${h}p`} · ${fmt.ext.toUpperCase()} · best matching stream (detected #${fmt.format_id})`,
+      detail: `${fmt.resolution || `${h}p`} · ${containerLabel} · preferred stream #${fmt.format_id}`,
       height: h,
       hasAudio: true,
       needsMux: Boolean(isVideoOnly),

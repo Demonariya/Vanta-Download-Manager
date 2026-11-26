@@ -18,7 +18,7 @@ export const SafeCloseDialog: React.FC<SafeCloseDialogProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-md bg-[var(--vanta-surface)] border border-red-500/40 rounded-xl shadow-2xl p-5 space-y-4">
+      <div className="relative w-full max-w-md bg-[var(--vanta-surface)] border border-red-500/40 rounded-2xl shadow-2xl p-6 space-y-5">
         <div className="flex items-start gap-3">
           <div className="p-2 rounded-lg bg-red-500/12 text-red-600 dark:text-[#f85149] shrink-0">
             <AlertTriangle className="w-5 h-5" />

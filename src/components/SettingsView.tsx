@@ -22,6 +22,8 @@ import {
   Music2,
   Network,
   Info,
+  Search,
+  X,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -37,6 +39,7 @@ import { validateNetscapeCookies } from '../utils/cookie-validator';
 import { describeCookieStatus } from '../utils/cookie-status-ui';
 import { DEFAULT_SCHEDULER_SETTINGS } from '../utils/scheduler';
 import { ConfirmDialog } from './ConfirmDialog';
+import { validateSettingsForm } from '../utils/settings-validation';
 
 interface SettingsViewProps {
   settings: AppSettings | null;
@@ -72,6 +75,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onResetSettings,
 }) => {
   const [section, setSection] = useState<SettingsSection>('general');
+  const [sectionSearch, setSectionSearch] = useState('');
   const [form, setForm] = useState<AppSettings | null>(settings);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
@@ -105,10 +109,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     if (settings) {
-      setForm({
-        ...settings,
-        scheduler: settings.scheduler || DEFAULT_SCHEDULER_SETTINGS,
-      });
+      const storedScheduler = settings.scheduler || DEFAULT_SCHEDULER_SETTINGS;
+      // Migrate the old built-in 01:00–06:00 default: it unintentionally blocked
+      // normal downloads whenever users enabled the scheduler without configuring it.
+      const migrateLegacyDefault = storedScheduler.enabled
+        && storedScheduler.start_time === '01:00'
+        && storedScheduler.stop_time === '06:00';
+      const scheduler = migrateLegacyDefault
+        ? { ...storedScheduler, start_time: '00:00', stop_time: '00:00' }
+        : storedScheduler;
+      setForm({ ...settings, scheduler });
+      if (migrateLegacyDefault) {
+        void Promise.resolve(onSaveSettings({ scheduler })).catch((error: any) => {
+          setSaveError(error?.message || 'Could not migrate the default scheduler window.');
+        });
+      }
     }
     refreshCookieStatus();
   }, [settings]);
@@ -262,6 +277,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     e.preventDefault();
     setSaveError(null);
     setIsSaved(false);
+    const validationErrors = validateSettingsForm(form);
+    if (validationErrors.length > 0) {
+      setSaveError(validationErrors.join(' '));
+      return;
+    }
     setIsSaving(true);
     try {
       const saved = await onSaveSettings({
@@ -325,18 +345,73 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     { id: 'cookies', label: 'Cookies & Auth', description: 'Browser sessions', icon: Cookie },
     { id: 'about', label: 'About', description: 'Version and shortcuts', icon: Info },
   ];
+  const sectionSearchTerms: Record<SettingsSection, string> = {
+    general: 'theme appearance startup windows tray clipboard notifications launch',
+    downloads: 'folder path filename conflict overwrite rename skip thumbnail artwork metadata',
+    connection: 'bandwidth speed retries fragments connections verify network',
+    proxy: 'proxy socks http https route',
+    scheduler: 'queue schedule time window weekdays concurrent pause resume',
+    media: 'video audio format bitrate sample rate bit depth flac wav mp3',
+    python: 'python spotdl interpreter executable runtime virtual environment',
+    cookies: 'cookies authentication browser profile user agent login netscape',
+    about: 'version shortcuts application information',
+  };
+  const normalizedSearch = sectionSearch.trim().toLowerCase();
+  const filteredSectionTabs = sectionTabs.filter((tab) =>
+    `${tab.label} ${tab.description} ${sectionSearchTerms[tab.id]}`.toLowerCase().includes(normalizedSearch)
+  );
+  const normalizedSavedSettings = settings
+    ? { ...settings, scheduler: settings.scheduler || DEFAULT_SCHEDULER_SETTINGS }
+    : null;
+  const hasUnsavedChanges = Boolean(
+    form && normalizedSavedSettings && JSON.stringify(form) !== JSON.stringify(normalizedSavedSettings)
+  );
 
   return (
-    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-4">
+    <form onSubmit={handleSubmit} className="settings-form mx-auto w-full max-w-none min-w-0 space-y-5">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
           <h1 className="text-base font-semibold text-[var(--vanta-text)]">
             Settings &amp; Preferences
           </h1>
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
-            Appearance, storage, connection limits, scheduler windows, Python runtime, and authentication
+            Configure downloads, connections, scheduling, media engines, authentication, and application behavior.
           </p>
+          <div className="relative mt-3 w-full max-w-md">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vanta-muted)]" />
+            <input
+              type="search"
+              value={sectionSearch}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.preventDefault();
+              }}
+              onChange={(e) => {
+                const query = e.target.value;
+                setSectionSearch(query);
+                const normalized = query.trim().toLowerCase();
+                if (normalized) {
+                  const match = sectionTabs.find((tab) =>
+                    `${tab.label} ${tab.description} ${sectionSearchTerms[tab.id]}`.toLowerCase().includes(normalized)
+                  );
+                  if (match) setSection(match.id);
+                }
+              }}
+              placeholder="Find a setting… (e.g. speed, proxy, cookies)"
+              aria-label="Search settings"
+              className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] py-2 pl-9 pr-9 text-xs text-[var(--vanta-text)] placeholder:text-[var(--vanta-muted)] focus:border-[var(--vanta-accent)] focus:outline-none"
+            />
+            {sectionSearch && (
+              <button
+                type="button"
+                onClick={() => setSectionSearch('')}
+                aria-label="Clear settings search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -351,9 +426,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <span>Reset to Defaults</span>
             </button>
           )}
-          <button
+          <div className="flex items-center gap-2">
+            <span className={`hidden sm:inline-flex items-center gap-1.5 text-[11px] ${hasUnsavedChanges ? 'text-amber-600 dark:text-amber-400' : 'text-[var(--vanta-muted)]'}`} aria-live="polite">
+              <span className={`h-1.5 w-1.5 rounded-full ${hasUnsavedChanges ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+              {hasUnsavedChanges ? 'Unsaved changes' : 'All changes saved'}
+            </span>
+            <button
             type="submit"
-            disabled={isSaving}
+            disabled={isSaving || !hasUnsavedChanges}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
           >
             {isSaving ? (
@@ -364,7 +444,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <Save className="w-3.5 h-3.5" />
             )}
             <span>{isSaving ? 'Saving...' : isSaved ? 'Saved' : 'Save Changes'}</span>
-          </button>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -381,7 +462,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Responsive settings navigation: compact grid on small windows, vertical rail on desktop. */}
       <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start lg:gap-4">
         <nav aria-label="Settings sections" role="tablist" className="grid grid-cols-2 gap-1.5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-2 sm:grid-cols-4 lg:sticky lg:top-3 lg:grid-cols-1 lg:max-h-[calc(100dvh-190px)] lg:overflow-y-auto">
-          {sectionTabs.map((tab) => {
+          {filteredSectionTabs.map((tab) => {
             const active = section === tab.id;
             const Icon = tab.icon;
             return (
@@ -405,8 +486,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             );
           })}
+          {filteredSectionTabs.length === 0 && (
+            <p className="col-span-full px-2 py-4 text-center text-[11px] text-[var(--vanta-muted)]">No matching settings sections.</p>
+          )}
         </nav>
-        <div className="settings-content min-w-0 space-y-4">
+        {filteredSectionTabs.length === 0 && normalizedSearch ? (
+          <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-6 text-center text-xs text-[var(--vanta-muted)]">
+            No settings categories match “{sectionSearch}”. Try a term such as speed, proxy, scheduler, or cookies.
+          </div>
+        ) : (
+          <div className="settings-content min-w-0 space-y-4">
       {/* Section 1: General & Theme */}
       {section === 'general' && (
         <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
@@ -428,15 +517,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     key={id}
                     type="button"
-                    onClick={async () => {
-                      const nextTheme = id as ThemeMode;
-                      setForm({ ...form, theme: nextTheme });
+                    onClick={() => {
+                      // Keep theme changes in the same draft as every other preference.
+                      // Applying this immediately would trigger the settings sync effect
+                      // and could discard unrelated unsaved edits in the current form.
+                      setForm({ ...form, theme: id as ThemeMode });
                       setSaveError(null);
-                      try {
-                        await onSaveSettings({ theme: nextTheme });
-                      } catch (err: any) {
-                        setSaveError(err?.message || 'Failed saving theme preference.');
-                      }
                     }}
                     className={`p-3 rounded-lg border flex items-center justify-center gap-2 font-medium transition-colors ${
                       selected
@@ -640,12 +726,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
-                Fragment Concurrency (yt-dlp -N): {form.fragment_concurrency}
+                Max Fragment Connections (auto-fallback after retry): {form.fragment_concurrency}
               </label>
               <input
                 type="range"
                 min="1"
-                max="16"
+                max="3"
                 value={form.fragment_concurrency}
                 onChange={(e) =>
                   setForm({ ...form, fragment_concurrency: parseInt(e.target.value, 10) })
@@ -661,7 +747,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="number"
                 min="0"
-                max="10"
+                max="20"
                 value={form.max_retries}
                 onChange={(e) =>
                   setForm({ ...form, max_retries: parseInt(e.target.value, 10) || 0 })
@@ -672,11 +758,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div className="space-y-1.5">
               <label className="font-medium text-[var(--vanta-text-secondary)] block">
-                Global Bandwidth Cap (KB/s, 0 = unlimited)
+                Global Bandwidth Cap (KB/s, 0 = unlimited; shared across max downloads)
               </label>
               <input
                 type="number"
                 min="0"
+                max="10000000"
                 value={form.global_bandwidth_limit_kbps}
                 onChange={(e) =>
                   setForm({
@@ -695,6 +782,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="number"
                 min="0"
+                max="10000000"
                 value={form.per_task_bandwidth_limit_kbps}
                 onChange={(e) =>
                   setForm({
@@ -764,9 +852,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="number"
               min="1"
-              max="120"
+              max="300"
               value={form.retry_delay_seconds}
-              onChange={(e) => setForm({ ...form, retry_delay_seconds: Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 1)) })}
+              onChange={(e) => setForm({ ...form, retry_delay_seconds: Math.max(1, Math.min(300, parseInt(e.target.value, 10) || 1)) })}
               className="w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-2 font-mono tabular-nums text-[var(--vanta-text)]"
             />
             <p className="text-[10px] text-[var(--vanta-muted)]">Used when automatic retry is enabled.</p>
@@ -785,7 +873,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="range"
                 min="1"
-                max="10"
+                max="16"
                 value={form.max_concurrent_downloads}
                 onChange={(e) =>
                   setForm({ ...form, max_concurrent_downloads: parseInt(e.target.value, 10) })
@@ -794,30 +882,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
 
-            <div className="space-y-2 pt-1">
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.auto_retry_failed}
-                  onChange={(e) => setForm({ ...form, auto_retry_failed: e.target.checked })}
-                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
-                />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Auto-retry transient network failures
-                </span>
-              </label>
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.auto_resume_on_startup}
-                  onChange={(e) => setForm({ ...form, auto_resume_on_startup: e.target.checked })}
-                  className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
-                />
-                <span className="text-[var(--vanta-text-secondary)]">
-                  Resume unfinished queue items on startup
-                </span>
-              </label>
-            </div>
           </div>
 
           <div className="border-t border-[var(--vanta-border)] pt-4 space-y-3">
@@ -825,12 +889,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <input
                 type="checkbox"
                 checked={scheduler.enabled}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const enabling = e.target.checked;
+                  // The legacy 01:00–06:00 values were defaults, not an intentional
+                  // user schedule. Enabling the feature for the first time should
+                  // not silently block every manual download for the rest of the day.
+                  const isLegacyDefault = scheduler.start_time === '01:00' && scheduler.stop_time === '06:00';
                   setForm({
                     ...form,
-                    scheduler: { ...scheduler, enabled: e.target.checked },
-                  })
-                }
+                    scheduler: {
+                      ...scheduler,
+                      enabled: enabling,
+                      ...(enabling && isLegacyDefault ? { start_time: '00:00', stop_time: '00:00' } : {}),
+                    },
+                  });
+                }}
                 className="w-4 h-4 rounded accent-[var(--vanta-accent)]"
               />
               <span>Enable Scheduled Download Window (Quiet Hours / Off-Peak)</span>
@@ -890,7 +963,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     type="button"
                     onClick={() => {
                       const nextDays = active
-                        ? scheduler.days.filter((d) => d !== idx)
+                        ? scheduler.days.length > 1
+                          ? scheduler.days.filter((d) => d !== idx)
+                          : scheduler.days
                         : [...scheduler.days, idx].sort((a, b) => a - b);
                       setForm({
                         ...form,
@@ -924,6 +999,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onChange={(e) => setForm({ ...form, default_video_format: e.target.value })}
               className="w-full bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg p-2 text-[var(--vanta-text)]"
             >
+              <option value="best">Best Available (source)</option>
               <option value="mp4">MP4</option>
               <option value="mkv">MKV</option>
               <option value="webm">WebM</option>
@@ -1357,6 +1433,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
         </div>
+        )}
       </div>
 
       <ConfirmDialog

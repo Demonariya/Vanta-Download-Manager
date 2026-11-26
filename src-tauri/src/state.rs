@@ -36,12 +36,14 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub db: Mutex<Connection>,
     pub settings_file_lock: Mutex<()>,
+    /// Serializes queue scheduling snapshots and task claims across concurrent commands.
+    pub scheduler_lock: Mutex<()>,
     pub active_processes: Arc<Mutex<HashMap<String, u32>>>,
     pub active_inspections: Arc<Mutex<HashMap<String, TrackedInspection>>>,
     pub cached_engine_status: Mutex<Option<(Instant, EngineStatusMap)>>,
     pub is_shutting_down: AtomicBool,
-    pub is_running_diagnostics: AtomicBool,
-    pub is_scanning_engines: AtomicBool,
+    pub is_running_diagnostics: Arc<AtomicBool>,
+    pub is_scanning_engines: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -255,7 +257,9 @@ impl AppState {
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 is_default INTEGER DEFAULT 0,
                 is_paused INTEGER DEFAULT 0,
-                queue_order INTEGER DEFAULT 0
+                queue_order INTEGER DEFAULT 0,
+                max_concurrent_downloads INTEGER DEFAULT 0,
+                bandwidth_limit_kbps INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS notifications (
@@ -264,7 +268,8 @@ impl AppState {
                 title TEXT NOT NULL,
                 message TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                task_id TEXT
+                task_id TEXT,
+                is_read INTEGER NOT NULL DEFAULT 0
             );
             ",
         )
@@ -325,6 +330,9 @@ impl AppState {
             "ALTER TABLE tasks ADD COLUMN queue_id TEXT DEFAULT 'main'",
             "ALTER TABLE tasks ADD COLUMN started_at TEXT",
             "ALTER TABLE tasks ADD COLUMN lyrics_lrc_content TEXT",
+            "ALTER TABLE download_queues ADD COLUMN max_concurrent_downloads INTEGER DEFAULT 0",
+            "ALTER TABLE download_queues ADD COLUMN bandwidth_limit_kbps INTEGER DEFAULT 0",
+            "ALTER TABLE notifications ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -353,12 +361,13 @@ impl AppState {
             data_dir: db_dir,
             db: Mutex::new(conn),
             settings_file_lock: Mutex::new(()),
+            scheduler_lock: Mutex::new(()),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
             active_inspections: Arc::new(Mutex::new(HashMap::new())),
             cached_engine_status: Mutex::new(None),
             is_shutting_down: AtomicBool::new(false),
-            is_running_diagnostics: AtomicBool::new(false),
-            is_scanning_engines: AtomicBool::new(false),
+            is_running_diagnostics: Arc::new(AtomicBool::new(false)),
+            is_scanning_engines: Arc::new(AtomicBool::new(false)),
         };
 
         // Ensure durable settings.v1.json exists and recovers cleanly if corrupt
@@ -543,7 +552,7 @@ impl AppState {
     pub fn get_queues(&self) -> Vec<DownloadQueue> {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, name, is_default, is_paused, queue_order FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
+            "SELECT id, name, is_default, is_paused, queue_order, max_concurrent_downloads, bandwidth_limit_kbps FROM download_queues ORDER BY queue_order ASC, name COLLATE NOCASE ASC",
         ) {
             Ok(stmt) => stmt,
             Err(error) => {
@@ -558,6 +567,8 @@ impl AppState {
                 is_default: row.get::<_, i32>(2)? != 0,
                 is_paused: row.get::<_, i32>(3)? != 0,
                 queue_order: row.get(4)?,
+                max_concurrent_downloads: row.get::<_, i64>(5).unwrap_or(0).clamp(0, 32) as u32,
+                bandwidth_limit_kbps: row.get::<_, i64>(6).unwrap_or(0).max(0) as u64,
             })
         }) {
             Ok(rows) => rows,
@@ -577,7 +588,7 @@ impl AppState {
         ).unwrap_or(1);
         let id = format!("queue_{}", &uuid::Uuid::new_v4().to_string()[..12]);
         conn.execute(
-            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order) VALUES (?1, ?2, 0, 0, ?3)",
+            "INSERT INTO download_queues (id, name, is_default, is_paused, queue_order, max_concurrent_downloads, bandwidth_limit_kbps) VALUES (?1, ?2, 0, 0, ?3, 0, 0)",
             params![id, name, next_order],
         ).map_err(|error| {
             if error.to_string().to_ascii_lowercase().contains("unique") {
@@ -642,6 +653,30 @@ impl AppState {
             "UPDATE download_queues SET is_paused = ?1 WHERE id = ?2",
             params![if paused { 1 } else { 0 }, id],
         ).map_err(|error| format!("Could not update queue: {}", error))?;
+        if changed == 0 {
+            return Err("Queue was not found.".to_string());
+        }
+        drop(conn);
+        Ok(self.get_queues())
+    }
+
+    pub fn update_queue_limits(
+        &self,
+        id: &str,
+        max_concurrent_downloads: u32,
+        bandwidth_limit_kbps: u64,
+    ) -> Result<Vec<DownloadQueue>, String> {
+        if max_concurrent_downloads > 32 {
+            return Err("Queue concurrency must be between 0 (inherit) and 32.".to_string());
+        }
+        if bandwidth_limit_kbps > 10_000_000 {
+            return Err("Queue bandwidth limit is outside the supported range.".to_string());
+        }
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE download_queues SET max_concurrent_downloads = ?1, bandwidth_limit_kbps = ?2 WHERE id = ?3",
+            params![max_concurrent_downloads as i64, bandwidth_limit_kbps as i64, id],
+        ).map_err(|error| format!("Could not update queue limits: {}", error))?;
         if changed == 0 {
             return Err("Queue was not found.".to_string());
         }
@@ -1216,7 +1251,7 @@ impl AppState {
     pub fn get_notifications(&self) -> Vec<NotificationItem> {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, type, title, message, timestamp, task_id FROM notifications ORDER BY timestamp DESC LIMIT 50",
+            "SELECT id, type, title, message, timestamp, task_id, is_read FROM notifications ORDER BY timestamp DESC LIMIT 100",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1230,6 +1265,7 @@ impl AppState {
                 message: row.get(3)?,
                 timestamp: row.get(4)?,
                 task_id: row.get(5)?,
+                is_read: row.get::<_, i64>(6)? != 0,
             })
         }) {
             Ok(r) => r,
@@ -1242,9 +1278,16 @@ impl AppState {
     pub fn add_notification(&self, item: &NotificationItem) {
         let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO notifications (id, type, title, message, timestamp, task_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![item.id, item.r#type, item.title, item.message, item.timestamp, item.task_id],
+            "INSERT OR REPLACE INTO notifications (id, type, title, message, timestamp, task_id, is_read) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![item.id, item.r#type, item.title, item.message, item.timestamp, item.task_id, item.is_read as i64],
         );
+    }
+
+    pub fn mark_all_notifications_read(&self) -> Result<(), String> {
+        let conn = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("UPDATE notifications SET is_read = 1 WHERE is_read = 0", [])
+            .map(|_| ())
+            .map_err(|e| format!("Failed marking notifications as read: {}", e))
     }
 
     pub fn clear_notifications(&self) {

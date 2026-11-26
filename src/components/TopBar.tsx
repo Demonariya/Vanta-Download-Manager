@@ -34,7 +34,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="h-[68px] border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)]/95 px-3 sm:px-4 flex items-center gap-2 sm:gap-3 shrink-0 select-none">
+    <header className="h-16 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)]/95 px-4 sm:px-5 flex items-center gap-3 sm:gap-4 shrink-0 select-none">
       {onToggleMobileMenu && (
         <button type="button" onClick={onToggleMobileMenu} aria-label="Toggle navigation menu"
           className="p-2 text-[var(--vanta-muted)] hover:text-[var(--vanta-text)] hover:bg-[var(--vanta-surface-hover)] rounded-lg md:hidden shrink-0">
@@ -51,10 +51,10 @@ export const TopBar: React.FC<TopBarProps> = ({
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             aria-label="Paste download URL or search downloads"
-            className="w-full h-11 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-xl text-sm pl-10 pr-3 text-[var(--vanta-text)] placeholder-[var(--vanta-muted)] transition-colors"
+            className="w-full h-10 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] focus:border-[var(--vanta-accent)] focus:outline-none rounded-lg text-sm pl-10 pr-3 text-[var(--vanta-text)] placeholder-[var(--vanta-muted)] transition-colors"
           />
         </div>
-        <button type="submit" className="h-11 px-4 sm:px-5 bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors shrink-0">
+        <button type="submit" className="h-10 px-4 sm:px-5 bg-[var(--vanta-accent)] hover:bg-[var(--vanta-accent-hover)] text-white rounded-lg text-sm font-semibold flex items-center gap-2 transition-colors shrink-0">
           <Plus className="w-4 h-4" />
           <span className="hidden min-[520px]:inline">Add</span>
         </button>

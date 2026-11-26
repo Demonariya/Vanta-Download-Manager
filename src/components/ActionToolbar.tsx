@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Activity,
+  Plus,
   Check,
   ChevronDown,
   ChevronUp,
@@ -13,6 +14,7 @@ import {
 import { DownloadTask } from '../types';
 
 interface ActionToolbarProps {
+  onNewDownload: () => void;
   selectedTask: DownloadTask | null;
   activeCount: number;
   pausedCount: number;
@@ -72,7 +74,7 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({
 );
 
 export const ActionToolbar: React.FC<ActionToolbarProps> = ({
-  selectedTask, activeCount, pausedCount, onPauseSelected, onResumeSelected,
+  onNewDownload, selectedTask, activeCount, pausedCount, onPauseSelected, onResumeSelected,
   onRetrySelected, onDeleteSelected, onPauseAll, onResumeAll,
 }) => {
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
@@ -143,8 +145,10 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
   };
 
   return (
-    <div className="relative flex min-h-11 shrink-0 items-center gap-1.5 overflow-visible border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 py-1.5 sm:px-4">
-      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+    <div className="relative z-20 flex min-h-[58px] shrink-0 items-center gap-3 overflow-visible border-b border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3 py-2 sm:px-5">
+      <ToolbarButton label="New Download" icon={Plus} onClick={onNewDownload} primary />
+      <div className="h-7 shrink-0 border-l border-[var(--vanta-border-strong)]" />
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto [scrollbar-width:thin]">
         {actionOrder.filter((id) => visibility[id]).map((id) => {
           const action = actions[id];
           return (
@@ -172,7 +176,7 @@ export const ActionToolbar: React.FC<ActionToolbarProps> = ({
         aria-expanded={isCustomizeOpen}
         title="Customize toolbar"
         onClick={() => setIsCustomizeOpen((open) => !open)}
-        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-2.5 text-[11px] font-medium text-[var(--vanta-text-secondary)] transition-colors hover:bg-[var(--vanta-surface-hover)] hover:text-[var(--vanta-text)]"
+        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-2.5 text-[11px] font-medium text-[var(--vanta-text-secondary)] transition-colors hover:bg-[var(--vanta-surface-hover)] hover:text-[var(--vanta-text)]"
       >
         <Settings2 className="h-3.5 w-3.5" />
         <span className="hidden sm:inline">Customize</span>

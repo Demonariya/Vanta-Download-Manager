@@ -210,9 +210,17 @@ export class ApiService {
     return res.json();
   }
 
+  public async readClipboardText(): Promise<string> {
+    if (this.isTauri()) return invoke<string>('read_clipboard_text');
+    if (!navigator.clipboard?.readText) {
+      throw new Error('Clipboard access is unavailable in this browser context.');
+    }
+    return navigator.clipboard.readText();
+  }
+
   public async getQueues(): Promise<DownloadQueue[]> {
     if (!this.isTauri()) {
-      return [{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }];
+      return [{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0, max_concurrent_downloads: 0, bandwidth_limit_kbps: 0 }];
     }
     return invoke<DownloadQueue[]>('get_queues');
   }
@@ -230,6 +238,15 @@ export class ApiService {
   public async deleteQueue(id: string): Promise<DownloadQueue[]> {
     if (!this.isTauri()) throw new Error('Queue management requires the VANTA desktop app.');
     return invoke<DownloadQueue[]>('delete_queue', { id });
+  }
+
+  public async updateQueueLimits(id: string, maxConcurrentDownloads: number, bandwidthLimitKbps: number): Promise<DownloadQueue[]> {
+    if (!this.isTauri()) throw new Error('Queue settings require the VANTA desktop app.');
+    return invoke<DownloadQueue[]>('update_queue_limits', {
+      id,
+      maxConcurrentDownloads,
+      bandwidthLimitKbps,
+    });
   }
 
   public async startQueue(id: string): Promise<DownloadQueue[]> {
@@ -260,6 +277,13 @@ export class ApiService {
     const res = await fetch('/api/tasks');
     if (!res.ok) throw new Error('Failed to fetch tasks');
     return res.json();
+  }
+
+  public async importHistory(tasks: DownloadTask[]): Promise<DownloadTask[]> {
+    if (!this.isTauri()) {
+      throw new Error('History import requires the VANTA desktop app.');
+    }
+    return invoke<DownloadTask[]>('import_history', { importedTasks: tasks });
   }
 
   public async createTask(taskData: Partial<DownloadTask>): Promise<DownloadTask> {
@@ -653,6 +677,14 @@ export class ApiService {
       return invoke('clear_notifications');
     }
     await fetch('/api/notifications', { method: 'DELETE' });
+  }
+
+  public async markAllNotificationsRead(): Promise<void> {
+    if (this.isTauri()) {
+      return invoke('mark_all_notifications_read');
+    }
+    const res = await fetch('/api/notifications/read', { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to mark notifications as read');
   }
 
   public async openFileOrFolder(path: string): Promise<void> {

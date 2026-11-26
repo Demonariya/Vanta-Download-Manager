@@ -54,6 +54,9 @@
       "wix": {
         "upgradeCode": "7f3c8b1e-4a92-4d6e-9c15-2b8a6f04d912"
       }
+    },
+    "resources": {
+      "../browser-extension/": "extension/"
     }
   }
 }

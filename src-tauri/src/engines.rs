@@ -49,6 +49,46 @@ const SPOTDL_PIP_INSTALL_ARGS: &[&str] = &[
     "spotdl",
 ];
 
+fn parse_video_dimensions(
+    resolution: Option<&str>,
+    format_note: Option<&str>,
+) -> (Option<u32>, Option<u32>) {
+    let dimensions = resolution.and_then(|value| {
+        let (width, height) = value.split_once('x')?;
+        let width = width.trim().parse::<u32>().ok()?;
+        let height = height.trim().parse::<u32>().ok()?;
+        (width > 0 && height > 0 && width <= 32768 && height <= 16384)
+            .then_some((width, height))
+    });
+
+    if let Some((width, height)) = dimensions {
+        return (Some(width), Some(height));
+    }
+
+    // Some extractors put a height-only label in the resolution field.
+    let height_from_label = resolution
+        .into_iter()
+        .chain(format_note)
+        .find_map(|label| {
+            let label = label.trim();
+            let (digits, suffix) = label.split_once('p')?;
+            if digits.is_empty()
+                || (!suffix.is_empty()
+                    && !suffix
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+                        .unwrap_or(false))
+            {
+                return None;
+            }
+            let height = digits.parse::<u32>().ok()?;
+            (height > 0 && height <= 16384).then_some(height)
+        });
+
+    (None, height_from_label)
+}
+
 static ENGINE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn install_lock() -> &'static tokio::sync::Mutex<()> {
@@ -2263,7 +2303,10 @@ impl EngineManager {
     }
 
     pub fn build_ytdlp_request_args(url: &str, settings: &AppSettings) -> Result<Vec<String>, String> {
-        let mut args = Vec::new();
+        // Ignore machine/user yt-dlp config files: external defaults such as --simulate,
+        // --skip-download, download-archive, or a conflicting output template must not
+        // silently override VANTA's managed download pipeline.
+        let mut args = vec!["--ignore-config".to_string()];
 
         let ua = settings
             .user_agent
@@ -2288,8 +2331,18 @@ impl EngineManager {
                 || host == "youtube-nocookie.com"
                 || host.ends_with(".youtube-nocookie.com")
             {
-                args.push("--extractor-args".to_string());
-                args.push("youtube:player_client=default,web_embedded".to_string());
+                // Let yt-dlp select its maintained default YouTube player clients.
+                // Hard-coding an old client list can suppress newer clients and
+                // reduce the formats returned by current YouTube responses.
+                // Enable a locally installed JS runtime so modern player challenges
+                // can be solved and higher-resolution formats are not silently absent.
+                let js_runtime = ["deno", "node", "bun", "quickjs"]
+                    .into_iter()
+                    .find(|runtime| Self::find_executable(runtime).is_some());
+                if let Some(runtime) = js_runtime {
+                    args.push("--js-runtimes".to_string());
+                    args.push(runtime.to_string());
+                }
             }
         }
 
@@ -2385,6 +2438,7 @@ impl EngineManager {
             || authority.contains('\'')
             || authority.contains(';')
             || authority.contains('|')
+            || authority.contains('@')
         {
             return Err("Malformed URL host. Check the URL and try again.".to_string());
         }
@@ -2734,8 +2788,27 @@ impl EngineManager {
                     .get("resolution")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let width = f.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
-                let height = f.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let format_note = f
+                    .get("format_note")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // Normalize dimensions from numeric fields, resolution strings,
+                // or quality labels while rejecting impossible values.
+                let (parsed_width, parsed_height) =
+                    parse_video_dimensions(resolution.as_deref(), format_note.as_deref());
+                let width = f
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .filter(|v| *v > 0 && *v <= 32768)
+                    .or(parsed_width);
+                let height = f
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .filter(|v| *v > 0 && *v <= 16384)
+                    .or(parsed_height);
                 let fps = f.get("fps").and_then(|v| v.as_f64());
                 let vcodec = f
                     .get("vcodec")
@@ -2747,10 +2820,6 @@ impl EngineManager {
                     .map(|s| s.to_string());
                 let filesize = f.get("filesize").and_then(|v| v.as_u64());
                 let filesize_approx = f.get("filesize_approx").and_then(|v| v.as_u64());
-                let format_note = f
-                    .get("format_note")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
                 let tbr = f.get("tbr").and_then(|v| v.as_f64());
                 let abr = f.get("abr").and_then(|v| v.as_f64());
 
@@ -3295,6 +3364,66 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
     }
 
     #[test]
+    fn youtube_requests_use_maintained_default_clients_and_available_js_runtime() {
+        let mut settings = AppSettings::default();
+        settings.cookies_browser = Some("none".to_string());
+        settings.cookies_file = None;
+
+        let args = EngineManager::build_ytdlp_request_args(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &settings,
+        )
+        .expect("valid YouTube request arguments");
+
+        assert!(args.iter().any(|arg| arg == "--ignore-config"));
+        assert!(!args.windows(2).any(|pair| {
+            pair[0] == "--extractor-args"
+                && pair[1].starts_with("youtube:player_client=")
+        }));
+
+        let detected_runtime = ["deno", "node", "bun", "quickjs"]
+            .into_iter()
+            .find(|runtime| EngineManager::find_executable(runtime).is_some());
+        if let Some(runtime) = detected_runtime {
+            assert!(args.windows(2).any(|pair| {
+                pair[0] == "--js-runtimes" && pair[1] == runtime
+            }));
+        }
+    }
+
+    #[test]
+    fn test_parse_video_dimensions_supports_extractor_variants() {
+        assert_eq!(
+            parse_video_dimensions(Some("1920x1080"), None),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("1080p"), None),
+            (None, Some(1080))
+        );
+        assert_eq!(
+            parse_video_dimensions(None, Some("1440p60")),
+            (None, Some(1440))
+        );
+        assert_eq!(
+            parse_video_dimensions(None, Some("1080p HDR")),
+            (None, Some(1080))
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("audio only"), Some("audio only")),
+            (None, None)
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("999999x1080"), None),
+            (None, None)
+        );
+        assert_eq!(
+            parse_video_dimensions(Some("0x1080"), None),
+            (None, None)
+        );
+    }
+
+    #[test]
     fn test_validate_inspection_url_rejects_generic_non_media_files() {
         assert!(EngineManager::validate_inspection_url("").is_err());
         assert!(EngineManager::validate_inspection_url("   ").is_err());
@@ -3303,6 +3432,7 @@ ac1364304fa755c892a968a4c5bc5473d3ea94fb4978d4351a392191804657b5 *ffmpeg-n9.0-la
         assert!(EngineManager::validate_inspection_url("javascript:alert(1)").is_err());
         assert!(EngineManager::validate_inspection_url("https://example.com/v?a=1 b=2").is_err());
         assert!(EngineManager::validate_inspection_url("https://").is_err());
+        assert!(EngineManager::validate_inspection_url("https://user:pass@youtube.com/watch?v=test").is_err());
 
         for generic in [
             "https://cdn.example.com/release.zip",

@@ -1,3 +1,4 @@
+pub mod browser_bridge;
 pub mod commands;
 pub mod cookies;
 pub mod engines;

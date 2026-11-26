@@ -147,7 +147,7 @@ export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact 
       : `${clampedPct.toFixed(1)}%`;
 
   return (
-    <div className="space-y-1.5 w-full min-w-0">
+    <div className="w-full min-w-0 max-w-full space-y-1.5 overflow-hidden">
       {/* Progress Track */}
       <div
         className="w-full h-1.5 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)]/70 rounded-sm overflow-hidden relative"
@@ -179,28 +179,26 @@ export const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ task, compact 
           </div>
         </div>
       ) : (
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] font-mono tabular-nums text-[var(--vanta-muted)]">
-          <div className="flex items-center gap-2 min-w-0 truncate">
-            <span className={`font-medium ${getStatusColorClass(task.status)}`}>{phaseText}</span>
-            <span aria-hidden="true">·</span>
-            <span>{sizeSummaryText}</span>
-            {task.status === 'downloading' && remainingBytes > 0 && task.total_bytes > 0 && (
-              <span className="hidden md:inline text-[var(--vanta-muted)]">
-                ({formatBytes(remainingBytes)} left)
-              </span>
+        <div className="grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 overflow-hidden text-[11px] font-mono tabular-nums text-[var(--vanta-muted)]">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 overflow-hidden">
+            <span className={`min-w-0 max-w-full truncate font-medium ${getStatusColorClass(task.status)}`} title={phaseText}>{phaseText}</span>
+            {task.status !== 'completed' && (
+              <>
+                <span aria-hidden="true" className="shrink-0">·</span>
+                <span className="shrink-0 whitespace-nowrap">{sizeSummaryText}</span>
+                {task.status === 'downloading' && remainingBytes > 0 && task.total_bytes > 0 && (
+                  <span className="text-[var(--vanta-muted)]">({formatBytes(remainingBytes)} left)</span>
+                )}
+              </>
             )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {showSpeed && (
-              <span className="text-[var(--vanta-text-secondary)]">{task.speed_str}</span>
-            )}
+          <div className="flex min-w-0 shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+            {showSpeed && <span className="text-[var(--vanta-text-secondary)]">{task.speed_str}</span>}
             {hasKnownEta && <span>ETA {task.eta_str}</span>}
             {showUnknownEta && <span>ETA: Unknown</span>}
-            {task.status === 'completed' && (task.elapsed_seconds ?? 0) > 0 && (
-              <span>in {formatDuration(task.elapsed_seconds)}</span>
-            )}
-            <span className="font-semibold text-[var(--vanta-text)]">{pctReadout}</span>
+            {task.status === 'completed' && (task.elapsed_seconds ?? 0) > 0 && <span>in {formatDuration(task.elapsed_seconds)}</span>}
+            {task.status !== 'completed' && <span className="font-semibold text-[var(--vanta-text)]">{pctReadout}</span>}
           </div>
         </div>
       )}

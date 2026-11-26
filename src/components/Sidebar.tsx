@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Download, Layers, PlusCircle, History, Terminal, Settings,
   ShieldCheck, AlertTriangle, ChevronLeft, X, Activity, Clock, Pause, CheckCircle2, Music2, Video,
 } from 'lucide-react';
 import { DownloadQueue, DownloadTask, EngineStatusMap } from '../types';
 import { api } from '../services/api';
+import { calculateSidebarTaskStats } from '../utils/queue-logic';
 
 export type ActiveTab = 'downloads' | 'history' | 'diagnostics' | 'settings';
 
@@ -30,18 +31,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
   selectedQueueId, onSelectQueue, onQueuesChanged, scopeFilter, setScopeFilter, isCollapsed,
   setIsCollapsed, isMobileOpen, setIsMobileOpen,
 }) => {
-  const downloadingCount = tasks.filter((task) => [
-    'connecting', 'downloading', 'resuming', 'inspecting', 'processing', 'muxing', 'verifying',
-  ].includes(task.status)).length;
-  const queuedCount = tasks.filter((task) => task.status === 'queued').length;
-  const pausedCount = tasks.filter((task) => task.status === 'paused').length;
-  const completedCount = tasks.filter((task) => task.status === 'completed').length;
-  const unfinishedCount = tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled').length;
-  const failedCount = tasks.filter((task) => task.status === 'failed').length;
+  const taskStats = useMemo(() => calculateSidebarTaskStats(tasks), [tasks]);
+  const {
+    downloading: downloadingCount,
+    queued: queuedCount,
+    paused: pausedCount,
+    completed: completedCount,
+    unfinished: unfinishedCount,
+    failed: failedCount,
+  } = taskStats;
 
   const [queueMenu, setQueueMenu] = useState<{ x: number; y: number; queueId: string } | null>(null);
   const [queueEditor, setQueueEditor] = useState<{ mode: 'create' | 'rename'; queueId?: string } | null>(null);
   const [queueName, setQueueName] = useState('');
+  const [queueLimitsEditor, setQueueLimitsEditor] = useState<string | null>(null);
+  const [queueMaxConcurrent, setQueueMaxConcurrent] = useState('0');
+  const [queueBandwidthLimit, setQueueBandwidthLimit] = useState('0');
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -105,7 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return (
       <div className="flex flex-col h-full min-h-0 select-none">
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-          <div className={`h-[72px] flex items-center ${compact ? 'justify-center px-2' : 'justify-between px-3.5'} border-b border-[var(--vanta-border)] shrink-0`}>
+          <div className={`h-16 flex items-center ${compact ? 'justify-center px-2' : 'justify-between px-3.5'} border-b border-[var(--vanta-border)] shrink-0`}>
             <div className="flex items-center gap-2.5 overflow-hidden">
               <button
                 type="button"
@@ -180,13 +185,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             })}
 
             {(!compact || drawer) && <p className="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--vanta-muted)]">Media</p>}
-            {navButton('music', 'Music', Music2, tasks.filter((task) => task.is_audio_only || task.engine === 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'audio', () => {
+            {navButton('music', 'Music', Music2, taskStats.music, activeTab === 'downloads' && scopeFilter === 'audio', () => {
               setActiveTab('downloads');
               setScopeFilter('audio');
               onSelectQueue('all');
               setIsMobileOpen(false);
             })}
-            {navButton('video', 'Video', Video, tasks.filter((task) => !task.is_audio_only && task.engine !== 'spotdl').length, activeTab === 'downloads' && scopeFilter === 'video', () => {
+            {navButton('video', 'Video', Video, taskStats.video, activeTab === 'downloads' && scopeFilter === 'video', () => {
               setActiveTab('downloads');
               setScopeFilter('video');
               onSelectQueue('all');
@@ -208,7 +213,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
             {queues.map((queue) => {
-              const count = tasks.filter((task) => (task.queue_id || 'main') === queue.id).length;
+              const count = taskStats.queueCounts.get(queue.id) || 0;
               return (
                 <button
                   key={queue.id}
@@ -275,6 +280,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
+      {queueLimitsEditor && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4" onClick={() => setQueueLimitsEditor(null)}>
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const queueId = queueLimitsEditor;
+              if (!queueId) return;
+              const maxConcurrent = Number.parseInt(queueMaxConcurrent, 10);
+              const bandwidth = Number.parseInt(queueBandwidthLimit, 10);
+              if (!Number.isInteger(maxConcurrent) || maxConcurrent < 0 || maxConcurrent > 32
+                || !Number.isInteger(bandwidth) || bandwidth < 0 || bandwidth > 10000000) return;
+              try {
+                onQueuesChanged(await api.updateQueueLimits(queueId, maxConcurrent, bandwidth));
+                setQueueLimitsEditor(null);
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : 'Could not update queue settings.');
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] p-5 shadow-2xl"
+          >
+            <h2 className="text-base font-semibold text-[var(--vanta-text)]">Queue Limits</h2>
+            <p className="mt-1 text-xs text-[var(--vanta-muted)]">Set independent limits for this queue. Use 0 to inherit global settings.</p>
+            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Maximum simultaneous downloads</label>
+            <input
+              type="number" min="0" max="32" step="1" required inputMode="numeric"
+              value={queueMaxConcurrent} onChange={(event) => setQueueMaxConcurrent(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
+            />
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = use the application's global concurrency limit; maximum 32.</p>
+            <label className="block mt-4 text-xs font-medium text-[var(--vanta-text-secondary)]">Queue bandwidth limit for yt-dlp (KB/s)</label>
+            <input
+              type="number" min="0" max="10000000" step="1" required inputMode="numeric"
+              value={queueBandwidthLimit} onChange={(event) => setQueueBandwidthLimit(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3 text-sm text-[var(--vanta-text)] outline-none focus:border-[var(--vanta-accent)]"
+            />
+            <p className="mt-1 text-[11px] text-[var(--vanta-muted)]">0 = no queue-specific cap. Allocated per download using this queue's concurrency limit; yt-dlp only (spotDL has no compatible rate-limit option).</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setQueueLimitsEditor(null)} className="px-3 py-2 rounded-lg border border-[var(--vanta-border)] text-xs text-[var(--vanta-text-secondary)] hover:bg-[var(--vanta-surface-hover)]">Cancel</button>
+              <button type="submit" className="px-4 py-2 rounded-lg bg-[var(--vanta-accent)] text-white text-xs font-semibold">Save Limits</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {queueEditor && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4" onClick={() => setQueueEditor(null)}>
           <form
@@ -317,7 +367,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-[68px]' : 'w-[248px]'}`}>
+      <aside className={`relative hidden md:flex flex-col border-r border-[var(--vanta-border)] bg-[var(--vanta-surface)] transition-all duration-200 shrink-0 h-full overflow-hidden ${isCollapsed ? 'w-[64px]' : 'w-[236px]'}`}>
         {renderNavContent(false)}
       </aside>
 
@@ -351,6 +401,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     }
                   }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] text-[var(--vanta-text)]">
                     {queue.is_paused ? 'Start Queue' : 'Stop Queue'}
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => {
+                    setQueueMaxConcurrent(String(queue.max_concurrent_downloads || 0));
+                    setQueueBandwidthLimit(String(queue.bandwidth_limit_kbps || 0));
+                    setQueueLimitsEditor(queue.id);
+                    setQueueMenu(null);
+                  }} className="w-full px-3 py-2 text-left hover:bg-[var(--vanta-surface-hover)] text-[var(--vanta-text)]">
+                    Queue Limits…
                   </button>
                   {!queue.is_default && (
                     <>

@@ -14,6 +14,96 @@ const priorityWeight: Record<TaskPriority, number> = {
 export type SortField = 'queue' | 'created_at' | 'title' | 'size' | 'progress' | 'speed';
 export type SortDirection = 'asc' | 'desc';
 
+export interface SidebarTaskStats {
+  downloading: number;
+  queued: number;
+  paused: number;
+  completed: number;
+  unfinished: number;
+  failed: number;
+  music: number;
+  video: number;
+  queueCounts: Map<string, number>;
+}
+
+/** Computes all sidebar badges and queue counts in one linear pass. */
+export function calculateSidebarTaskStats(tasks: DownloadTask[]): SidebarTaskStats {
+  const stats: SidebarTaskStats = {
+    downloading: 0,
+    queued: 0,
+    paused: 0,
+    completed: 0,
+    unfinished: 0,
+    failed: 0,
+    music: 0,
+    video: 0,
+    queueCounts: new Map(),
+  };
+
+  for (const task of tasks) {
+    const queueId = task.queue_id || 'main';
+    stats.queueCounts.set(queueId, (stats.queueCounts.get(queueId) || 0) + 1);
+
+    switch (task.status) {
+      case 'connecting':
+      case 'downloading':
+      case 'resuming':
+      case 'inspecting':
+      case 'processing':
+      case 'muxing':
+      case 'verifying':
+        stats.downloading += 1;
+        break;
+      case 'queued':
+        stats.queued += 1;
+        break;
+      case 'paused':
+        stats.paused += 1;
+        break;
+      case 'completed':
+        stats.completed += 1;
+        break;
+      case 'failed':
+        stats.failed += 1;
+        break;
+      default:
+        break;
+    }
+    if (task.status !== 'completed' && task.status !== 'cancelled') stats.unfinished += 1;
+    if (task.is_audio_only || task.engine === 'spotdl') stats.music += 1;
+    else stats.video += 1;
+  }
+
+  return stats;
+}
+
+export interface QueueStatusCounts {
+  paused: number;
+  completed: number;
+  failed: number;
+}
+
+/** Aggregates the compact status counters used by the Download Center in one pass. */
+export function calculateQueueStatusCounts(tasks: DownloadTask[]): QueueStatusCounts {
+  const counts: QueueStatusCounts = { paused: 0, completed: 0, failed: 0 };
+  for (const task of tasks) {
+    switch (task.status) {
+      case 'paused':
+        counts.paused += 1;
+        break;
+      case 'completed':
+        counts.completed += 1;
+        break;
+      case 'failed':
+        counts.failed += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
+}
+
 export interface HistoryStats {
   totalCompleted: number;
   totalFailed: number;
@@ -41,17 +131,27 @@ export function sortQueue(tasks: DownloadTask[]): DownloadTask[] {
 }
 
 export function getActiveDownloadCount(tasks: DownloadTask[]): number {
-  return tasks.filter((t) => isActiveTaskStatus(t.status)).length;
+  let count = 0;
+  for (const task of tasks) {
+    if (isActiveTaskStatus(task.status)) count += 1;
+  }
+  return count;
 }
 
 export function calculateAggregateSpeed(tasks: DownloadTask[]): {
   speedBytesPerSec: number;
   formattedSpeed: string;
 } {
-  const active = tasks.filter(
-    (t) => t.status === 'downloading' || t.status === 'connecting' || t.status === 'resuming'
-  );
-  const total = active.reduce((acc, t) => acc + (t.speed_bytes_per_sec || 0), 0);
+  let total = 0;
+  for (const task of tasks) {
+    if (
+      task.status === 'downloading' ||
+      task.status === 'connecting' ||
+      task.status === 'resuming'
+    ) {
+      total += task.speed_bytes_per_sec || 0;
+    }
+  }
   return {
     speedBytesPerSec: total,
     formattedSpeed: `${formatBytes(total)}/s`,
@@ -90,7 +190,7 @@ export function moveTaskOrder(
 export function filterAndSortTasks(
   tasks: DownloadTask[],
   opts: {
-    statusFilter?: 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed' | 'audio' | 'video';
+    statusFilter?: 'all' | 'active' | 'queued' | 'paused' | 'completed' | 'failed' | 'audio' | 'video' | 'finished' | 'unfinished';
     searchQuery?: string;
     sortField?: SortField;
     sortDirection?: SortDirection;
@@ -99,7 +199,11 @@ export function filterAndSortTasks(
   const query = (opts.searchQuery || '').trim().toLowerCase();
   const filtered = tasks.filter((t) => {
     if (opts.statusFilter && opts.statusFilter !== 'all') {
-      if (opts.statusFilter === 'active') {
+      if (opts.statusFilter === 'finished') {
+        if (t.status !== 'completed') return false;
+      } else if (opts.statusFilter === 'unfinished') {
+        if (t.status === 'completed' || t.status === 'cancelled') return false;
+      } else if (opts.statusFilter === 'active') {
         if (!isActiveTaskStatus(t.status)) return false;
       } else if (opts.statusFilter === 'audio') {
         if (!t.is_audio_only && t.engine !== 'spotdl') return false;
@@ -111,17 +215,16 @@ export function filterAndSortTasks(
     }
 
     if (query) {
-      const haystack = [
-        t.title,
-        t.url,
-        t.uploader || '',
-        t.album || '',
-        t.ext,
-        t.engine,
-      ]
-        .join(' ')
-        .toLowerCase();
-      if (!haystack.includes(query)) return false;
+      const matches = (value: string | null | undefined) =>
+        Boolean(value && value.toLowerCase().includes(query));
+      if (
+        !matches(t.title) &&
+        !matches(t.url) &&
+        !matches(t.uploader) &&
+        !matches(t.album) &&
+        !matches(t.ext) &&
+        !matches(t.engine)
+      ) return false;
     }
 
     return true;

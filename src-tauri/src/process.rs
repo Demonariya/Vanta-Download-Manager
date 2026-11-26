@@ -341,8 +341,34 @@ enum StreamMsg {
 
 /// Streams BOTH stdout and stderr lines concurrently (splitting on `\r`, `\n`, `\r\n` across chunks)
 /// and fires a periodic tick callback so callers can abort or sample disk byte growth cleanly.
+/// Owns a streamed child process and guarantees it is terminated if the
+/// streaming routine exits early or unwinds before reaping the child.
+struct KillOnDropChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl KillOnDropChild {
+    fn new(child: Child) -> Self {
+        Self { child, reaped: false }
+    }
+}
+
+impl Drop for KillOnDropChild {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+
+        let pid = self.child.id();
+        kill_process_tree(pid);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 pub fn stream_child_lines_with_tick<F, T>(
-    mut child: Child,
+    child: Child,
     tick_interval: Duration,
     mut on_line: F,
     mut on_tick: T,
@@ -351,9 +377,10 @@ where
     F: FnMut(&str) -> bool,
     T: FnMut() -> bool,
 {
-    let pid = child.id();
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let mut child = KillOnDropChild::new(child);
+    let pid = child.child.id();
+    let stdout_pipe = child.child.stdout.take();
+    let stderr_pipe = child.child.stderr.take();
 
     let (tx, rx) = mpsc::channel::<StreamMsg>();
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -453,12 +480,18 @@ where
 
     if aborted {
         kill_process_tree(pid);
-        let _ = child.kill();
+        let _ = child.child.kill();
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed waiting for child process: {}", e))?;
+    let status = match child.child.wait() {
+        Ok(status) => {
+            child.reaped = true;
+            status
+        }
+        Err(error) => {
+            return Err(format!("Failed waiting for child process: {}", error));
+        }
+    };
 
     let stderr_bytes = stderr_tail
         .lock()
@@ -667,6 +700,26 @@ mod tests {
             vec!["20.0%|2MiB|10MiB".to_string()]
         );
         assert_eq!(splitter.flush().as_deref(), Some("final"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_child_is_terminated_when_guard_is_dropped() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("spawn test child");
+        let pid = child.id();
+        drop(KillOnDropChild::new(child));
+
+        let mut probe = Command::new("kill");
+        probe.args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = probe.status().expect("probe process state");
+        assert!(!status.success(), "child process should be gone after guard drop");
     }
 
     #[cfg(unix)]

@@ -121,6 +121,10 @@ export interface DownloadQueue {
   is_default: boolean;
   is_paused: boolean;
   queue_order: number;
+  /** Zero inherits the application's global concurrent-download limit. */
+  max_concurrent_downloads: number;
+  /** Zero inherits the application's global bandwidth policy. */
+  bandwidth_limit_kbps: number;
 }
 
 export interface DownloadTask {
@@ -388,4 +392,5 @@ export interface NotificationItem {
   message: string;
   timestamp: string;
   taskId?: string;
+  isRead?: boolean;
 }

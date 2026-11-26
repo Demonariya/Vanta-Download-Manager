@@ -6,6 +6,7 @@ import {
   buildCuratedVideoOptions,
   detectInspectedMediaKind,
   formatMediaRoutingLabel,
+  getDefaultVideoFormatSelector,
   resolveVideoFormatSelector,
   summarizeVideoOptionCodecs,
 } from './media-formats';
@@ -50,7 +51,7 @@ describe('Unified media kind auto-detection', () => {
     });
     assert.equal(detectInspectedMediaKind(audioMeta, audioMeta.url), 'audio');
     assert.equal(detectInspectedMediaKind(null, 'https://cdn.example.com/tracks/demo.flac?token=1'), 'audio');
-    assert.equal(formatMediaRoutingLabel(audioMeta, 'audio', audioMeta.url), 'Audio · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(audioMeta, 'audio', audioMeta.url), 'Direct Audio · Audio · yt-dlp');
   });
 
   it('detects video streams as video and summarizes video/audio codecs cleanly', () => {
@@ -80,14 +81,26 @@ describe('Unified media kind auto-detection', () => {
     });
 
     assert.equal(detectInspectedMediaKind(videoMeta, videoMeta.url), 'video');
-    assert.equal(formatMediaRoutingLabel(videoMeta, 'video', videoMeta.url), 'Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(videoMeta, 'video', videoMeta.url), 'YouTube · Video · yt-dlp');
 
     const options = buildCuratedVideoOptions(videoMeta.formats);
     assert.equal(
       options[1].formatSelector,
-      'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+      '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     );
     assert.equal(resolveVideoFormatSelector('137', videoMeta.formats), '137+bestaudio/best');
+    assert.equal(
+      resolveVideoFormatSelector('silent-unknown-codec', [
+        { format_id: 'silent-unknown-codec', ext: 'webm', vcodec: 'vp9' },
+      ]),
+      'silent-unknown-codec+bestaudio/best'
+    );
+    assert.equal(
+      resolveVideoFormatSelector('audio-140', [
+        { format_id: 'audio-140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+      ]),
+      'audio-140'
+    );
 
     const codecSummary = summarizeVideoOptionCodecs(videoMeta.formats, '137+bestaudio/best');
     assert.ok(codecSummary);
@@ -95,6 +108,75 @@ describe('Unified media kind auto-detection', () => {
     assert.equal(codecSummary.vcodec, 'AVC1');
     assert.equal(codecSummary.acodec, 'MP4A');
     assert.equal(codecSummary.fps, 60);
+  });
+});
+
+describe('Default video quality selection', () => {
+  it('defaults to the highest concrete resolution returned by the extractor', () => {
+    assert.equal(getDefaultVideoFormatSelector([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '22', ext: 'mp4', height: 720, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]), '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+  });
+
+  it('keeps the adaptive preset when no concrete video stream is available', () => {
+    assert.equal(getDefaultVideoFormatSelector([
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+    ]), 'bestvideo+bestaudio/best');
+  });
+});
+
+describe('Truthful video format selection', () => {
+  it('does not advertise fixed resolutions when extractor reports no video stream', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a', is_audio_only: true },
+    ]);
+    assert.equal(options.length, 1);
+    assert.equal(options[0].id, 'best');
+  });
+
+
+  it('falls back to the best video-only stream instead of a low-resolution muxed format', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]);
+    assert.equal(
+      options.find((option) => option.height === 1080)?.formatSelector,
+      '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+    );
+  });
+
+  it('uses the same high-resolution fallback for a muxed inspected stream', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '22', ext: 'mp4', height: 720, vcodec: 'avc1', acodec: 'mp4a' },
+    ]);
+    assert.equal(
+      options.find((option) => option.height === 720)?.formatSelector,
+      '22/bestvideo[height<=720]+bestaudio/best[height<=720]'
+    );
+  });
+
+  it('only advertises heights present in real video formats', () => {
+    const options = buildCuratedVideoOptions([
+      { format_id: '18', ext: 'mp4', height: 360, vcodec: 'avc1', acodec: 'mp4a' },
+      { format_id: '137', ext: 'mp4', height: 1080, vcodec: 'avc1', acodec: 'none', is_video_only: true },
+    ]);
+    assert.deepEqual(options.slice(1).map((option) => option.height), [1080, 360]);
+    assert.equal(options.some((option) => option.height === 2160), false);
+    assert.equal(options[1].formatSelector, '137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+  });
+});
+
+describe('Media provider recognition', () => {
+  it('recognizes common supported media hosts without matching deceptive suffixes', () => {
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://www.youtube.com/watch?v=abc'), 'YouTube · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://youtu.be/abc'), 'YouTube · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'audio', 'https://soundcloud.com/artist/track'), 'SoundCloud · Audio · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://notyoutube.com/watch?v=abc'), 'Media Link · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'ftp://youtube.com/video.mp4'), 'Media Link · Video · yt-dlp');
+    assert.equal(formatMediaRoutingLabel(null, 'video', 'https://user:pass@youtube.com/watch?v=abc'), 'Media Link · Video · yt-dlp');
   });
 });
 

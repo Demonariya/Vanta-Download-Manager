@@ -54,7 +54,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
       aria-modal="true"
       aria-labelledby="vanta-confirm-title"
     >
-      <div className="w-full max-w-md rounded-xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-2xl p-5 space-y-4">
+      <div className="w-full max-w-md rounded-2xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-2xl p-6 space-y-5">
         <div className="flex items-start gap-3">
           <div
             className={`p-2 rounded-lg shrink-0 ${

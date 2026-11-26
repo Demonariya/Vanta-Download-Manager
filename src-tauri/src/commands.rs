@@ -16,11 +16,91 @@ use id3::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
+
+static SCHEDULER_MANAGED_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static MANUAL_PENDING_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn manual_pending_tasks() -> &'static Mutex<HashSet<String>> {
+    MANUAL_PENDING_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn scheduler_managed_tasks() -> &'static Mutex<HashSet<String>> {
+    SCHEDULER_MANAGED_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_scheduler_managed_task(task_id: &str) {
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_id.to_string());
+}
+
+fn clear_scheduler_managed_task(task_id: &str) {
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(task_id);
+}
+
+fn is_scheduler_managed_task(task_id: &str) -> bool {
+    scheduler_managed_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(task_id)
+}
+
+fn clear_manual_pending_task(task_id: &str) {
+    manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(task_id);
+}
+
+fn should_schedule_outside_window(
+    scheduler_open: bool,
+    task_id: &str,
+    manual_ids: &HashSet<String>,
+) -> bool {
+    scheduler_open || manual_ids.contains(task_id)
+}
+
+fn should_bypass_paused_queue(
+    queue_paused: bool,
+    task_id: &str,
+    manual_ids: &HashSet<String>,
+) -> bool {
+    !queue_paused || manual_ids.contains(task_id)
+}
+
+struct AtomicFlagGuard(Arc<AtomicBool>);
+
+impl Drop for AtomicFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod engine_scan_guard_tests {
+    use super::*;
+
+    #[test]
+    fn engine_scan_guard_releases_lock_on_drop() {
+        let scanning = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = AtomicFlagGuard(Arc::clone(&scanning));
+        }
+        assert!(!scanning.load(Ordering::SeqCst));
+    }
+}
 
 struct InspectionDropGuard<'a> {
     state: &'a AppState,
@@ -31,6 +111,110 @@ impl<'a> Drop for InspectionDropGuard<'a> {
     fn drop(&mut self) {
         self.state.remove_inspection(&self.request_id);
     }
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not open output for SHA-256 verification: {}", error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not read output for SHA-256 verification: {}", error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_media_output(
+    path: &Path,
+    expect_audio: bool,
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>, String), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect downloaded output: {}", error))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("The downloaded output is empty or is not a regular file.".to_string());
+    }
+
+    let (audio_summary, audio_codec, video_codec, resolution) =
+        EngineManager::verify_media_file(path).ok_or_else(|| {
+            "ffprobe could not parse the completed media file. The output may be truncated or corrupt.".to_string()
+        })?;
+
+    let has_expected_stream = if expect_audio {
+        audio_codec.is_some()
+    } else {
+        video_codec.is_some()
+    };
+    if !has_expected_stream {
+        return Err(if expect_audio {
+            "The completed file does not contain a readable audio stream.".to_string()
+        } else {
+            "The completed file does not contain a readable video stream.".to_string()
+        });
+    }
+
+    let checksum = sha256_file(path)?;
+    Ok((audio_summary, audio_codec, video_codec, resolution, checksum))
+}
+
+pub fn recover_interrupted_tasks(app: &AppHandle, state: &AppState) -> usize {
+    let settings = state.get_settings();
+    let auto_resume = settings.auto_resume_on_startup;
+    let mut recovered = 0usize;
+
+    for mut task in state.get_tasks() {
+        if !task.status.is_active() {
+            continue;
+        }
+
+        task.status = if auto_resume {
+            TaskStatus::Queued
+        } else {
+            TaskStatus::Paused
+        };
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.eta_seconds = None;
+        task.eta_str = "--".to_string();
+        task.active_connections = 0;
+        task.current_phase = if auto_resume {
+            "Recovered after unexpected shutdown; queued to resume".to_string()
+        } else {
+            "Recovered after unexpected shutdown; paused by startup setting".to_string()
+        };
+        task.logs.push(TaskLogEntry {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: "warning".to_string(),
+            message: if auto_resume {
+                "Recovered an interrupted download. The engine will resume from its staging data when scheduled.".to_string()
+            } else {
+                "Recovered an interrupted download and left it paused because automatic resume is disabled.".to_string()
+            },
+        });
+        if task.logs.len() > 100 {
+            let excess = task.logs.len() - 100;
+            task.logs.drain(..excess);
+        }
+        state.upsert_task(&task);
+        let _ = app.emit("task_updated", &task);
+        recovered += 1;
+    }
+
+    if recovered > 0 {
+        logging::warn(
+            "startup",
+            &format!(
+                "Recovered {} interrupted download(s); auto_resume_on_startup={}.",
+                recovered, auto_resume
+            ),
+        );
+    }
+    recovered
 }
 
 fn parse_lrc_timestamp(value: &str) -> Option<u32> {
@@ -82,6 +266,23 @@ fn parse_lrc_entries(content: &str) -> Vec<(u32, String)> {
     }
     entries.sort_by_key(|(timestamp, _)| *timestamp);
     entries
+}
+
+fn append_conflict_strategy_args(args: &mut Vec<String>, strategy: &str) {
+    if strategy == "overwrite" {
+        args.push("--force-overwrites".to_string());
+        // yt-dlp's --force-overwrites also disables resume; restore --continue
+        // afterward so an existing final file is replaced without discarding
+        // a resumable .part download after interruption.
+        args.push("--continue".to_string());
+    } else {
+        args.push("--no-overwrites".to_string());
+    }
+}
+
+fn format_selector_requires_ffmpeg(format_id: Option<&str>) -> bool {
+    let selector = format_id.unwrap_or("best").trim();
+    selector.is_empty() || selector == "best" || selector.contains('+')
 }
 
 fn validate_lrc_content(content: &str) -> Result<(), String> {
@@ -197,6 +398,89 @@ pub fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String
 }
 
 #[tauri::command]
+pub fn import_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    imported_tasks: Vec<DownloadTask>,
+) -> Result<Vec<DownloadTask>, String> {
+    if imported_tasks.is_empty() {
+        return Err("The selected history file contains no records.".to_string());
+    }
+    if imported_tasks.len() > 5_000 {
+        return Err("A maximum of 5,000 history records can be imported at once.".to_string());
+    }
+
+    let mut imported_count = 0usize;
+    for mut task in imported_tasks {
+        if !matches!(
+            &task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            return Err("History import only accepts completed, failed, or cancelled records.".to_string());
+        }
+        if task.title.trim().is_empty() || task.url.trim().is_empty() {
+            return Err("Every imported history record must include a title and source URL.".to_string());
+        }
+        if task.title.len() > 2_000 || task.url.len() > 8_192 {
+            return Err("An imported history record contains an oversized title or URL.".to_string());
+        }
+
+        // Imported records are metadata only. Never trust an output path from an
+        // external JSON file, or a later "delete downloaded file" action could
+        // target an arbitrary local path.
+        task.id = format!("history_import_{}", uuid::Uuid::new_v4());
+        task.output_path.clear();
+        task.queue_id = "main".to_string();
+        task.queue_order = 0;
+        task.priority = TaskPriority::Normal;
+        task.current_phase = "Imported history".to_string();
+        task.speed_str = "0 B/s".to_string();
+        task.speed_bytes_per_sec = 0.0;
+        task.active_connections = 0;
+        task.remaining_bytes = 0;
+        task.eta_seconds = if task.status == TaskStatus::Completed { Some(0) } else { None };
+        task.eta_str = if task.status == TaskStatus::Completed {
+            "Finished".to_string()
+        } else {
+            "--".to_string()
+        };
+        if task.status == TaskStatus::Completed {
+            task.progress_percentage = 100.0;
+            task.percentage_known = true;
+            if task.downloaded_bytes == 0 {
+                task.downloaded_bytes = task.total_bytes;
+            }
+            if task.total_bytes == 0 {
+                task.total_bytes = task.downloaded_bytes;
+            }
+        } else {
+            task.progress_percentage = task.progress_percentage.clamp(0.0, 100.0);
+        }
+        if task.created_at.trim().is_empty() {
+            task.created_at = chrono::Utc::now().to_rfc3339();
+        }
+        if task.thumbnail.as_deref().is_some_and(|url| !crate::is_valid_thumbnail_url(url)) {
+            task.thumbnail = None;
+        }
+        let excess_logs = task.logs.len().saturating_sub(100);
+        if excess_logs > 0 {
+            task.logs.drain(..excess_logs);
+        }
+        for entry in &mut task.logs {
+            entry.message = logging::redact_secrets(&entry.message);
+        }
+
+        state.upsert_task(&task);
+        imported_count += 1;
+    }
+
+    logging::info("history", &format!("Imported {} history record(s).", imported_count));
+    let tasks = state.get_tasks();
+    let _ = app.emit("tasks_cleared", &tasks);
+    Ok(tasks)
+}
+
+#[tauri::command]
 pub async fn create_task(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -217,7 +501,7 @@ pub async fn create_task(
         || is_spotify
         || settings.embed_thumbnail
         || settings.embed_metadata
-        || payload.format_id.as_deref().unwrap_or("best") == "best";
+        || format_selector_requires_ffmpeg(payload.format_id.as_deref());
 
     tokio::task::spawn_blocking(move || {
         EngineManager::ensure_required_engines(requires_ffmpeg, is_spotify)
@@ -476,13 +760,38 @@ pub async fn create_task(
     }
 
     logging::info("queue", &format!("Created task '{}' ({})", task.id, task.engine));
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &HashSet::from([task.id.clone()]));
+
+    // Record the exact scheduler gate when a newly-created task remains queued.
+    // This makes "download did not start" diagnosable from the global log.
+    if let Some(persisted) = state.get_task_by_id(&task.id) {
+        if persisted.status == TaskStatus::Queued {
+            let reason = queued_task_block_reason(&state, &persisted);
+            if let Some(mut queued_task) = state.get_task_by_id(&task.id) {
+                queued_task.current_phase = format!("Waiting: {}", reason);
+                queued_task.logs.push(TaskLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    level: "warning".to_string(),
+                    message: format!("Scheduler did not start this task: {}", reason),
+                });
+                if queued_task.logs.len() > 100 {
+                    let excess = queued_task.logs.len() - 100;
+                    queued_task.logs.drain(..excess);
+                }
+                state.upsert_task(&queued_task);
+                let _ = app.emit("task_updated", &queued_task);
+            }
+            logging::warn("queue", &format!("Task '{}' remains queued: {}", persisted.id, reason));
+        }
+    }
 
     Ok(task)
 }
 
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     // Persist the paused state before terminating the child. The worker checks this
     // state before finalization, preventing a pause/exit race from marking the task complete.
     if let Some(mut task) = state.get_task_by_id(&id) {
@@ -522,13 +831,15 @@ pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
         task.current_phase = "Queued to resume".to_string();
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
-        schedule_next(&app, &state);
+        schedule_next_with_manual_tasks(&app, &state, &HashSet::from([id.clone()]));
     }
     Ok(())
 }
 
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -570,7 +881,7 @@ pub fn retry_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
         t.eta_str = "--".to_string();
         state.upsert_task(&t);
         let _ = app.emit("task_updated", &t);
-        schedule_next(&app, &state);
+        schedule_next_with_manual_tasks(&app, &state, &HashSet::from([id.clone()]));
     }
     Ok(())
 }
@@ -582,6 +893,8 @@ pub fn delete_task(
     id: String,
     delete_file: Option<bool>,
 ) -> Result<(), String> {
+    clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -618,6 +931,8 @@ pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
     let tasks = state.get_tasks();
     for mut task in tasks {
         if task.status.is_active() || task.status == TaskStatus::Queued {
+            clear_scheduler_managed_task(&task.id);
+            clear_manual_pending_task(&task.id);
             task.status = TaskStatus::Paused;
             task.current_phase = "Paused".to_string();
             task.speed_str = "0 B/s".to_string();
@@ -643,15 +958,17 @@ pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
 #[tauri::command]
 pub fn resume_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let tasks = state.get_tasks();
+    let mut manual_task_ids = HashSet::new();
     for mut t in tasks {
         if t.status == TaskStatus::Paused {
             t.status = TaskStatus::Queued;
             t.current_phase = "Queued".to_string();
+            manual_task_ids.insert(t.id.clone());
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
         }
     }
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &manual_task_ids);
     Ok(())
 }
 
@@ -689,6 +1006,68 @@ pub fn clear_all(
 }
 
 
+/// Read plain text from the Windows system clipboard for the opt-in monitor.
+#[tauri::command]
+pub fn read_clipboard_text() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        use std::ptr;
+
+        #[link(name = "user32")]
+        extern "system" {
+            #[link_name = "OpenClipboard"]
+            fn open_clipboard(owner: *mut c_void) -> i32;
+            #[link_name = "GetClipboardData"]
+            fn get_clipboard_data(format: u32) -> *mut c_void;
+            #[link_name = "CloseClipboard"]
+            fn close_clipboard() -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            #[link_name = "GlobalLock"]
+            fn global_lock(memory: *mut c_void) -> *mut c_void;
+            #[link_name = "GlobalUnlock"]
+            fn global_unlock(memory: *mut c_void) -> i32;
+        }
+
+        unsafe {
+            if open_clipboard(ptr::null_mut()) == 0 {
+                return Err("The system clipboard is temporarily busy.".to_string());
+            }
+
+            let result = (|| {
+                // CF_UNICODETEXT
+                let handle = get_clipboard_data(13);
+                if handle.is_null() {
+                    return Ok(String::new());
+                }
+                let wide_ptr = global_lock(handle) as *const u16;
+                if wide_ptr.is_null() {
+                    return Err("Could not access clipboard text.".to_string());
+                }
+
+                // Bound the scan so malformed clipboard data cannot cause an
+                // unbounded read. Windows text clipboard data is NUL-terminated.
+                let mut length = 0usize;
+                while length < 1_048_576 && *wide_ptr.add(length) != 0 {
+                    length += 1;
+                }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide_ptr, length));
+                let _ = global_unlock(handle);
+                Ok(text)
+            })();
+
+            let _ = close_clipboard();
+            result
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Native clipboard monitoring is currently supported on Windows only.".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn get_queues(state: State<'_, AppState>) -> Result<Vec<DownloadQueue>, String> {
     Ok(state.get_queues())
@@ -714,6 +1093,20 @@ pub fn delete_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> R
     let _ = app.emit("queues_updated", &queues);
     let tasks = state.get_tasks();
     let _ = app.emit("tasks_cleared", &tasks);
+    Ok(queues)
+}
+
+#[tauri::command]
+pub fn update_queue_limits(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    max_concurrent_downloads: u32,
+    bandwidth_limit_kbps: u64,
+) -> Result<Vec<DownloadQueue>, String> {
+    let queues = state.update_queue_limits(&id, max_concurrent_downloads, bandwidth_limit_kbps)?;
+    let _ = app.emit("queues_updated", &queues);
+    schedule_next(&app, &state);
     Ok(queues)
 }
 
@@ -756,6 +1149,7 @@ fn should_resume_queue_paused_task(
 #[tauri::command]
 pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<DownloadQueue>, String> {
     state.set_queue_paused(&id, false)?;
+    let mut manual_task_ids = HashSet::new();
     for mut task in state.get_tasks().into_iter().filter(|task| {
         should_resume_queue_paused_task(
             &task.queue_id,
@@ -766,10 +1160,11 @@ pub fn start_queue(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
     }) {
         task.status = TaskStatus::Queued;
         task.current_phase = "Queued in active queue".to_string();
+        manual_task_ids.insert(task.id.clone());
         state.upsert_task(&task);
         let _ = app.emit("task_updated", &task);
     }
-    schedule_next(&app, &state);
+    schedule_next_with_manual_tasks(&app, &state, &manual_task_ids);
     let queues = state.get_queues();
     let _ = app.emit("queues_updated", &queues);
     Ok(queues)
@@ -920,6 +1315,12 @@ pub fn save_settings(
     sync_windows_startup_registration(&normalized)?;
     let saved = state.save_settings(&normalized)?;
     let _ = app.emit("settings_updated", &saved);
+
+    // Applying scheduler changes must immediately release or hold queued tasks.
+    // In particular, disabling the schedule should start waiting downloads now,
+    // without requiring the user to resume each task or restart the application.
+    schedule_next(&app, &state);
+
     Ok(saved)
 }
 
@@ -951,6 +1352,11 @@ pub fn clear_notifications(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn mark_all_notifications_read(state: State<'_, AppState>) -> Result<(), String> {
+    state.mark_all_notifications_read()
+}
+
 const ENGINE_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
 #[tauri::command]
@@ -972,37 +1378,54 @@ pub async fn get_engine_status(
         }
     }
 
-    if state.is_scanning_engines.swap(true, Ordering::SeqCst) {
-        for _ in 0..60 {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            if !state.is_scanning_engines.load(Ordering::SeqCst) {
-                let cached = state
-                    .cached_engine_status
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Some((_ts, status)) = cached {
+    // Acquire ownership without ever starting a second scan after an arbitrary timeout.
+    // A forced refresh waits for the in-flight scan to finish, then performs its own scan.
+    let mut acquired = false;
+    for _ in 0..120 {
+        if state
+            .is_scanning_engines
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            acquired = true;
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if !force {
+            let cached = state
+                .cached_engine_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some((captured_at, status)) = cached {
+                if captured_at.elapsed() < ENGINE_STATUS_CACHE_TTL {
                     return Ok(status);
                 }
-                break;
             }
         }
-        state.is_scanning_engines.store(true, Ordering::SeqCst);
     }
 
-    let scan_res = tokio::task::spawn_blocking(EngineManager::get_engine_status)
-        .await
-        .map_err(|e| format!("Engine scan task failed: {}", e));
+    if !acquired {
+        return Err("Engine status scan is still running. Try again shortly.".to_string());
+    }
 
-    state.is_scanning_engines.store(false, Ordering::SeqCst);
+    // The guard lives inside the blocking worker, so cancelling this async command
+    // cannot release the single-flight lock while the scan is still running.
+    let scan_guard = AtomicFlagGuard(Arc::clone(&state.is_scanning_engines));
+    let status = tokio::task::spawn_blocking(move || {
+        let _guard = scan_guard;
+        EngineManager::get_engine_status()
+    })
+    .await
+    .map_err(|e| format!("Engine scan task failed: {}", e))?;
 
-    let status = scan_res?;
     {
-        let mut cache = state
+        let mut cached = state
             .cached_engine_status
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *cache = Some((Instant::now(), status.clone()));
+        *cached = Some((Instant::now(), status.clone()));
     }
     Ok(status)
 }
@@ -1020,12 +1443,13 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<Vec<Diagnosti
         return Err("Diagnostics check is already running.".to_string());
     }
 
-    let res = tokio::task::spawn_blocking(EngineManager::run_diagnostics)
-        .await
-        .map_err(|e| format!("Diagnostics task failed: {}", e));
-
-    state.is_running_diagnostics.store(false, Ordering::SeqCst);
-    res
+    let diagnostics_guard = AtomicFlagGuard(Arc::clone(&state.is_running_diagnostics));
+    Ok(tokio::task::spawn_blocking(move || {
+        let _guard = diagnostics_guard;
+        EngineManager::run_diagnostics()
+    })
+    .await
+    .map_err(|e| format!("Diagnostics task failed: {}", e))?)
 }
 
 fn invalidate_engine_status_cache(state: &AppState) {
@@ -1546,7 +1970,7 @@ pub fn scheduler_tick(app: &AppHandle) {
 
     if settings.scheduler.pause_on_stop {
         let active_ids: Vec<String> = state.get_tasks().into_iter()
-            .filter(|task| task.status.is_active())
+            .filter(|task| task.status.is_active() && is_scheduler_managed_task(&task.id))
             .map(|task| task.id)
             .collect();
         for id in active_ids {
@@ -1560,22 +1984,148 @@ pub fn scheduler_tick(app: &AppHandle) {
             }
         }
     }
+    schedule_next(app, &state);
+}
+
+fn effective_task_bandwidth_limit_bytes_per_second(
+    settings: &AppSettings,
+    queue_bandwidth_limit_kbps: u64,
+    queue_concurrency_limit: u32,
+) -> Option<u64> {
+    let global_limit = (settings.global_bandwidth_limit_kbps > 0).then(|| {
+        settings.global_bandwidth_limit_kbps.saturating_mul(1024)
+            / u64::from(settings.max_concurrent_downloads.max(1))
+    });
+    let per_task_limit = (settings.per_task_bandwidth_limit_kbps > 0)
+        .then(|| settings.per_task_bandwidth_limit_kbps.saturating_mul(1024));
+    let queue_limit = (queue_bandwidth_limit_kbps > 0).then(|| {
+        queue_bandwidth_limit_kbps.saturating_mul(1024)
+            / u64::from(queue_concurrency_limit.max(1))
+    });
+
+    [global_limit, per_task_limit, queue_limit]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|limit| limit.max(1))
+}
+
+fn effective_fragment_concurrency(requested: u32, retries: u32) -> u32 {
+    if retries > 0 {
+        1
+    } else {
+        requested.clamp(1, 3)
+    }
+}
+
+fn reported_active_connections(is_spotdl: bool, requested: u32, retries: u32) -> u32 {
+    if is_spotdl {
+        // spotDL does not use yt-dlp's fragment connection setting.
+        1
+    } else {
+        effective_fragment_concurrency(requested, retries)
+    }
+}
+
+fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
+    if state.is_shutting_down.load(Ordering::SeqCst) {
+        return "application shutdown is in progress".to_string();
+    }
+
+    let settings = state.get_settings();
+    let manual_ids = manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let queue_is_paused = state
+        .get_queues()
+        .iter()
+        .any(|queue| queue.id == task.queue_id && queue.is_paused);
+    if !should_bypass_paused_queue(queue_is_paused, &task.id, &manual_ids) {
+        return format!("queue '{}' is paused", task.queue_id);
+    }
+
+    let tasks = state.get_tasks();
+    let active_count = tasks.iter().filter(|candidate| candidate.status.is_active()).count();
+    let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
+    if active_count >= max_concurrent {
+        return format!("all global download slots are occupied ({}/{}); increase the global concurrency limit or wait for an active task", active_count, max_concurrent);
+    }
+
+    let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
+    if let Some(queue) = queue {
+        if queue.is_paused {
+            return format!("queue '{}' is paused; start this queue to allow downloads", queue.name);
+        }
+        let queue_active = tasks.iter().filter(|candidate| candidate.queue_id == task.queue_id && candidate.status.is_active()).count();
+        if queue.max_concurrent_downloads > 0 && queue_active >= queue.max_concurrent_downloads as usize {
+            return format!("queue '{}' reached its concurrency limit ({}/{})", queue.name, queue_active, queue.max_concurrent_downloads);
+        }
+    }
+
+    "task is queued but no scheduler slot was claimed; check application shutdown state and queue configuration".to_string()
+}
+
+fn queue_has_available_slot(queue_cap: u32, active_count: usize) -> bool {
+    queue_cap == 0 || active_count < queue_cap as usize
+}
+
+fn retry_backoff_seconds(base_delay_seconds: u32, retry_number: u32) -> u64 {
+    if base_delay_seconds == 0 || retry_number == 0 {
+        return 0;
+    }
+
+    let exponent = retry_number.saturating_sub(1).min(6);
+    let multiplier = 2u64.saturating_pow(exponent);
+    u64::from(base_delay_seconds)
+        .saturating_mul(multiplier)
+        .min(300)
 }
 
 pub fn schedule_next(app: &AppHandle, state: &AppState) {
+    schedule_next_with_manual_tasks(app, state, &HashSet::new());
+}
+
+fn schedule_next_with_manual_tasks(
+    app: &AppHandle,
+    state: &AppState,
+    manual_task_ids: &HashSet<String>,
+) {
+    {
+        let mut pending = manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner());
+        pending.extend(manual_task_ids.iter().cloned());
+    }
+    let pending_manual_ids = manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    // Multiple UI commands can request scheduling concurrently. Keep the snapshot,
+    // slot calculation, and Queued -> Connecting claims in one critical section so
+    // the same task cannot be launched twice or global/per-queue limits exceeded.
+    let _scheduler_guard = state.scheduler_lock.lock().unwrap_or_else(|e| e.into_inner());
+
     if state.is_shutting_down.load(Ordering::SeqCst) {
         return;
     }
 
     let settings = state.get_settings();
-    if !scheduler_window_is_open(&settings) {
+    let scheduler_open = scheduler_window_is_open(&settings);
+    if !scheduler_open && pending_manual_ids.is_empty() {
         return;
     }
     let tasks = state.get_tasks();
-    let paused_queues: HashSet<String> = state.get_queues().into_iter()
+    let queues = state.get_queues();
+    let paused_queues: HashSet<String> = queues.iter()
         .filter(|queue| queue.is_paused)
-        .map(|queue| queue.id)
+        .map(|queue| queue.id.clone())
         .collect();
+    let queue_limits: HashMap<String, u32> = queues.iter()
+        .map(|queue| (queue.id.clone(), queue.max_concurrent_downloads))
+        .collect();
+    let mut active_by_queue: HashMap<String, usize> = HashMap::new();
+    for task in tasks.iter().filter(|task| task.status.is_active()) {
+        *active_by_queue.entry(task.queue_id.clone()).or_insert(0) += 1;
+    }
 
     let active_count = tasks.iter().filter(|t| t.status.is_active()).count();
     let max_concurrent = settings.max_concurrent_downloads.max(1) as usize;
@@ -1586,7 +2136,23 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 
     let mut queued: Vec<DownloadTask> = tasks
         .into_iter()
-        .filter(|t| t.status == TaskStatus::Queued && !paused_queues.contains(&t.queue_id))
+        .filter(|task| {
+            if task.status != TaskStatus::Queued
+                || !should_bypass_paused_queue(
+                    paused_queues.contains(&task.queue_id),
+                    &task.id,
+                    &pending_manual_ids,
+                )
+                || !should_schedule_outside_window(scheduler_open, &task.id, &pending_manual_ids)
+            {
+                return false;
+            }
+            let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
+            queue_has_available_slot(
+                queue_cap,
+                active_by_queue.get(&task.queue_id).copied().unwrap_or(0),
+            )
+        })
         .collect();
 
     queued.sort_by(|a, b| {
@@ -1597,9 +2163,32 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
             .then_with(|| a.created_at.cmp(&b.created_at))
     });
 
-    for mut next_task in queued.into_iter().take(available_slots) {
+    let mut scheduled = 0usize;
+    for mut next_task in queued {
+        if scheduled >= available_slots {
+            break;
+        }
+        let queue_cap = queue_limits.get(&next_task.queue_id).copied().unwrap_or(0);
+        let queue_active = active_by_queue.get(&next_task.queue_id).copied().unwrap_or(0);
+        if !queue_has_available_slot(queue_cap, queue_active) {
+            continue;
+        }
+        *active_by_queue.entry(next_task.queue_id.clone()).or_insert(0) += 1;
+        scheduled += 1;
+
         next_task.status = TaskStatus::Connecting;
-        next_task.current_phase = "Starting engine...".to_string();
+        next_task.current_phase = if pending_manual_ids.contains(&next_task.id) {
+            "Starting manually..."
+        } else {
+            "Starting engine..."
+        }
+        .to_string();
+        if pending_manual_ids.contains(&next_task.id) {
+            clear_scheduler_managed_task(&next_task.id);
+            clear_manual_pending_task(&next_task.id);
+        } else if settings.scheduler.enabled {
+            mark_scheduler_managed_task(&next_task.id);
+        }
         if next_task.started_at.is_none() {
             next_task.started_at = Some(chrono::Utc::now().to_rfc3339());
         }
@@ -1627,6 +2216,16 @@ async fn run_download_task(app: AppHandle, task_id: String) {
 
     if let Err(join_error) = worker_result {
         let state = app.state::<AppState>();
+        // A panicking blocking worker may bypass its normal process-registry cleanup.
+        // Remove the stale PID under the mutex, then terminate it after releasing the lock.
+        let orphaned_pid = {
+            let mut processes = state.active_processes.lock().unwrap_or_else(|e| e.into_inner());
+            processes.remove(&task_id)
+        };
+        if let Some(pid) = orphaned_pid {
+            process::kill_process_tree(pid);
+        }
+
         let reason = if join_error.is_panic() {
             format!("Download worker panicked: {}", join_error)
         } else {
@@ -1650,7 +2249,64 @@ async fn run_download_task(app: AppHandle, task_id: String) {
         }
     }
 
+    // Read and persist the retry gate in a short scope so no borrowed AppState
+    // handle is held across the async backoff sleep.
+    let retry_delay = {
+        let state = app.state::<AppState>();
+        if let Some(mut task) = state.get_task_by_id(&task_id) {
+            let is_retry_queued = task.status == TaskStatus::Queued
+                && (task.current_phase.starts_with("Retrying (")
+                    || task.current_phase.starts_with("HTTP 410 detected."));
+            if is_retry_queued {
+                let settings = state.get_settings();
+                let delay_seconds =
+                    retry_backoff_seconds(settings.retry_delay_seconds, task.retries);
+                if delay_seconds > 0 {
+                    task.status = TaskStatus::Connecting;
+                    task.current_phase = format!("Retry wait: next attempt in {}s", delay_seconds);
+                    state.upsert_task(&task);
+                    let _ = app.emit("task_updated", &task);
+                    logging::info(
+                        "queue",
+                        &format!(
+                            "Task '{}' retry {}/{} scheduled after {}s.",
+                            task.id, task.retries, task.max_retries, delay_seconds
+                        ),
+                    );
+                    Some(delay_seconds)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(delay_seconds) = retry_delay {
+        tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+
+        let state = app.state::<AppState>();
+        if let Some(mut current) = state.get_task_by_id(&task_id) {
+            // Respect user pause/cancel actions issued during the backoff.
+            if current.status == TaskStatus::Connecting
+                && current.current_phase.starts_with("Retry wait:")
+            {
+                current.status = TaskStatus::Queued;
+                current.current_phase = format!(
+                    "Retrying now ({}/{}).",
+                    current.retries, current.max_retries
+                );
+                state.upsert_task(&current);
+                let _ = app.emit("task_updated", &current);
+            }
+        }
+    }
+
     let state = app.state::<AppState>();
+    clear_scheduler_managed_task(&task_id);
     schedule_next(&app, &state);
 }
 
@@ -2127,6 +2783,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let mut last_error = String::new();
             let mut last_output_file: Option<PathBuf> = None;
             let mut accumulated_completed_bytes: u64 = 0;
+            let mut integrity_logs: Vec<TaskLogEntry> = Vec::new();
 
             for (idx, track_url) in ordered_tracks.iter().enumerate() {
                 if state.is_shutting_down.load(Ordering::SeqCst) {
@@ -2141,12 +2798,51 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 let track_started_unix = chrono::Utc::now().timestamp();
                 let dir_baseline = snapshot_dir_file_sizes(&track_dir);
                 if let Some(existing_output) = find_track_audio_output(&track_dir, idx + 1) {
-                    completed_count += 1;
-                    if let Ok(meta) = fs::metadata(&existing_output) {
-                        accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                    let reusable = if settings.verify_media_on_complete {
+                        match verify_media_output(&existing_output, true) {
+                            Ok((_, _, _, _, checksum)) => {
+                                integrity_logs.push(TaskLogEntry {
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    level: "info".to_string(),
+                                    message: format!(
+                                        "Reused verified playlist track '{}'. SHA-256: {}",
+                                        existing_output.file_name().and_then(|name| name.to_str()).unwrap_or("track"),
+                                        checksum
+                                    ),
+                                });
+                                true
+                            }
+                            Err(error) => {
+                                logging::warn(
+                                    "integrity",
+                                    &format!(
+                                        "Discarding incomplete staged playlist track '{}': {}",
+                                        existing_output.display(), error
+                                    ),
+                                );
+                                if let Err(remove_error) = fs::remove_file(&existing_output) {
+                                    failed_count += 1;
+                                    last_error = format!(
+                                        "Could not remove invalid staged track '{}': {}",
+                                        existing_output.display(), remove_error
+                                    );
+                                    continue;
+                                }
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    };
+
+                    if reusable {
+                        completed_count += 1;
+                        if let Ok(meta) = fs::metadata(&existing_output) {
+                            accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(meta.len());
+                        }
+                        last_output_file = Some(existing_output);
+                        continue;
                     }
-                    last_output_file = Some(existing_output);
-                    continue;
                 }
                 let mut prev_track_bytes: u64 = 0;
                 let mut prev_sample_at = Instant::now();
@@ -2312,6 +3008,30 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                                         .filter(|p| !dir_baseline.contains_key(p)))
                                     .or_else(|| find_track_audio_output(&track_dir, idx + 1));
                                 if let Some(found) = newly_created {
+                                    if settings.verify_media_on_complete {
+                                        match verify_media_output(&found, true) {
+                                            Ok((_, _, _, _, checksum)) => {
+                                                integrity_logs.push(TaskLogEntry {
+                                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                                    level: "info".to_string(),
+                                                    message: format!(
+                                                        "Verified playlist track '{}'. SHA-256: {}",
+                                                        found.file_name().and_then(|name| name.to_str()).unwrap_or("track"),
+                                                        checksum
+                                                    ),
+                                                });
+                                            }
+                                            Err(error) => {
+                                                failed_count += 1;
+                                                last_error = format!(
+                                                    "Track {} failed media integrity verification: {}",
+                                                    idx + 1, error
+                                                );
+                                                let _ = fs::remove_file(&found);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     completed_count += 1;
                                     if let Ok(m) = fs::metadata(&found) {
                                         accumulated_completed_bytes = accumulated_completed_bytes.saturating_add(m.len());
@@ -2346,6 +3066,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             final_t.tracks_requested = Some(total_tracks);
             final_t.tracks_completed = Some(completed_count);
             final_t.tracks_failed = Some(failed_count);
+            final_t.logs.extend(integrity_logs);
+            if final_t.logs.len() > 100 {
+                let excess = final_t.logs.len() - 100;
+                final_t.logs.drain(..excess);
+            }
             final_t.active_connections = 0;
             final_t.speed_bytes_per_sec = 0.0;
             final_t.speed_str = "0 B/s".to_string();
@@ -2539,6 +3264,9 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             "60".to_string(),
             "--extractor-retries".to_string(),
             "5".to_string(),
+            // Keep yt-dlp's resumable .part files when a worker is interrupted.
+            "--continue".to_string(),
+            "--part".to_string(),
         ];
 
         // When enabled, yt-dlp must fail rather than silently produce media with missing fragments.
@@ -2563,11 +3291,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push("--no-playlist".to_string());
         }
 
-        if settings.conflict_strategy == "overwrite" {
-            args.push("--force-overwrites".to_string());
-        } else {
-            args.push("--no-overwrites".to_string());
-        }
+        append_conflict_strategy_args(&mut args, &settings.conflict_strategy);
 
         match EngineManager::build_ytdlp_request_args(&task.url, &settings) {
             Ok(req_args) => args.extend(req_args),
@@ -2585,17 +3309,29 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             args.push(settings.proxy_url.trim().to_string());
         }
 
-        if settings.global_bandwidth_limit_kbps > 0 {
+        // Allocate the global cap across the configured maximum number of
+        // concurrent tasks. This prevents each yt-dlp process from independently
+        // consuming the entire "global" allowance. A per-task cap can tighten it.
+        let queue = state.get_queues().into_iter().find(|queue| queue.id == task.queue_id);
+        let global_concurrency = settings.max_concurrent_downloads.max(1);
+        let queue_concurrency = queue.as_ref()
+            .map(|queue| queue.max_concurrent_downloads)
+            .filter(|limit| *limit > 0)
+            .map(|limit| limit.min(global_concurrency))
+            .unwrap_or(global_concurrency);
+        if let Some(limit_bytes_per_second) = effective_task_bandwidth_limit_bytes_per_second(
+            &settings,
+            queue.as_ref().map(|queue| queue.bandwidth_limit_kbps).unwrap_or(0),
+            queue_concurrency,
+        ) {
             args.push("--limit-rate".to_string());
-            args.push(format!("{}K", settings.global_bandwidth_limit_kbps));
-        } else if settings.per_task_bandwidth_limit_kbps > 0 {
-            args.push("--limit-rate".to_string());
-            args.push(format!("{}K", settings.per_task_bandwidth_limit_kbps));
+            args.push(limit_bytes_per_second.to_string());
         }
 
-        // Keep segmented downloads reliable on CDNs that throttle parallel fragment requests.
-        // A low concurrency is slower on paper but avoids frequent 403/timeouts and missing chunks.
-        let safe_fragment_concurrency = settings.fragment_concurrency.clamp(1, 2);
+        // Start conservatively, then fall back to one fragment connection after
+        // any failed attempt. This adapts to CDNs that reject parallel fragment requests.
+        let safe_fragment_concurrency =
+            effective_fragment_concurrency(settings.fragment_concurrency, task.retries);
         if safe_fragment_concurrency > 1 {
             args.push("-N".to_string());
             args.push(safe_fragment_concurrency.to_string());
@@ -2638,6 +3374,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             } else {
                 format!("{}+bestaudio/best", task.format_id)
             };
+            // Prefer the highest available resolution before bitrate when yt-dlp
+            // has to resolve a generic selector (including safe fallbacks).
+            args.push("-S".to_string());
+            args.push("res,fps,br".to_string());
+            args.push("--format-sort-force".to_string());
             args.push("-f".to_string());
             args.push(selector);
             args.push("--merge-output-format".to_string());
@@ -2677,31 +3418,41 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
     struct StreamLoopTelemetry {
         ema_speed: f64,
         stream_known_total: u64,
-        stream_max_downloaded: u64,
+        stream_estimated_total: u64,
+        stream_max_downloaded: u64, 
         completed_stream_total: u64,
         completed_stream_downloaded: u64,
         last_activity_at: Instant,
         last_emit_at: Instant,
+        last_persist_at: Instant,
         spotdl_prev_bytes: u64,
         spotdl_prev_sample: Instant,
+        spotdl_last_scan_at: Instant,
+        spotdl_last_bytes: u64,
         detected_output_path: Option<String>,
     }
 
     let started_unix = chrono::Utc::now().timestamp();
     let started_instant = Instant::now();
-    let output_baseline = snapshot_dir_file_sizes(&out_dir);
-    let spotdl_baseline = output_baseline.clone();
+    // Both output discovery and spotDL growth tracking share the same immutable
+    // baseline; avoid duplicating a potentially large staging-directory map.
+    let output_baseline = Arc::new(snapshot_dir_file_sizes(&out_dir));
+    let spotdl_baseline = Arc::clone(&output_baseline);
 
     let loop_telemetry = std::cell::RefCell::new(StreamLoopTelemetry {
         ema_speed: 0.0,
         stream_known_total: 0,
+        stream_estimated_total: 0,
         stream_max_downloaded: 0,
         completed_stream_total: 0,
         completed_stream_downloaded: 0,
         last_activity_at: Instant::now(),
         last_emit_at: Instant::now(),
+        last_persist_at: Instant::now(),
         spotdl_prev_bytes: 0,
         spotdl_prev_sample: Instant::now(),
+        spotdl_last_scan_at: Instant::now(),
+        spotdl_last_bytes: 0,
         detected_output_path: None,
     });
 
@@ -2873,6 +3624,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                             .completed_stream_total
                             .saturating_add(tel.stream_known_total);
                         tel.stream_known_total = 0;
+                        tel.stream_estimated_total = 0;
                         tel.stream_max_downloaded = 0;
                     }
                     tel.detected_output_path = Some(dest.to_string());
@@ -2959,43 +3711,50 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     let downloaded = crate::parse_bytes(parts[1]);
                     let exact_total = crate::parse_bytes(parts[2]);
                     let est_total = crate::parse_bytes(parts[3]);
-                    let total = if exact_total > 0 { exact_total } else { est_total };
+                    let total = exact_total;
+                    let estimated_total = est_total;
                     let speed_bytes = crate::parse_bytes(parts[4].trim_end_matches("/s")) as f64;
                     let eta_raw = Some(parts[5].trim().to_string());
                     let phase = parts[6].trim().to_string();
-                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
+                    Some((pct_val, downloaded, total, estimated_total, speed_bytes, eta_raw, phase))
                 } else if parts.len() >= 6 {
                     let pct_raw = parts[0].trim().trim_end_matches('%').trim();
                     let pct_val = pct_raw.parse::<f64>().ok().filter(|v| v.is_finite());
                     let downloaded = crate::parse_bytes(parts[1]);
-                    let total = crate::parse_bytes(parts[2]);
+                    let total = 0;
+                    let estimated_total = crate::parse_bytes(parts[2]);
                     let speed_bytes = crate::parse_bytes(parts[3].trim_end_matches("/s")) as f64;
                     let eta_raw = Some(parts[4].trim().to_string());
                     let phase = parts[5].trim().to_string();
-                    Some((pct_val, downloaded, total, speed_bytes, eta_raw, phase))
+                    Some((pct_val, downloaded, total, estimated_total, speed_bytes, eta_raw, phase))
                 } else {
                     None
                 }
             } else {
                 extract_bracket_ytdlp_metrics(trimmed).map(|(pct_val, dl, tot, spd, eta)| {
-                    (pct_val, dl, tot, spd, eta, "downloading".to_string())
+                    (pct_val, dl, 0, tot, spd, eta, "downloading".to_string())
                 })
             };
 
-            if let Some((pct_val, raw_downloaded, raw_total, speed_bytes, eta_raw, phase_raw)) =
+            if let Some((pct_val, raw_downloaded, raw_exact_total, raw_estimated_total, speed_bytes, eta_raw, phase_raw)) =
                 parsed_progress
             {
                 tel.last_activity_at = Instant::now();
-                if raw_total > 0 {
-                    tel.stream_known_total = tel.stream_known_total.max(raw_total);
-                }
-                if raw_total > tel.stream_known_total {
-                    tel.stream_known_total = raw_total;
+                // Exact yt-dlp totals always override estimates. Estimates are allowed to
+                // grow while formats/segments are resolved, but never replace an exact total.
+                if raw_exact_total > 0 {
+                    tel.stream_known_total = raw_exact_total;
+                } else if raw_estimated_total > 0 && tel.stream_known_total == 0 {
+                    tel.stream_estimated_total = tel.stream_estimated_total.max(raw_estimated_total);
                 }
                 if raw_downloaded > tel.stream_max_downloaded {
                     tel.stream_max_downloaded = raw_downloaded;
                 }
-                let active_total = tel.stream_known_total.max(raw_total);
+                let active_total = if tel.stream_known_total > 0 {
+                    tel.stream_known_total
+                } else {
+                    tel.stream_estimated_total
+                };
                 let total = tel.completed_stream_total.saturating_add(active_total);
                 let downloaded = tel
                     .completed_stream_downloaded
@@ -3019,10 +3778,10 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 };
 
                 let pct_known = total > 0 || pct_val.is_some();
-                let pct = if total > 0 {
+                let pct = if tel.stream_known_total > 0 && total > 0 {
                     ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
                 } else {
-                    pct_val.unwrap_or(0.0).clamp(0.0, 100.0)
+                    pct_val.unwrap_or_else(|| if total > 0 { downloaded as f64 / total as f64 * 100.0 } else { 0.0 }).clamp(0.0, 100.0)
                 };
 
                 let next_status = if phase_raw.eq_ignore_ascii_case("processing")
@@ -3064,13 +3823,21 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                         .unwrap_or_else(|| "--".to_string())
                 };
                 current.elapsed_seconds = elapsed;
-                current.active_connections = settings.fragment_concurrency.max(1);
+                current.active_connections = reported_active_connections(is_spotdl, settings.fragment_concurrency, task.retries);
                 current.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
                 current.current_phase = next_phase;
 
                 if phase_or_status_changed || tel.last_emit_at.elapsed() >= Duration::from_millis(200) {
                     tel.last_emit_at = Instant::now();
-                    state.upsert_task(&current);
+
+                    // Keep the UI responsive at 5 Hz while limiting durable SQLite writes
+                    // to 1 Hz per task. Persist state transitions immediately.
+                    if phase_or_status_changed
+                        || tel.last_persist_at.elapsed() >= Duration::from_secs(1)
+                    {
+                        state.upsert_task(&current);
+                        tel.last_persist_at = Instant::now();
+                    }
                     let _ = app.emit("task_updated", &current);
                 }
             }
@@ -3091,25 +3858,34 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             let mut tel = loop_telemetry.borrow_mut();
 
             if is_spotdl {
-                let active_bytes = measure_dir_growth_bytes(&out_dir, &spotdl_baseline);
-                let dt = tel.spotdl_prev_sample.elapsed().as_secs_f64();
-                if dt >= 0.35 && active_bytes >= tel.spotdl_prev_bytes {
-                    let delta = active_bytes - tel.spotdl_prev_bytes;
-                    if delta > 0 {
-                        tel.last_activity_at = Instant::now();
+                // Recursive metadata scans can be expensive for large playlists. Sample
+                // the staging tree at 700 ms, while keeping UI progress emissions at 350 ms
+                // by reusing the most recent byte sample between scans.
+                if tel.spotdl_last_scan_at.elapsed() >= Duration::from_millis(700) {
+                    let active_bytes = measure_dir_growth_bytes(&out_dir, &spotdl_baseline);
+                    let dt = tel.spotdl_prev_sample.elapsed().as_secs_f64();
+                    if dt > 0.0 && active_bytes >= tel.spotdl_prev_bytes {
+                        let delta = active_bytes - tel.spotdl_prev_bytes;
+                        if delta > 0 {
+                            tel.last_activity_at = Instant::now();
+                        }
+                        let inst_speed = delta as f64 / dt;
+                        tel.ema_speed = if tel.ema_speed == 0.0 {
+                            inst_speed
+                        } else {
+                            0.35 * inst_speed + 0.65 * tel.ema_speed
+                        };
+                        tel.spotdl_prev_bytes = active_bytes;
+                        tel.spotdl_prev_sample = Instant::now();
                     }
-                    let inst_speed = delta as f64 / dt;
-                    tel.ema_speed = if tel.ema_speed == 0.0 {
-                        inst_speed
-                    } else {
-                        0.35 * inst_speed + 0.65 * tel.ema_speed
-                    };
-                    tel.spotdl_prev_bytes = active_bytes;
-                    tel.spotdl_prev_sample = Instant::now();
+                    tel.spotdl_last_bytes = active_bytes;
+                    tel.spotdl_last_scan_at = Instant::now();
                 }
+                let active_bytes = tel.spotdl_last_bytes;
 
                 if active_bytes > 0 && tel.last_emit_at.elapsed() >= Duration::from_millis(350) {
                     tel.last_emit_at = Instant::now();
+                    let status_changed = cur.status != TaskStatus::Downloading;
                     cur.status = TaskStatus::Downloading;
                     cur.percentage_known = false;
                     cur.downloaded_bytes = active_bytes;
@@ -3117,7 +3893,11 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     cur.speed_str = format!("{}/s", format_bytes_rust(tel.ema_speed));
                     cur.elapsed_seconds = started_instant.elapsed().as_secs();
                     cur.last_progress_at = Some(chrono::Utc::now().to_rfc3339());
-                    state.upsert_task(&cur);
+
+                    if status_changed || tel.last_persist_at.elapsed() >= Duration::from_secs(1) {
+                        state.upsert_task(&cur);
+                        tel.last_persist_at = Instant::now();
+                    }
                     let _ = app.emit("task_updated", &cur);
                 }
             } else if tel.last_activity_at.elapsed() >= Duration::from_secs(15)
@@ -3213,7 +3993,36 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
             state.upsert_task(&t);
             let _ = app.emit("task_updated", &t);
 
-            if let Some((audio_sum, acodec, vcodec, res_lbl)) = EngineManager::verify_media_file(&final_path) {
+            if settings.verify_media_on_complete {
+                match verify_media_output(&final_path, t.is_audio_only) {
+                    Ok((audio_sum, acodec, vcodec, res_lbl, checksum)) => {
+                        t.verified_audio_info = audio_sum;
+                        t.audio_codec = acodec;
+                        t.video_codec = vcodec;
+                        t.resolution_label = res_lbl;
+                        t.logs.push(TaskLogEntry {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            level: "info".to_string(),
+                            message: format!("Media integrity verified with ffprobe. SHA-256: {}", checksum),
+                        });
+                    }
+                    Err(error) => {
+                        t.status = TaskStatus::Failed;
+                        t.current_phase = "Media integrity verification failed".to_string();
+                        t.error_message = Some(error.clone());
+                        t.logs.push(TaskLogEntry {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            level: "error".to_string(),
+                            message: error,
+                        });
+                        state.upsert_task(&t);
+                        let _ = app.emit("task_updated", &t);
+                        return;
+                    }
+                }
+            } else if let Some((audio_sum, acodec, vcodec, res_lbl)) =
+                EngineManager::verify_media_file(&final_path)
+            {
                 t.verified_audio_info = audio_sum;
                 t.audio_codec = acodec;
                 t.video_codec = vcodec;
@@ -3283,6 +4092,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                 message: format!("'{}' downloaded successfully.", t.title),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 task_id: Some(t.id.clone()),
+                is_read: false,
             };
             state.add_notification(&notif);
             let _ = app.emit("notification", &notif);
@@ -3334,6 +4144,7 @@ fn run_download_task_blocking(app: &AppHandle, task_id: &str) {
                     ),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     task_id: Some(t.id.clone()),
+                    is_read: false,
                 };
                 state.add_notification(&notif);
                 let _ = app.emit("notification", &notif);
@@ -3364,6 +4175,27 @@ mod subtitle_and_lyrics_tests {
             (2440, "Hello".to_string()),
             (3105, "World".to_string()),
         ]);
+    }
+
+    #[test]
+    fn overwrite_strategy_keeps_partial_download_resume_enabled() {
+        let mut args = Vec::new();
+        append_conflict_strategy_args(&mut args, "overwrite");
+        assert_eq!(args, vec!["--force-overwrites".to_string(), "--continue".to_string()]);
+
+        let mut rename_args = Vec::new();
+        append_conflict_strategy_args(&mut rename_args, "rename");
+        assert_eq!(rename_args, vec!["--no-overwrites".to_string()]);
+    }
+
+    #[test]
+    fn format_selector_preflight_detects_all_muxing_paths() {
+        assert!(format_selector_requires_ffmpeg(None));
+        assert!(format_selector_requires_ffmpeg(Some("best")));
+        assert!(format_selector_requires_ffmpeg(Some("bestvideo+bestaudio/best")));
+        assert!(format_selector_requires_ffmpeg(Some("137+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]")));
+        assert!(!format_selector_requires_ffmpeg(Some("22")));
+        assert!(format_selector_requires_ffmpeg(Some("")));
     }
 
     #[test]
@@ -3412,6 +4244,126 @@ mod scheduler_window_tests {
         assert!(!should_resume_queue_paused_task(
             "queue_a", &TaskStatus::Queued, "Paused by queue", "queue_a"
         ));
+    }
+
+    #[test]
+    fn queue_concurrency_zero_inherits_global_and_positive_caps_are_enforced() {
+        assert!(queue_has_available_slot(0, 100));
+        assert!(queue_has_available_slot(2, 0));
+        assert!(queue_has_available_slot(2, 1));
+        assert!(!queue_has_available_slot(2, 2));
+        assert!(!queue_has_available_slot(1, 1));
+    }
+
+    #[test]
+    fn queue_bandwidth_limit_is_allocated_using_effective_queue_concurrency() {
+        let settings = AppSettings::default();
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 2),
+            Some(409_600)
+        );
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 800, 4),
+            Some(204_800)
+        );
+    }
+
+    #[test]
+    fn global_bandwidth_limit_is_shared_across_max_concurrent_tasks() {
+        let mut settings = AppSettings::default();
+        settings.max_concurrent_downloads = 4;
+        settings.global_bandwidth_limit_kbps = 1000;
+        settings.per_task_bandwidth_limit_kbps = 0;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
+            Some(256_000)
+        );
+
+        settings.per_task_bandwidth_limit_kbps = 100;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
+            Some(102_400)
+        );
+
+        settings.global_bandwidth_limit_kbps = 0;
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1),
+            Some(102_400)
+        );
+
+        settings.per_task_bandwidth_limit_kbps = 0;
+        assert_eq!(effective_task_bandwidth_limit_bytes_per_second(&settings, 0, 1), None);
+        assert_eq!(
+            effective_task_bandwidth_limit_bytes_per_second(&settings, 400, 2),
+            Some(204_800)
+        );
+    }
+
+    #[test]
+    fn fragment_concurrency_falls_back_after_a_failed_attempt() {
+        assert_eq!(effective_fragment_concurrency(16, 0), 3);
+        assert_eq!(effective_fragment_concurrency(2, 0), 2);
+        assert_eq!(effective_fragment_concurrency(3, 1), 1);
+        assert_eq!(effective_fragment_concurrency(1, 5), 1);
+    }
+
+    #[test]
+    fn reported_active_connections_match_the_engine_and_retry_mode() {
+        assert_eq!(reported_active_connections(false, 16, 0), 3);
+        assert_eq!(reported_active_connections(false, 2, 0), 2);
+        assert_eq!(reported_active_connections(false, 3, 1), 1);
+        assert_eq!(reported_active_connections(true, 3, 0), 1);
+        assert_eq!(reported_active_connections(true, 3, 4), 1);
+    }
+
+    #[test]
+    fn sha256_file_matches_known_empty_file_digest() {
+        let dir = std::env::temp_dir().join(format!("vanta_sha256_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.bin");
+        fs::write(&path, []).unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_backoff_uses_exponential_delay_and_caps_at_five_minutes() {
+        assert_eq!(retry_backoff_seconds(5, 0), 0);
+        assert_eq!(retry_backoff_seconds(0, 3), 0);
+        assert_eq!(retry_backoff_seconds(5, 1), 5);
+        assert_eq!(retry_backoff_seconds(5, 2), 10);
+        assert_eq!(retry_backoff_seconds(5, 3), 20);
+        assert_eq!(retry_backoff_seconds(5, 4), 40);
+        assert_eq!(retry_backoff_seconds(60, 7), 300);
+        assert_eq!(retry_backoff_seconds(u32::MAX, u32::MAX), 300);
+    }
+
+    #[test]
+    fn explicit_manual_tasks_bypass_a_closed_scheduler_window_but_automatic_tasks_do_not() {
+        let manual_ids = HashSet::from(["manual-task".to_string()]);
+        assert!(should_schedule_outside_window(false, "manual-task", &manual_ids));
+        assert!(!should_schedule_outside_window(false, "automatic-task", &manual_ids));
+        assert!(should_schedule_outside_window(true, "automatic-task", &manual_ids));
+    }
+
+    #[test]
+    fn explicit_manual_downloads_bypass_a_stopped_queue_but_automatic_tasks_do_not() {
+        let manual_ids = HashSet::from(["manual-task".to_string()]);
+        assert!(should_bypass_paused_queue(true, "manual-task", &manual_ids));
+        assert!(!should_bypass_paused_queue(true, "automatic-task", &manual_ids));
+        assert!(should_bypass_paused_queue(false, "automatic-task", &manual_ids));
+    }
+
+    #[test]
+    fn manual_pending_tasks_are_removed_after_pause_or_cancel() {
+        let id = format!("manual-pending-{}", uuid::Uuid::new_v4());
+        manual_pending_tasks().lock().unwrap().insert(id.clone());
+        assert!(manual_pending_tasks().lock().unwrap().contains(&id));
+        clear_manual_pending_task(&id);
+        assert!(!manual_pending_tasks().lock().unwrap().contains(&id));
     }
 
     #[test]

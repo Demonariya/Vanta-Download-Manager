@@ -40,6 +40,7 @@ import {
   buildCuratedVideoOptions,
   detectInspectedMediaKind,
   formatMediaRoutingLabel,
+  getDefaultVideoFormatSelector,
   summarizeVideoOptionCodecs,
 } from '../utils/media-formats';
 import { parseBatchUrls, validateMediaUrl } from '../utils/engine-parser';
@@ -151,7 +152,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           patch.metadata.url || lastInspectedUrlRef.current
         );
         setSelectedTab(detectedKind);
-        setSelectedFormatId('bestvideo+bestaudio/best');
+        setSelectedFormatId(getDefaultVideoFormatSelector(patch.metadata.formats || []));
         setDownloadWholeCollection(true);
         const subtitleCodes = new Set([
           ...(patch.metadata.subtitles || []).map((item) => item.code),
@@ -718,12 +719,12 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/70 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-2xl bg-[var(--vanta-surface)] border border-[var(--vanta-border-strong)] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+      <div role="dialog" aria-modal="true" aria-labelledby="new-download-title" className="relative flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[var(--vanta-border-strong)] bg-[var(--vanta-surface)] shadow-2xl max-h-[94vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-[var(--vanta-border)] bg-[var(--vanta-surface-2)]">
           <div className="flex items-center gap-2">
             <Download className="w-4 h-4 text-[var(--vanta-accent)]" />
-            <h2 className="text-sm font-semibold text-[var(--vanta-text)]">New Media Download</h2>
+            <div className="min-w-0"><h2 id="new-download-title" className="text-sm font-semibold tracking-tight text-[var(--vanta-text)]">Download File Info</h2><p className="mt-0.5 text-[10px] text-[var(--vanta-muted)]">Review source, format, destination and queue before starting</p></div>
           </div>
           <button
             type="button"
@@ -736,8 +737,8 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-4 sm:p-5 overflow-y-auto space-y-4 text-xs">
-          <div className="flex items-center gap-3 rounded-lg border border-[var(--vanta-border)] bg-[var(--vanta-surface)] px-3 py-2">
+        <div className="min-h-0 overflow-y-auto p-4 text-xs sm:p-5 lg:p-6 space-y-4">
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-3.5 py-3">
             <div className="min-w-0 flex-1">
               <label htmlFor="download-queue" className="block text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Add to Queue</label>
               <select
@@ -755,7 +756,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
           </div>
 
           {/* Mode Switcher */}
-          <div className="flex items-center gap-1 p-1 bg-[var(--vanta-surface-2)] border border-[var(--vanta-border)] rounded-lg">
+          <div className="flex items-center gap-1 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-1">
             <button
               type="button"
               onClick={() => setMode('single')}
@@ -1760,6 +1761,33 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
             </div>
           )}
 
+          {mode === 'single' && (
+            <section aria-label="Download source summary" className="grid grid-cols-1 gap-2 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] p-3 sm:grid-cols-3">
+              <div className="min-w-0">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Detected file</div>
+                <div className="mt-1 truncate text-xs font-semibold text-[var(--vanta-text)]" title={metadata?.title || customFilename || 'Waiting for analysis'}>
+                  {metadata?.title || customFilename || 'Waiting for analysis'}
+                </div>
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Format / quality</div>
+                <div className="mt-1 truncate text-xs font-medium text-[var(--vanta-text)]">
+                  {metadata
+                    ? (selectedTab === 'audio'
+                      ? `${selectedAudioFormat.toUpperCase()} · ${selectedAudioBitrate}`
+                      : (curatedVideoOptions.find((option) => option.id === selectedFormatId || option.formatSelector === selectedFormatId)?.label || selectedContainer.toUpperCase()))
+                    : 'Not analyzed'}
+                </div>
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--vanta-muted)]">Source / inspection</div>
+                <div className="mt-1 truncate text-xs font-medium text-[var(--vanta-text)]">
+                  {isExtracting ? 'Analyzing source…' : metadata ? (metadata.extractor || 'Media source') : extractError ? 'Inspection failed' : 'Ready to inspect'}
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* Filename, Priority & Output Directory */}
           <div className="space-y-3 pt-2 border-t border-[var(--vanta-border)]">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1820,7 +1848,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-4 sm:px-5 py-3 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--vanta-border)] bg-[var(--vanta-surface-2)] px-4 py-3 sm:px-5">
           <span className="text-[11px] font-mono text-[var(--vanta-muted)] truncate">
             {routingLabel} · {outputDir || settings?.download_dir || 'Default folder'}
           </span>

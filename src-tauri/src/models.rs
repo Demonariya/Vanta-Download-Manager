@@ -133,8 +133,8 @@ impl Default for SchedulerSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            start_time: "01:00".to_string(),
-            stop_time: "06:00".to_string(),
+            start_time: "00:00".to_string(),
+            stop_time: "00:00".to_string(),
             pause_on_stop: true,
             days: vec![0, 1, 2, 3, 4, 5, 6],
         }
@@ -557,6 +557,8 @@ pub struct NotificationItem {
     pub timestamp: String,
     #[serde(rename = "taskId", alias = "task_id")]
     pub task_id: Option<String>,
+    #[serde(rename = "isRead", default)]
+    pub is_read: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -566,6 +568,12 @@ pub struct DownloadQueue {
     pub is_default: bool,
     pub is_paused: bool,
     pub queue_order: i64,
+    /// Zero inherits the application's global concurrent-download limit.
+    #[serde(default)]
+    pub max_concurrent_downloads: u32,
+    /// Zero inherits the application's global bandwidth policy.
+    #[serde(default)]
+    pub bandwidth_limit_kbps: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -619,7 +627,7 @@ impl Default for AppSettings {
             download_dir: default_download_dir,
             python_path: None,
             max_concurrent_downloads: 3,
-            fragment_concurrency: 4,
+            fragment_concurrency: 3,
             global_bandwidth_limit_kbps: 0,
             per_task_bandwidth_limit_kbps: 0,
             max_retries: 3,
@@ -671,6 +679,11 @@ pub fn default_downloads_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_fragment_concurrency_matches_engine_limit() {
+        assert_eq!(AppSettings::default().fragment_concurrency, 3);
+    }
 
     #[test]
     fn test_media_metadata_video_audio_formats_and_entries_roundtrip() {
@@ -779,9 +792,11 @@ mod tests {
             message: "Saved".to_string(),
             timestamp: "2026-11-20T00:00:00Z".to_string(),
             task_id: Some("task_123".to_string()),
+            is_read: false,
         };
         let notif_json = serde_json::to_value(&notif).unwrap();
         assert_eq!(notif_json["taskId"], "task_123");
+        assert_eq!(notif_json["isRead"], false);
         assert!(notif_json.get("task_id").is_none());
 
         let from_legacy: NotificationItem = serde_json::from_str(
@@ -789,6 +804,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_legacy.task_id.as_deref(), Some("t2"));
+        assert!(!from_legacy.is_read, "legacy notifications default to unread");
 
         let update = EngineUpdateInfo {
             current_version: "2026.01.01".to_string(),
@@ -802,11 +818,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_download_queue_json_defaults_new_limits_to_inherit() {
+        let queue: DownloadQueue = serde_json::from_str(
+            r#"{"id":"main","name":"Main Queue","is_default":true,"is_paused":false,"queue_order":0}"#,
+        ).unwrap();
+        assert_eq!(queue.max_concurrent_downloads, 0);
+        assert_eq!(queue.bandwidth_limit_kbps, 0);
+    }
+
+    #[test]
     fn test_scheduler_settings_defaults() {
         let sched = SchedulerSettings::default();
         assert!(!sched.enabled);
-        assert_eq!(sched.start_time, "01:00");
-        assert_eq!(sched.stop_time, "06:00");
+        assert_eq!(sched.start_time, "00:00");
+        assert_eq!(sched.stop_time, "00:00");
         assert!(sched.pause_on_stop);
         assert_eq!(sched.days, vec![0, 1, 2, 3, 4, 5, 6]);
     }
@@ -829,7 +854,7 @@ mod tests {
             serde_json::from_str(r#"{"enabled": true, "start_time": "03:00"}"#).unwrap();
         assert!(partial.enabled);
         assert_eq!(partial.start_time, "03:00");
-        assert_eq!(partial.stop_time, "06:00");
+        assert_eq!(partial.stop_time, "00:00");
         assert!(partial.pause_on_stop);
         assert_eq!(partial.days, vec![0, 1, 2, 3, 4, 5, 6]);
     }

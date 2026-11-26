@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   DownloadQueue,
   DownloadTask,
@@ -16,21 +18,29 @@ import {
 } from './types';
 import { api } from './services/api';
 import { isActiveTaskStatus } from './utils/download-core';
-import { Sidebar, ActiveTab } from './components/Sidebar';
+import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
-import { DownloadCenterView, QueueScopeFilter } from './components/DownloadCenterView';
-import { DownloadDetailsDrawer } from './components/DownloadDetailsDrawer';
+import { DownloadCenterView, type QueueScopeFilter } from './components/DownloadCenterView';
+
 import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
-import { HistoryView } from './components/HistoryView';
-import { DiagnosticsView } from './components/DiagnosticsView';
-import { SettingsView } from './components/SettingsView';
-import { NewDownloadModal } from './components/NewDownloadModal';
-import { NotificationCenterModal } from './components/NotificationCenterModal';
+
+
+
+
+
 import { TitleBar } from './components/TitleBar';
 import { SafeCloseDialog } from './components/SafeCloseDialog';
 import { AppMenuBar } from './components/AppMenuBar';
 import { ActionToolbar } from './components/ActionToolbar';
 import { StatusBar } from './components/StatusBar';
+
+const DownloadDetailsDrawer = lazy(() => import('./components/DownloadDetailsDrawer').then((module) => ({ default: module.DownloadDetailsDrawer })));
+const DownloadProgressWindow = lazy(() => import('./components/DownloadProgressWindow').then((module) => ({ default: module.DownloadProgressWindow })));
+const HistoryView = lazy(() => import('./components/HistoryView').then((module) => ({ default: module.HistoryView })));
+const DiagnosticsView = lazy(() => import('./components/DiagnosticsView').then((module) => ({ default: module.DiagnosticsView })));
+const SettingsView = lazy(() => import('./components/SettingsView').then((module) => ({ default: module.SettingsView })));
+const NewDownloadModal = lazy(() => import('./components/NewDownloadModal').then((module) => ({ default: module.NewDownloadModal })));
+const NotificationCenterModal = lazy(() => import('./components/NotificationCenterModal').then((module) => ({ default: module.NotificationCenterModal })));
 
 function makeCheckingEngine(): EngineInfo {
   return {
@@ -70,9 +80,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloads');
   const [scopeFilter, setScopeFilter] = useState<QueueScopeFilter>('all');
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0 }]);
+  const [queues, setQueues] = useState<DownloadQueue[]>([{ id: 'main', name: 'Main Queue', is_default: true, is_paused: false, queue_order: 0, max_concurrent_downloads: 0, bandwidth_limit_kbps: 0 }]);
   const [selectedQueueId, setSelectedQueueId] = useState('all');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isProgressMonitorOpen, setIsProgressMonitorOpen] = useState(false);
+  const [progressMonitorTaskId, setProgressMonitorTaskId] = useState<string | null>(null);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatusMap | null>(
     createInitialCheckingEngineStatus
@@ -120,6 +132,32 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{ url: string; title?: string; source?: string }>('browser-download-request', async (event) => {
+      const request = event.payload;
+      if (!request?.url || !/^https?:\/\//i.test(request.url)) return;
+      setInitialInspectUrl(request.url);
+      setIsNewDownloadOpen(true);
+      try {
+        const current = getCurrentWindow();
+        await current.show();
+        await current.unminimize();
+        await current.setFocus();
+      } catch {
+        // The request still opens in the app when the main window is already visible.
+      }
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     const syncLayout = () => setIsSidebarCollapsed(window.innerWidth < 1024);
     syncLayout();
     window.addEventListener('resize', syncLayout, { passive: true });
@@ -161,26 +199,61 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isNewDownloadOpen, isNotificationsOpen, isSafeCloseOpen]);
 
-  // Opt-in Clipboard URL monitor on window focus
+  // Opt-in clipboard monitor. Read only while the desktop window is visible and
+  // focused; this avoids background polling and keeps clipboard access user-controlled.
   useEffect(() => {
-    if (!settings?.clipboard_monitoring) return;
+    if (!settings?.clipboard_monitoring) {
+      setClipboardUrl(null);
+      return;
+    }
+
+    let disposed = false;
+    let checking = false;
     const checkClipboard = async () => {
+      if (disposed || checking || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      checking = true;
       try {
-        const text = (await navigator.clipboard.readText()).trim();
-        if (
-          text &&
-          text !== lastClipboardSeenRef.current &&
-          (text.startsWith('https://') || text.startsWith('http://') || text.startsWith('spotify:'))
-        ) {
+        const text = (await api.readClipboardText()).trim();
+        if (disposed || !text || text === lastClipboardSeenRef.current) return;
+
+        const isSpotifyUri = /^spotify:(?:track|album|playlist|artist):[a-zA-Z0-9]+$/i.test(text);
+        let isHttpUrl = false;
+        if (/^https?:\/\//i.test(text)) {
+          try {
+            const parsed = new URL(text);
+            isHttpUrl = Boolean(parsed.hostname) && !parsed.username && !parsed.password;
+          } catch {
+            isHttpUrl = false;
+          }
+        }
+
+        if (isSpotifyUri || isHttpUrl) {
           lastClipboardSeenRef.current = text;
           setClipboardUrl(text);
         }
       } catch {
-        // clipboard permission denied or unavailable
+        // Clipboard permission may be denied by the WebView; retry on the next focus tick.
+      } finally {
+        checking = false;
       }
     };
-    window.addEventListener('focus', checkClipboard);
-    return () => window.removeEventListener('focus', checkClipboard);
+
+    const handleFocus = () => { void checkClipboard(); };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void checkClipboard();
+    };
+
+    void checkClipboard();
+    const pollId = window.setInterval(() => { void checkClipboard(); }, 1800);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(pollId);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [settings?.clipboard_monitoring]);
 
   const executeNativeClose = async () => {
@@ -197,7 +270,6 @@ export default function App() {
 
   const handleInitiateClose = async () => {
     if (settings?.tray_minimize_on_close && typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
       await getCurrentWindow().hide().catch(() => executeNativeClose());
       return;
     }
@@ -300,7 +372,7 @@ export default function App() {
       },
       onNotification: (notif) => {
         if (!mounted) return;
-        setNotifications((prev) => [notif, ...prev]);
+        setNotifications((prev) => [notif, ...prev.filter((item) => item.id !== notif.id)]);
       },
       onSettingsUpdated: (newSettings) => {
         if (!mounted) return;
@@ -444,8 +516,16 @@ export default function App() {
               setInitialInspectUrl(url);
               setIsNewDownloadOpen(true);
             }}
-            onOpenNotifications={() => setIsNotificationsOpen(true)}
-            unreadNotificationsCount={notifications.length}
+            onOpenNotifications={async () => {
+              setIsNotificationsOpen(true);
+              try {
+                await api.markAllNotificationsRead();
+                setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
+              } catch (error) {
+                console.error('Failed to mark notifications as read:', error);
+              }
+            }}
+            unreadNotificationsCount={notifications.filter((item) => !item.isRead).length}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
             theme={theme}
@@ -455,6 +535,10 @@ export default function App() {
 
           {activeTab === 'downloads' && (
             <ActionToolbar
+              onNewDownload={() => {
+                setInitialInspectUrl('');
+                setIsNewDownloadOpen(true);
+              }}
               selectedTask={selectedTask}
               activeCount={activeCount}
               pausedCount={pausedCount}
@@ -468,7 +552,7 @@ export default function App() {
           )}
 
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden relative">
-            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-4 select-text">
+            <main className="flex-1 min-w-0 min-h-0 overflow-y-auto p-3 sm:p-5 pb-5 select-text">
               <ClipboardMonitorBanner
                 detectedUrl={clipboardUrl}
                 onInspect={handleQuickInspect}
@@ -510,48 +594,75 @@ export default function App() {
               )}
 
               {activeTab === 'history' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <HistoryView
                   tasks={tasks}
                   onClearHistory={(deleteFiles) => api.clearCompleted(deleteFiles)}
                   onDeleteTask={(id, deleteFile) => api.deleteTask(id, deleteFile)}
                   onDeleteFile={(id) => api.deleteDownloadedFile(id)}
                   onSelectTask={(t) => setSelectedTaskId(t.id)}
+                  onImportHistory={async (records) => {
+                    const updated = await api.importHistory(records);
+                    setTasks(updated);
+                    return updated;
+                  }}
                 />
+                </Suspense>
               )}
 
               {activeTab === 'diagnostics' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <DiagnosticsView
                   engineStatus={engineStatus}
                   onRefresh={() => runEngineScan(true)}
                   installProgress={installProgress}
                 />
+                </Suspense>
               )}
 
               {activeTab === 'settings' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <SettingsView
                   settings={settings}
                   onSaveSettings={handleSaveSettings}
                   onResetSettings={handleResetSettings}
                 />
+                </Suspense>
               )}
             </main>
 
             {/* Keep the download inspector inside the download workspace only. */}
             {activeTab === 'downloads' && selectedTask && (
-              <DownloadDetailsDrawer
+              <Suspense fallback={null}>
+                <DownloadDetailsDrawer
                 task={selectedTask}
                 onClose={() => setSelectedTaskId(null)}
                 onRetryTask={(id) => api.retryTask(id)}
+                onOpenProgress={() => { setProgressMonitorTaskId(selectedTask?.id || null); setIsProgressMonitorOpen(true); }}
               />
-            )}
+                </Suspense>
+              )}
           </div>
         </div>
       </div>
 
       <StatusBar tasks={tasks} />
 
+      <Suspense fallback={null}>
+        <DownloadProgressWindow
+        task={isProgressMonitorOpen ? tasks.find((item) => item.id === progressMonitorTaskId) || null : null}
+        onClose={() => { setIsProgressMonitorOpen(false); setProgressMonitorTaskId(null); }}
+        onPause={(id) => api.pauseTask(id)}
+        onResume={(id) => api.resumeTask(id)}
+        onCancel={(id) => api.cancelTask(id)}
+        onRetry={(id) => api.retryTask(id)}
+        onOpenFolder={(task) => api.openTaskFolder(task)}
+      />
+      </Suspense>
+
       {/* New Download Modal */}
-      <NewDownloadModal
+      <Suspense fallback={null}>
+        <NewDownloadModal
         isOpen={isNewDownloadOpen}
         onClose={() => setIsNewDownloadOpen(false)}
         initialUrl={initialInspectUrl}
@@ -568,9 +679,11 @@ export default function App() {
           setActiveTab('settings');
         }}
       />
+      </Suspense>
 
       {/* Notifications Modal */}
-      <NotificationCenterModal
+      <Suspense fallback={null}>
+        <NotificationCenterModal
         isOpen={isNotificationsOpen}
         onClose={() => setIsNotificationsOpen(false)}
         notifications={notifications}
@@ -578,7 +691,12 @@ export default function App() {
           await api.clearNotifications();
           setNotifications([]);
         }}
+        onMarkAllRead={async () => {
+          await api.markAllNotificationsRead();
+          setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
+        }}
       />
+      </Suspense>
 
       {/* Safe Close Confirmation */}
       <SafeCloseDialog

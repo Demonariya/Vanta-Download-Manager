@@ -40,6 +40,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .setup(move |app| {
+            vanta_lib::browser_bridge::start(app.handle().clone());
             let show_item = MenuItem::with_id(app, "show", "Open VANTA", true, None::<&str>)?;
             let exit_item = MenuItem::with_id(app, "exit", "Exit VANTA", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
@@ -85,7 +86,12 @@ fn main() {
                 .build(app)?;
 
             if let Some(state) = app.try_state::<AppState>() {
-                if state.get_settings().auto_resume_on_startup {
+                // Active statuses persisted in SQLite cannot represent live worker
+                // processes after a crash or forced shutdown. Recover them before
+                // scheduling so stale "Downloading" tasks do not occupy slots forever.
+                let _recovered = recover_interrupted_tasks(app.handle(), &state);
+                let settings = state.get_settings();
+                if settings.auto_resume_on_startup {
                     schedule_next(app.handle(), &state);
                 }
             }
@@ -95,7 +101,7 @@ fn main() {
             let scheduler_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                     scheduler_tick(&scheduler_app);
                 }
             });
@@ -126,13 +132,13 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_tasks, create_task, pause_task, resume_task, cancel_task, retry_task,
+            get_tasks, create_task, import_history, read_clipboard_text, pause_task, resume_task, cancel_task, retry_task,
             delete_task, delete_downloaded_file, pause_all, resume_all, clear_completed,
             clear_failed, clear_all, move_task, get_queues, create_queue, rename_queue,
-            delete_queue, start_queue, stop_queue, move_tasks_to_queue, update_task_meta,
+            delete_queue, start_queue, stop_queue, update_queue_limits, move_tasks_to_queue, update_task_meta,
             rename_task_file, bulk_task_action, get_settings, save_settings, reset_settings,
             validate_python_executable, browse_python_executable, get_notifications,
-            clear_notifications, get_engine_status, get_managed_engine_info, install_engine,
+            clear_notifications, mark_all_notifications_read, get_engine_status, get_managed_engine_info, install_engine,
             install_all_engines, remove_managed_engine, run_diagnostics, check_engine_updates,
             update_engine, update_all_engines, inspect_url, cancel_inspection, get_cookie_status,
             validate_cookies_text, save_cookies, remove_cookies, detect_browsers,

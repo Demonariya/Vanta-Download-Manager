@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { History, Search, Copy, Trash2, Download, Check, FileX } from 'lucide-react';
+import React, { useState, useMemo, useRef } from 'react';
+import { History, Search, Copy, Trash2, Download, Check, FileX, Upload } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
 import { computeHistoryStats } from '../utils/queue-logic';
@@ -13,6 +13,7 @@ interface HistoryViewProps {
   onDeleteTask: (id: string, deleteFile?: boolean) => void;
   onDeleteFile?: (id: string) => void;
   onSelectTask?: (task: DownloadTask) => void;
+  onImportHistory: (tasks: DownloadTask[]) => Promise<DownloadTask[]>;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({
@@ -21,9 +22,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   onDeleteTask,
   onDeleteFile,
   onSelectTask,
+  onImportHistory,
 }) => {
   const [search, setSearch] = useState('');
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'failed' | 'cancelled'>('all');
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'title' | 'largest'>('newest');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -35,23 +41,25 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 
   const stats = useMemo(() => computeHistoryStats(tasks), [tasks]);
 
-  const historyTasks = useMemo(
-    () =>
-      tasks.filter((t) => {
+  const historyTasks = useMemo(() => {
+    const filtered = tasks.filter((t) => {
         if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'cancelled') {
           return false;
         }
         if (statusFilter !== 'all' && t.status !== statusFilter) return false;
         if (!search.trim()) return true;
-        const q = search.toLowerCase();
-        return (
-          t.title.toLowerCase().includes(q) ||
-          t.url.toLowerCase().includes(q) ||
-          (t.uploader && t.uploader.toLowerCase().includes(q))
-        );
-      }),
-    [tasks, statusFilter, search]
-  );
+        const q = search.trim().toLocaleLowerCase();
+        return [t.title, t.url, t.uploader, t.engine, t.ext, t.output_path]
+          .some((value) => String(value || '').toLocaleLowerCase().includes(q));
+      });
+    return filtered.sort((a, b) => {
+      if (sortOrder === 'title') return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+      if (sortOrder === 'largest') return (b.downloaded_bytes || b.total_bytes || 0) - (a.downloaded_bytes || a.total_bytes || 0);
+      const aDate = new Date(a.completed_at || a.created_at).getTime() || 0;
+      const bDate = new Date(b.completed_at || b.created_at).getTime() || 0;
+      return sortOrder === 'oldest' ? aDate - bDate : bDate - aDate;
+    });
+  }, [tasks, statusFilter, search, sortOrder]);
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard?.writeText(text).catch(() => {});
@@ -59,19 +67,69 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     setTimeout(() => setCopiedId(null), 1800);
   };
 
-  const handleExportJson = () => {
-    const dataStr =
-      'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(historyTasks, null, 2));
+  const downloadTextFile = (content: string, mimeType: string, extension: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    anchor.setAttribute('href', dataStr);
-    anchor.setAttribute('download', `vanta_history_${Date.now()}.json`);
+    anchor.href = url;
+    anchor.download = `vanta_history_${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleExportJson = () => {
+    downloadTextFile(JSON.stringify(historyTasks, null, 2), 'application/json;charset=utf-8', 'json');
+  };
+
+  const handleImportJson = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsImporting(true);
+    setImportNotice(null);
+    try {
+      if (file.size > 5 * 1024 * 1024) throw new Error('History import is limited to 5 MiB per file.');
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!Array.isArray(parsed)) {
+        throw new Error('The selected file must contain a VANTA history JSON array.');
+      }
+      if (parsed.length > 5000) throw new Error('A maximum of 5,000 history records can be imported at once.');
+
+      const records = parsed.filter((item: any) =>
+        item &&
+        typeof item === 'object' &&
+        typeof item.title === 'string' &&
+        item.title.trim().length > 0 &&
+        typeof item.url === 'string' &&
+        item.url.trim().length > 0 &&
+        ['completed', 'failed', 'cancelled'].includes(item.status)
+      ) as DownloadTask[];
+
+      if (records.length === 0) {
+        throw new Error('No valid completed, failed, or cancelled VANTA history records were found.');
+      }
+
+      await onImportHistory(records);
+      const skipped = parsed.length - records.length;
+      setImportNotice(
+        `Imported ${records.length} record(s)${skipped > 0 ? `; skipped ${skipped} unsupported record(s)` : ''}.`
+      );
+    } catch (error) {
+      setImportNotice(error instanceof Error ? error.message : 'History import failed.');
+    } finally {
+      setIsImporting(false);
+      event.target.value = '';
+    }
   };
 
   const handleExportCsv = () => {
-    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const esc = (v: unknown) => {
+      let value = String(v ?? '');
+      if (/^[=+@-]/.test(value) || value.startsWith('\t') || value.startsWith('\r')) value = `'${value}`;
+      return `"${value.replace(/"/g, '""')}"`;
+    };
     const rows = [
       ['id', 'title', 'url', 'engine', 'status', 'ext', 'bytes', 'completed_at'].join(','),
       ...historyTasks.map((t) =>
@@ -87,27 +145,43 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         ].join(',')
       ),
     ].join('\n');
-    const dataStr = 'data:text/csv;charset=utf-8,' + encodeURIComponent(rows);
-    const anchor = document.createElement('a');
-    anchor.setAttribute('href', dataStr);
-    anchor.setAttribute('download', `vanta_history_${Date.now()}.csv`);
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
+    downloadTextFile(`\uFEFF${rows}`, 'text/csv;charset=utf-8', 'csv');
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
         <div>
           <h1 className="text-base font-semibold text-[var(--vanta-text)]">Download History</h1>
           <p className="text-xs text-[var(--vanta-muted)] mt-0.5">
             Completed, failed, and cancelled transfer archive
           </p>
+          {importNotice && (
+            <p role="status" aria-live="polite" className="mt-2 text-[11px] text-[var(--vanta-muted)]">
+              {importNotice}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleImportJson}
+            className="hidden"
+            aria-label="Import VANTA history JSON"
+          />
+          <button
+            type="button"
+            disabled={isImporting}
+            onClick={() => importInputRef.current?.click()}
+            className="px-3 py-1.5 text-xs font-medium text-[var(--vanta-text-secondary)] bg-[var(--vanta-surface-2)] hover:bg-[var(--vanta-surface-hover)] border border-[var(--vanta-border)] rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>{isImporting ? 'Importing…' : 'Import JSON'}</span>
+          </button>
           <button
             type="button"
             onClick={handleExportJson}
@@ -147,7 +221,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
       </div>
 
       {/* Real Computed Stats Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="px-4 py-3 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)]">
           <p className="text-[11px] text-[var(--vanta-muted)]">Completed Files</p>
           <p className="text-lg font-semibold font-mono tabular-nums text-emerald-700 dark:text-[#3fb950]">
@@ -200,6 +274,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           <option value="completed">Completed</option>
           <option value="failed">Failed</option>
           <option value="cancelled">Cancelled</option>
+        </select>
+        <select
+          aria-label="Sort download history"
+          value={sortOrder}
+          onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}
+          className="bg-[var(--vanta-surface)] border border-[var(--vanta-border)] rounded-lg text-xs px-3 py-2 text-[var(--vanta-text)]"
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="title">Title A–Z</option>
+          <option value="largest">Largest first</option>
         </select>
       </div>
 
