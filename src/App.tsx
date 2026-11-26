@@ -474,15 +474,7 @@ export default function App() {
         onOpenHistory={() => setActiveTab('history')}
         onOpenDiagnostics={() => setActiveTab('diagnostics')}
         onOpenSettings={() => setActiveTab('settings')}
-        onOpenNotifications={async () => {
-              setIsNotificationsOpen(true);
-              try {
-                await api.markAllNotificationsRead();
-                setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
-              } catch (error) {
-                console.error('Failed to mark notifications as read:', error);
-              }
-            }}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
         onCycleTheme={handleCycleTheme}
         onExit={handleInitiateClose}
       />
