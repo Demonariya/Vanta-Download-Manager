@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
@@ -18,22 +18,30 @@ import {
 } from './types';
 import { api } from './services/api';
 import { isActiveTaskStatus } from './utils/download-core';
-import { Sidebar, ActiveTab } from './components/Sidebar';
+import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
-import { DownloadCenterView, QueueScopeFilter } from './components/DownloadCenterView';
-import { DownloadDetailsDrawer } from './components/DownloadDetailsDrawer';
-import { DownloadProgressWindow } from './components/DownloadProgressWindow';
+import { DownloadCenterView, type QueueScopeFilter } from './components/DownloadCenterView';
+
+
 import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
-import { HistoryView } from './components/HistoryView';
-import { DiagnosticsView } from './components/DiagnosticsView';
-import { SettingsView } from './components/SettingsView';
-import { NewDownloadModal } from './components/NewDownloadModal';
-import { NotificationCenterModal } from './components/NotificationCenterModal';
+
+
+
+
+
 import { TitleBar } from './components/TitleBar';
 import { SafeCloseDialog } from './components/SafeCloseDialog';
 import { AppMenuBar } from './components/AppMenuBar';
 import { ActionToolbar } from './components/ActionToolbar';
 import { StatusBar } from './components/StatusBar';
+
+const DownloadDetailsDrawer = lazy(() => import('./components/DownloadDetailsDrawer').then((module) => ({ default: module.DownloadDetailsDrawer })));
+const DownloadProgressWindow = lazy(() => import('./components/DownloadProgressWindow').then((module) => ({ default: module.DownloadProgressWindow })));
+const HistoryView = lazy(() => import('./components/HistoryView').then((module) => ({ default: module.HistoryView })));
+const DiagnosticsView = lazy(() => import('./components/DiagnosticsView').then((module) => ({ default: module.DiagnosticsView })));
+const SettingsView = lazy(() => import('./components/SettingsView').then((module) => ({ default: module.SettingsView })));
+const NewDownloadModal = lazy(() => import('./components/NewDownloadModal').then((module) => ({ default: module.NewDownloadModal })));
+const NotificationCenterModal = lazy(() => import('./components/NotificationCenterModal').then((module) => ({ default: module.NotificationCenterModal })));
 
 function makeCheckingEngine(): EngineInfo {
   return {
@@ -263,7 +271,6 @@ export default function App() {
 
   const handleInitiateClose = async () => {
     if (settings?.tray_minimize_on_close && typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
       await getCurrentWindow().hide().catch(() => executeNativeClose());
       return;
     }
@@ -588,6 +595,7 @@ export default function App() {
               )}
 
               {activeTab === 'history' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <HistoryView
                   tasks={tasks}
                   onClearHistory={(deleteFiles) => api.clearCompleted(deleteFiles)}
@@ -600,33 +608,40 @@ export default function App() {
                     return updated;
                   }}
                 />
-              )}
+
+                </Suspense>              )}
 
               {activeTab === 'diagnostics' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <DiagnosticsView
                   engineStatus={engineStatus}
                   onRefresh={() => runEngineScan(true)}
                   installProgress={installProgress}
                 />
-              )}
+
+                </Suspense>              )}
 
               {activeTab === 'settings' && (
+                <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
                 <SettingsView
                   settings={settings}
                   onSaveSettings={handleSaveSettings}
                   onResetSettings={handleResetSettings}
                 />
-              )}
+
+                </Suspense>              )}
             </main>
 
             {/* Keep the download inspector inside the download workspace only. */}
             {activeTab === 'downloads' && selectedTask && (
+              <Suspense fallback={null}>
               <DownloadDetailsDrawer
                 task={selectedTask}
                 onClose={() => setSelectedTaskId(null)}
                 onRetryTask={(id) => api.retryTask(id)}
                 onOpenProgress={() => { setProgressMonitorTaskId(selectedTask?.id || null); setIsProgressMonitorOpen(true); }}
               />
+              </Suspense>
             )}
           </div>
         </div>
@@ -634,6 +649,7 @@ export default function App() {
 
       <StatusBar tasks={tasks} />
 
+      <Suspense fallback={null}>
       <DownloadProgressWindow
         task={isProgressMonitorOpen ? tasks.find((item) => item.id === progressMonitorTaskId) || null : null}
         onClose={() => { setIsProgressMonitorOpen(false); setProgressMonitorTaskId(null); }}
@@ -643,8 +659,10 @@ export default function App() {
         onRetry={(id) => api.retryTask(id)}
         onOpenFolder={(task) => api.openTaskFolder(task)}
       />
+      </Suspense>
 
       {/* New Download Modal */}
+      <Suspense fallback={null}>
       <NewDownloadModal
         isOpen={isNewDownloadOpen}
         onClose={() => setIsNewDownloadOpen(false)}
@@ -662,8 +680,10 @@ export default function App() {
           setActiveTab('settings');
         }}
       />
+      </Suspense>
 
       {/* Notifications Modal */}
+      <Suspense fallback={null}>
       <NotificationCenterModal
         isOpen={isNotificationsOpen}
         onClose={() => setIsNotificationsOpen(false)}
@@ -677,6 +697,7 @@ export default function App() {
           setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
         }}
       />
+      </Suspense>
 
       {/* Safe Close Confirmation */}
       <SafeCloseDialog
