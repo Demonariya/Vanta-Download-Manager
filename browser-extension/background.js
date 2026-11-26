@@ -13,9 +13,11 @@ async function sendToVanta(url, title = '', source = 'context-menu') {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: 'vanta-link', title: 'Download link with VANTA', contexts: ['link'] });
-  chrome.contextMenus.create({ id: 'vanta-media', title: 'Download media with VANTA', contexts: ['video', 'audio'] });
-  chrome.contextMenus.create({ id: 'vanta-page', title: 'Send page to VANTA', contexts: ['page'] });
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: 'vanta-link', title: 'Download link with VANTA', contexts: ['link'] });
+    chrome.contextMenus.create({ id: 'vanta-media', title: 'Download media with VANTA', contexts: ['video', 'audio'] });
+    chrome.contextMenus.create({ id: 'vanta-page', title: 'Send page to VANTA', contexts: ['page'] });
+  });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
