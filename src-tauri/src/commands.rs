@@ -72,6 +72,14 @@ fn should_schedule_outside_window(
     scheduler_open || manual_ids.contains(task_id)
 }
 
+fn should_bypass_paused_queue(
+    queue_paused: bool,
+    task_id: &str,
+    manual_ids: &HashSet<String>,
+) -> bool {
+    !queue_paused || manual_ids.contains(task_id)
+}
+
 struct AtomicFlagGuard(Arc<AtomicBool>);
 
 impl Drop for AtomicFlagGuard {
@@ -2025,11 +2033,15 @@ fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
     }
 
     let settings = state.get_settings();
-    if state
+    let manual_ids = manual_pending_tasks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let queue_is_paused = state
         .get_queues()
         .iter()
-        .any(|queue| queue.id == task.queue_id && queue.is_paused)
-    {
+        .any(|queue| queue.id == task.queue_id && queue.is_paused);
+    if !should_bypass_paused_queue(queue_is_paused, &task.id, &manual_ids) {
         return format!("queue '{}' is paused", task.queue_id);
     }
 
@@ -2126,8 +2138,13 @@ fn schedule_next_with_manual_tasks(
         .into_iter()
         .filter(|task| {
             if task.status != TaskStatus::Queued
-                || paused_queues.contains(&task.queue_id)
-                || !should_schedule_outside_window(scheduler_open, &task.id, &pending_manual_ids) {
+                || !should_bypass_paused_queue(
+                    paused_queues.contains(&task.queue_id),
+                    &task.id,
+                    &pending_manual_ids,
+                )
+                || !should_schedule_outside_window(scheduler_open, &task.id, &pending_manual_ids)
+            {
                 return false;
             }
             let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
@@ -4330,6 +4347,14 @@ mod scheduler_window_tests {
         assert!(should_schedule_outside_window(false, "manual-task", &manual_ids));
         assert!(!should_schedule_outside_window(false, "automatic-task", &manual_ids));
         assert!(should_schedule_outside_window(true, "automatic-task", &manual_ids));
+    }
+
+    #[test]
+    fn explicit_manual_downloads_bypass_a_stopped_queue_but_automatic_tasks_do_not() {
+        let manual_ids = HashSet::from(["manual-task".to_string()]);
+        assert!(should_bypass_paused_queue(true, "manual-task", &manual_ids));
+        assert!(!should_bypass_paused_queue(true, "automatic-task", &manual_ids));
+        assert!(should_bypass_paused_queue(false, "automatic-task", &manual_ids));
     }
 
     #[test]
