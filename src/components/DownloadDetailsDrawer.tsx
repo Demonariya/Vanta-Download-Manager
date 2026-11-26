@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, FolderOpen, FileCheck2, Edit3, Copy, AlertCircle, RefreshCw,
   Info, ListVideo, Captions, Music2, Download, ClipboardList, FileDown,
-  Search, FileText, ArrowLeftRight, Film, Gauge, Network, HardDrive,
+  Search, FileText, ArrowLeftRight, Film, Gauge,
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { formatBytes, formatDuration } from '../utils/engine-parser';
@@ -20,6 +20,8 @@ interface DownloadDetailsDrawerProps {
 
 type InspectorTab = 'overview' | 'file' | 'transfer' | 'media' | 'playlist' | 'logs';
 type LogFilter = 'all' | 'info' | 'warn' | 'error';
+
+const EMPTY_LOGS: NonNullable<DownloadTask['logs']> = [];
 
 const valueOrDash = (value?: string | number | null) =>
   value === undefined || value === null || value === '' ? '—' : String(value);
@@ -57,21 +59,21 @@ export const DownloadDetailsDrawer: React.FC<DownloadDetailsDrawerProps> = ({ ta
     setShowProperties(false);
   }, [task?.id]);
 
-  if (!task) return null;
-
-  const audioTask = task.is_audio_only || task.engine === 'spotdl';
-  const lyrics = task.lyrics_lrc_content?.trim() || '';
-  const taskLogs = task.logs || [];
-  const effectiveBytes = task.status === 'completed'
-    ? (task.downloaded_bytes || task.total_bytes)
-    : task.downloaded_bytes;
-  const displayedTotalSize = task.status === 'completed' ? effectiveBytes : task.total_bytes;
+  const taskLogs = task?.logs || EMPTY_LOGS;
   const filteredLogs = useMemo(() => taskLogs.filter((entry) => {
     const matchesLevel = logFilter === 'all' || entry.level === logFilter;
     const query = logSearch.trim().toLowerCase();
     return matchesLevel && (!query || entry.message.toLowerCase().includes(query) || entry.timestamp.toLowerCase().includes(query));
   }), [taskLogs, logFilter, logSearch]);
 
+  if (!task) return null;
+
+  const audioTask = task.is_audio_only || task.engine === 'spotdl';
+  const lyrics = task.lyrics_lrc_content?.trim() || '';
+  const effectiveBytes = task.status === 'completed'
+    ? (task.downloaded_bytes || task.total_bytes)
+    : task.downloaded_bytes;
+  const displayedTotalSize = task.status === 'completed' ? effectiveBytes : task.total_bytes;
   const handleRename = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!filenameDraft.trim()) return;
