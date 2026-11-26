@@ -580,7 +580,7 @@ export const DownloadCenterView: React.FC<DownloadCenterViewProps> = ({
               : value === 'paused' ? pausedCount
               : value === 'completed' ? completedCount
               : value === 'failed' ? failedCount
-              : queueStatusCounts.queued;
+              : queueTasks.filter((task) => task.status === 'queued').length;
             return (
               <button
                 key={value}
