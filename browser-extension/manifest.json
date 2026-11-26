@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "VANTA Browser Integration",
+  "version": "0.1.0",
+  "description": "Send supported media and download links from Chrome or Edge to VANTA Download Manager.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
+  "host_permissions": ["http://127.0.0.1:47831/*"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Send to VANTA",
+    "default_popup": "popup.html"
+  }
+}
