@@ -22,7 +22,6 @@ import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { DownloadCenterView, type QueueScopeFilter } from './components/DownloadCenterView';
 
-
 import { ClipboardMonitorBanner } from './components/ClipboardMonitorBanner';
 
 
@@ -608,8 +607,8 @@ export default function App() {
                     return updated;
                   }}
                 />
-
-                </Suspense>              )}
+                </Suspense>
+              )}
 
               {activeTab === 'diagnostics' && (
                 <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
@@ -618,8 +617,8 @@ export default function App() {
                   onRefresh={() => runEngineScan(true)}
                   installProgress={installProgress}
                 />
-
-                </Suspense>              )}
+                </Suspense>
+              )}
 
               {activeTab === 'settings' && (
                 <Suspense fallback={<div className="p-6 text-sm text-[var(--vanta-muted)]">Loading view…</div>}>
@@ -628,21 +627,21 @@ export default function App() {
                   onSaveSettings={handleSaveSettings}
                   onResetSettings={handleResetSettings}
                 />
-
-                </Suspense>              )}
+                </Suspense>
+              )}
             </main>
 
             {/* Keep the download inspector inside the download workspace only. */}
             {activeTab === 'downloads' && selectedTask && (
               <Suspense fallback={null}>
-              <DownloadDetailsDrawer
+                <DownloadDetailsDrawer
                 task={selectedTask}
                 onClose={() => setSelectedTaskId(null)}
                 onRetryTask={(id) => api.retryTask(id)}
                 onOpenProgress={() => { setProgressMonitorTaskId(selectedTask?.id || null); setIsProgressMonitorOpen(true); }}
               />
-              </Suspense>
-            )}
+                </Suspense>
+              )}
           </div>
         </div>
       </div>
@@ -650,7 +649,7 @@ export default function App() {
       <StatusBar tasks={tasks} />
 
       <Suspense fallback={null}>
-      <DownloadProgressWindow
+        <DownloadProgressWindow
         task={isProgressMonitorOpen ? tasks.find((item) => item.id === progressMonitorTaskId) || null : null}
         onClose={() => { setIsProgressMonitorOpen(false); setProgressMonitorTaskId(null); }}
         onPause={(id) => api.pauseTask(id)}
@@ -663,7 +662,7 @@ export default function App() {
 
       {/* New Download Modal */}
       <Suspense fallback={null}>
-      <NewDownloadModal
+        <NewDownloadModal
         isOpen={isNewDownloadOpen}
         onClose={() => setIsNewDownloadOpen(false)}
         initialUrl={initialInspectUrl}
@@ -684,7 +683,7 @@ export default function App() {
 
       {/* Notifications Modal */}
       <Suspense fallback={null}>
-      <NotificationCenterModal
+        <NotificationCenterModal
         isOpen={isNotificationsOpen}
         onClose={() => setIsNotificationsOpen(false)}
         notifications={notifications}
