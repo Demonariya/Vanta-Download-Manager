@@ -26,6 +26,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 static SCHEDULER_MANAGED_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static MANUAL_PENDING_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn manual_pending_tasks() -> &'static Mutex<HashSet<String>> {
+    MANUAL_PENDING_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 fn scheduler_managed_tasks() -> &'static Mutex<HashSet<String>> {
     SCHEDULER_MANAGED_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -41,6 +46,14 @@ fn clear_scheduler_managed_task(task_id: &str) {
 
 fn is_scheduler_managed_task(task_id: &str) -> bool {
     scheduler_managed_tasks().lock().unwrap_or_else(|e| e.into_inner()).contains(task_id)
+}
+
+fn clear_manual_pending_task(task_id: &str) {
+    manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner()).remove(task_id);
+}
+
+fn should_schedule_outside_window(scheduler_open: bool, task_id: &str, manual_ids: &HashSet<String>) -> bool {
+    scheduler_open || manual_ids.contains(task_id)
 }
 
 struct AtomicFlagGuard(Arc<AtomicBool>);
@@ -754,6 +767,7 @@ pub async fn create_task(
 #[tauri::command]
 pub fn pause_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     // Persist the paused state before terminating the child. The worker checks this
     // state before finalization, preventing a pause/exit race from marking the task complete.
     if let Some(mut task) = state.get_task_by_id(&id) {
@@ -801,6 +815,7 @@ pub fn resume_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -853,8 +868,9 @@ pub fn delete_task(
     state: State<'_, AppState>,
     id: String,
     delete_file: Option<bool>,
-) -> Result<(), String> {
+ ) -> Result<(), String> {
     clear_scheduler_managed_task(&id);
+    clear_manual_pending_task(&id);
     let removed_pid = {
         let mut procs = state
             .active_processes
@@ -891,6 +907,8 @@ pub fn pause_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
     let tasks = state.get_tasks();
     for mut task in tasks {
         if task.status.is_active() || task.status == TaskStatus::Queued {
+            clear_scheduler_managed_task(&task.id);
+            clear_manual_pending_task(&task.id);
             task.status = TaskStatus::Paused;
             task.current_phase = "Paused".to_string();
             task.speed_str = "0 B/s".to_string();
@@ -1937,6 +1955,8 @@ pub fn scheduler_tick(app: &AppHandle) {
             }
         }
     }
+        schedule_next(app, &state);
+    }
 }
 
 fn effective_task_bandwidth_limit_bytes_per_second(
@@ -1985,10 +2005,6 @@ fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
     }
 
     let settings = state.get_settings();
-    if !scheduler_window_is_open(&settings) {
-        return "the configured scheduler window is currently closed".to_string();
-    }
-
     if state
         .get_queues()
         .iter()
@@ -2015,10 +2031,6 @@ fn queued_task_block_reason(state: &AppState, task: &DownloadTask) -> String {
         }
     }
 
-    if settings.scheduler.enabled && !scheduler_window_is_open(&settings) {
-        return format!("scheduler is enabled and its allowed time window is closed ({}–{})", settings.scheduler.start_time, settings.scheduler.stop_time);
-    }
-
     "task is queued but no scheduler slot was claimed; check application shutdown state and queue configuration".to_string()
 }
 
@@ -2043,6 +2055,11 @@ pub fn schedule_next(app: &AppHandle, state: &AppState) {
 }
 
 fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_task_ids: &HashSet<String>) {
+    {
+        let mut pending = manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner());
+        pending.extend(manual_task_ids.iter().cloned());
+    }
+    let pending_manual_ids = manual_pending_tasks().lock().unwrap_or_else(|e| e.into_inner()).clone();
     // Multiple UI commands can request scheduling concurrently. Keep the snapshot,
     // slot calculation, and Queued -> Connecting claims in one critical section so
     // the same task cannot be launched twice or global/per-queue limits exceeded.
@@ -2054,7 +2071,7 @@ fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_tas
 
     let settings = state.get_settings();
     let scheduler_open = scheduler_window_is_open(&settings);
-    if !scheduler_open && manual_task_ids.is_empty() {
+    if !scheduler_open && pending_manual_ids.is_empty() {
         return;
     }
     let tasks = state.get_tasks();
@@ -2083,7 +2100,7 @@ fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_tas
         .filter(|task| {
             if task.status != TaskStatus::Queued
                 || paused_queues.contains(&task.queue_id)
-                || (!scheduler_open && !manual_task_ids.contains(&task.id)) {
+                || !should_schedule_outside_window(scheduler_open, &task.id, &pending_manual_ids) {
                 return false;
             }
             let queue_cap = queue_limits.get(&task.queue_id).copied().unwrap_or(0);
@@ -2117,8 +2134,9 @@ fn schedule_next_with_manual_tasks(app: &AppHandle, state: &AppState, manual_tas
 
         next_task.status = TaskStatus::Connecting;
         next_task.current_phase = if manual_task_ids.contains(&next_task.id) { "Starting manually..." } else { "Starting engine..." }.to_string();
-        if manual_task_ids.contains(&next_task.id) {
+        if pending_manual_ids.contains(&next_task.id) {
             clear_scheduler_managed_task(&next_task.id);
+            clear_manual_pending_task(&next_task.id);
         } else if settings.scheduler.enabled {
             mark_scheduler_managed_task(&next_task.id);
         }
