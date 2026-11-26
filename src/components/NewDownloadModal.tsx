@@ -1775,7 +1775,7 @@ export const NewDownloadModal: React.FC<NewDownloadModalProps> = ({
                   {metadata
                     ? (selectedTab === 'audio'
                       ? `${selectedAudioFormat.toUpperCase()} · ${selectedAudioBitrate}`
-                      : (curatedVideoOptions.find((option) => option.format_id === selectedFormatId)?.label || selectedContainer.toUpperCase()))
+                      : (curatedVideoOptions.find((option) => option.id === selectedFormatId || option.formatSelector === selectedFormatId)?.label || selectedContainer.toUpperCase()))
                     : 'Not analyzed'}
                 </div>
               </div>
