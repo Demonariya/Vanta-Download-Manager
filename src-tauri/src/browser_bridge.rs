@@ -151,3 +151,20 @@ pub fn start(app: AppHandle) {
         }
     });
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::valid_media_url;
+
+    #[test]
+    fn accepts_only_well_formed_http_media_urls() {
+        assert!(valid_media_url("https://example.com/video.mp4"));
+        assert!(valid_media_url("http://127.0.0.1:8080/media?id=1"));
+        assert!(!valid_media_url("javascript:alert(1)"));
+        assert!(!valid_media_url("file:///C:/video.mp4"));
+        assert!(!valid_media_url("https://"));
+        assert!(!valid_media_url("https://.example.com/video"));
+        assert!(!valid_media_url("https://example.com/video\nmalicious"));
+    }
+}
