@@ -672,6 +672,10 @@ export default function App() {
           await api.clearNotifications();
           setNotifications([]);
         }}
+        onMarkAllRead={async () => {
+          await api.markAllNotificationsRead();
+          setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
+        }}
       />
 
       {/* Safe Close Confirmation */}
