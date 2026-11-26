@@ -1,7 +1,7 @@
 const BRIDGE = 'http://127.0.0.1:47831/download';
 
 async function sendToVanta(url, title = '', source = 'context-menu') {
-  if (!/^https?:\\/\\//i.test(url || '')) throw new Error('Only HTTP(S) links can be sent to VANTA.');
+  if (!/^https?:\/\/i.test(url || '')) throw new Error('Only HTTP(S) links can be sent to VANTA.');
   const response = await fetch(BRIDGE, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
