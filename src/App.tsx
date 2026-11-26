@@ -366,7 +366,7 @@ export default function App() {
       },
       onNotification: (notif) => {
         if (!mounted) return;
-        setNotifications((prev) => [notif, ...prev]);
+        setNotifications((prev) => [notif, ...prev.filter((item) => item.id !== notif.id)]);
       },
       onSettingsUpdated: (newSettings) => {
         if (!mounted) return;
@@ -474,7 +474,15 @@ export default function App() {
         onOpenHistory={() => setActiveTab('history')}
         onOpenDiagnostics={() => setActiveTab('diagnostics')}
         onOpenSettings={() => setActiveTab('settings')}
-        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        onOpenNotifications={async () => {
+              setIsNotificationsOpen(true);
+              try {
+                await api.markAllNotificationsRead();
+                setNotifications((prev) => prev.map((item) => ({ ...item, isRead: true })));
+              } catch (error) {
+                console.error('Failed to mark notifications as read:', error);
+              }
+            }}
         onCycleTheme={handleCycleTheme}
         onExit={handleInitiateClose}
       />
@@ -511,7 +519,7 @@ export default function App() {
               setIsNewDownloadOpen(true);
             }}
             onOpenNotifications={() => setIsNotificationsOpen(true)}
-            unreadNotificationsCount={notifications.length}
+            unreadNotificationsCount={notifications.filter((item) => !item.isRead).length}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
             theme={theme}
