@@ -383,6 +383,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="search"
               value={sectionSearch}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.preventDefault();
+              }}
               onChange={(e) => {
                 const query = e.target.value;
                 setSectionSearch(query);
@@ -487,7 +490,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="col-span-full px-2 py-4 text-center text-[11px] text-[var(--vanta-muted)]">No matching settings sections.</p>
           )}
         </nav>
-        <div className="settings-content min-w-0 space-y-4">
+        {filteredSectionTabs.length === 0 && normalizedSearch ? (
+          <div className="rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] p-6 text-center text-xs text-[var(--vanta-muted)]">
+            No settings categories match “{sectionSearch}”. Try a term such as speed, proxy, scheduler, or cookies.
+          </div>
+        ) : (
+          <div className="settings-content min-w-0 space-y-4">
       {/* Section 1: General & Theme */}
       {section === 'general' && (
         <div className="p-4 sm:p-5 rounded-xl border border-[var(--vanta-border)] bg-[var(--vanta-surface)] space-y-5 text-xs">
@@ -1425,6 +1433,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
         </div>
+        )}
       </div>
 
       <ConfirmDialog
