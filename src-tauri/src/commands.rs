@@ -4588,14 +4588,14 @@ mod media_embedding_tests {
 
     #[test]
     fn lrc_language_is_normalized_to_iso_639_2() {
-        assert_eq!(lrc_language("[la:en]\\n[00:01.00]Hello"), "eng");
-        assert_eq!(lrc_language("[la:fa-IR]\\n[00:01.00]سلام"), "per");
+        assert_eq!(lrc_language("[la:en]\n[00:01.00]Hello"), "eng");
+        assert_eq!(lrc_language("[la:fa-IR]\n[00:01.00]سلام"), "per");
         assert_eq!(lrc_language("[00:01.00]Hello"), "und");
     }
 
     #[test]
     fn ffmetadata_escaping_preserves_multiline_and_special_characters() {
-        assert_eq!(ffmetadata_escape("a=b;#c\\nd"), "a\\=b\\;\\#c\\nd");
+        assert_eq!(ffmetadata_escape("a=b;#c\nd"), "a\\=b\\;\\#c\\nd");
     }
 
     #[test]
